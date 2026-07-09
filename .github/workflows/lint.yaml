@@ -1,0 +1,11 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    uses: dcm-project/shared-workflows/.github/workflows/go-lint.yaml@main

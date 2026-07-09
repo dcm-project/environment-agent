@@ -1,0 +1,287 @@
+openapi: 3.0.4
+info:
+  contact: {}
+  description: |
+    DCM Environment Agent API — external Service Provider registration and
+    agent status. The agent acts as the intermediary between DCM and Service
+    Providers deployed in a target environment.
+  title: Environment Agent API
+  version: v1alpha1
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: /api/v1alpha1
+
+tags:
+  - name: provider
+    description: Service Provider registration operations
+  - name: status
+    description: Agent status operations
+  - name: health
+    description: Health check operations
+
+paths:
+  /health:
+    get:
+      tags:
+        - health
+      summary: Health check
+      operationId: getHealth
+      description: Liveness health check for the Environment Agent
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /providers:
+    post:
+      tags:
+        - provider
+      summary: Register an external Service Provider
+      operationId: createProvider
+      description: |
+        Register an external Service Provider with the agent.
+        Registration is idempotent (name as natural key, create-or-update).
+        Only one SP — embedded or external — may serve a given service type
+        per agent. If the requested service type is already served by another
+        SP, registration is rejected with 409 Conflict.
+      parameters:
+        - name: id
+          in: query
+          description: Optional provider ID for idempotent registration
+          schema:
+            type: string
+            pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+            minLength: 1
+            maxLength: 63
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Provider'
+      responses:
+        '200':
+          description: Provider updated (re-registration / lease renewal)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+        '201':
+          description: Provider created (new registration)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+        '400':
+          description: Invalid input
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: |
+            Conflict — service type already served by another provider
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Validation exception
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          description: Unexpected error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /status:
+    get:
+      tags:
+        - status
+      summary: Agent status
+      operationId: getStatus
+      description: |
+        Returns the health state of all registered Service Providers
+        (both embedded and external).
+      responses:
+        '200':
+          description: Agent status with provider health information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentStatus'
+
+components:
+  schemas:
+    Provider:
+      type: object
+      description: Service Provider registration resource
+      x-aep-resource:
+        type: agent.dcm.io/provider
+        singular: provider
+        plural: providers
+        patterns:
+          - providers/{provider_id}
+      required:
+        - name
+        - endpoint
+        - service_type
+      properties:
+        id:
+          type: string
+          pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+          minLength: 1
+          maxLength: 63
+          readOnly: true
+          description: Unique identifier for the Service Provider
+          example: "sp-db-001"
+        path:
+          type: string
+          readOnly: true
+          description: Resource path identifier
+          example: "providers/sp-db-001"
+        name:
+          type: string
+          description: Unique name of the Service Provider (natural key)
+          example: "db-provider"
+        display_name:
+          type: string
+          description: Human-readable display name for the provider
+          example: "Database Service Provider"
+        endpoint:
+          type: string
+          format: uri
+          description: URL where the agent can reach the SP
+          example: "https://sp.example.com:8080"
+        service_type:
+          type: string
+          description: Type of service this provider offers (one per SP)
+          example: "database"
+        create_time:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when the provider was first registered
+        update_time:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when the provider was last updated
+
+    ProviderStatus:
+      type: object
+      description: Health status of a registered Service Provider
+      properties:
+        provider_id:
+          type: string
+          description: Unique identifier of the provider
+          example: "sp-container-001"
+        name:
+          type: string
+          description: Provider name
+          example: "k8s-container"
+        service_type:
+          type: string
+          description: Service type served by this provider
+          example: "container"
+        type:
+          type: string
+          description: Whether the SP is embedded or external
+          enum:
+            - embedded
+            - external
+          example: "embedded"
+        status:
+          type: string
+          description: Current health state of the provider
+          enum:
+            - Ready
+            - Unhealthy
+            - Unavailable
+          example: "Ready"
+        last_check:
+          type: string
+          format: date-time
+          description: Timestamp of the last health check
+          example: "2026-06-05T10:30:00Z"
+
+    AgentStatus:
+      type: object
+      description: Agent status with health of all registered SPs
+      x-aep-resource:
+        singular: agentStatus
+        plural: agentStatuses
+        singleton: true
+        type: agent.dcm.io/agentStatus
+        patterns:
+          - status
+      properties:
+        path:
+          type: string
+          description: Canonical path of the resource
+          example: "status"
+          readOnly: true
+        providers:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProviderStatus'
+
+    Health:
+      type: object
+      description: Health status singleton resource
+      x-aep-resource:
+        singular: health
+        plural: healths
+        singleton: true
+        type: agent.dcm.io/health
+        patterns:
+          - health
+      properties:
+        status:
+          type: string
+          description: Health status
+          example: "healthy"
+        path:
+          type: string
+          description: Canonical path of the resource
+          example: "health"
+          readOnly: true
+
+    Error:
+      type: object
+      description: RFC 7807 compliant error response
+      required:
+        - type
+        - title
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: URI reference identifying the error type
+          example: "https://dcm.example.com/errors/conflict"
+        title:
+          type: string
+          description: Short human-readable summary of the problem
+          example: "Service Type Conflict"
+        status:
+          type: integer
+          description: HTTP status code
+          example: 409
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence
+          example: "service type 'vm' is already served by provider 'vm-provider'"
+        instance:
+          type: string
+          format: uri-reference
+          description: URI reference for this specific error occurrence

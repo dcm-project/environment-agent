@@ -1,0 +1,21 @@
+name: Build and Push Image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to push (e.g. v1.0.0). When set, only this tag is used.'
+        required: false
+
+jobs:
+  build-push:
+    uses: dcm-project/shared-workflows/.github/workflows/build-push-quay.yaml@main
+    with:
+      image-name: environment-agent
+      version: ${{ github.event.inputs.version }}
+    secrets:
+      quay-username: ${{ secrets.QUAY_USERNAME }}
+      quay-password: ${{ secrets.QUAY_TOKEN }}
