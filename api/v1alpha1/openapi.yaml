@@ -3,7 +3,7 @@ info:
   contact: {}
   description: |
     DCM Environment Agent API — external Service Provider registration and
-    agent status. The agent acts as the intermediary between DCM and Service
+    management. The agent acts as the intermediary between DCM and Service
     Providers deployed in a target environment.
   title: Environment Agent API
   version: v1alpha1
@@ -16,9 +16,7 @@ servers:
 
 tags:
   - name: provider
-    description: Service Provider registration operations
-  - name: status
-    description: Agent status operations
+    description: Service Provider registration and management operations
   - name: health
     description: Health check operations
 
@@ -37,8 +35,64 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Health'
+        '400':
+          description: Bad request
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service unavailable
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /providers:
+    get:
+      tags:
+        - provider
+      summary: List all Service Providers
+      operationId: listProviders
+      description: |
+        Returns all registered Service Providers (both embedded and external)
+        including their current health status.
+      responses:
+        '200':
+          description: List of registered providers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Provider'
+        '400':
+          description: Bad request
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service unavailable
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
     post:
       tags:
         - provider
@@ -84,6 +138,12 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '409':
           description: |
             Conflict — service type already served by another provider
@@ -97,29 +157,63 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Error'
-        default:
-          description: Unexpected error
+        '503':
+          description: Service unavailable
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Error'
 
-  /status:
+  /providers/{provider_id}:
     get:
       tags:
-        - status
-      summary: Agent status
-      operationId: getStatus
+        - provider
+      summary: Get a Service Provider
+      operationId: getProvider
       description: |
-        Returns the health state of all registered Service Providers
-        (both embedded and external).
+        Returns a single registered Service Provider by ID, including its
+        current health status.
+      parameters:
+        - name: provider_id
+          in: path
+          required: true
+          description: Unique identifier of the provider
+          schema:
+            type: string
+            pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+            minLength: 1
+            maxLength: 63
       responses:
         '200':
-          description: Agent status with provider health information
+          description: Provider found
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AgentStatus'
+                $ref: '#/components/schemas/Provider'
+        '400':
+          description: Bad request
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Provider not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service unavailable
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
 components:
   schemas:
@@ -167,6 +261,29 @@ components:
           type: string
           description: Type of service this provider offers (one per SP)
           example: "database"
+        type:
+          type: string
+          readOnly: true
+          description: Whether the SP is embedded or external
+          enum:
+            - embedded
+            - external
+          example: "external"
+        status:
+          type: string
+          readOnly: true
+          description: Current health state of the provider
+          enum:
+            - Ready
+            - Unhealthy
+            - Unavailable
+          example: "Ready"
+        last_check:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp of the last health check
+          example: "2026-06-05T10:30:00Z"
         create_time:
           type: string
           format: date-time
@@ -177,64 +294,6 @@ components:
           format: date-time
           readOnly: true
           description: Timestamp when the provider was last updated
-
-    ProviderStatus:
-      type: object
-      description: Health status of a registered Service Provider
-      properties:
-        provider_id:
-          type: string
-          description: Unique identifier of the provider
-          example: "sp-container-001"
-        name:
-          type: string
-          description: Provider name
-          example: "k8s-container"
-        service_type:
-          type: string
-          description: Service type served by this provider
-          example: "container"
-        type:
-          type: string
-          description: Whether the SP is embedded or external
-          enum:
-            - embedded
-            - external
-          example: "embedded"
-        status:
-          type: string
-          description: Current health state of the provider
-          enum:
-            - Ready
-            - Unhealthy
-            - Unavailable
-          example: "Ready"
-        last_check:
-          type: string
-          format: date-time
-          description: Timestamp of the last health check
-          example: "2026-06-05T10:30:00Z"
-
-    AgentStatus:
-      type: object
-      description: Agent status with health of all registered SPs
-      x-aep-resource:
-        singular: agentStatus
-        plural: agentStatuses
-        singleton: true
-        type: agent.dcm.io/agentStatus
-        patterns:
-          - status
-      properties:
-        path:
-          type: string
-          description: Canonical path of the resource
-          example: "status"
-          readOnly: true
-        providers:
-          type: array
-          items:
-            $ref: '#/components/schemas/ProviderStatus'
 
     Health:
       type: object

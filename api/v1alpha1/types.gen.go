@@ -7,15 +7,15 @@ import (
 	"time"
 )
 
-// Defines values for ProviderStatusStatus.
+// Defines values for ProviderStatus.
 const (
-	Ready       ProviderStatusStatus = "Ready"
-	Unavailable ProviderStatusStatus = "Unavailable"
-	Unhealthy   ProviderStatusStatus = "Unhealthy"
+	Ready       ProviderStatus = "Ready"
+	Unavailable ProviderStatus = "Unavailable"
+	Unhealthy   ProviderStatus = "Unhealthy"
 )
 
-// Valid indicates whether the value is a known member of the ProviderStatusStatus enum.
-func (e ProviderStatusStatus) Valid() bool {
+// Valid indicates whether the value is a known member of the ProviderStatus enum.
+func (e ProviderStatus) Valid() bool {
 	switch e {
 	case Ready:
 		return true
@@ -28,14 +28,14 @@ func (e ProviderStatusStatus) Valid() bool {
 	}
 }
 
-// Defines values for ProviderStatusType.
+// Defines values for ProviderType.
 const (
-	Embedded ProviderStatusType = "embedded"
-	External ProviderStatusType = "external"
+	Embedded ProviderType = "embedded"
+	External ProviderType = "external"
 )
 
-// Valid indicates whether the value is a known member of the ProviderStatusType enum.
-func (e ProviderStatusType) Valid() bool {
+// Valid indicates whether the value is a known member of the ProviderType enum.
+func (e ProviderType) Valid() bool {
 	switch e {
 	case Embedded:
 		return true
@@ -44,13 +44,6 @@ func (e ProviderStatusType) Valid() bool {
 	default:
 		return false
 	}
-}
-
-// AgentStatus Agent status with health of all registered SPs
-type AgentStatus struct {
-	// Path Canonical path of the resource
-	Path      *string           `json:"path,omitempty"`
-	Providers *[]ProviderStatus `json:"providers,omitempty"`
 }
 
 // Error RFC 7807 compliant error response
@@ -94,6 +87,9 @@ type Provider struct {
 	// Id Unique identifier for the Service Provider
 	Id *string `json:"id,omitempty"`
 
+	// LastCheck Timestamp of the last health check
+	LastCheck *time.Time `json:"last_check,omitempty"`
+
 	// Name Unique name of the Service Provider (natural key)
 	Name string `json:"name"`
 
@@ -103,36 +99,21 @@ type Provider struct {
 	// ServiceType Type of service this provider offers (one per SP)
 	ServiceType string `json:"service_type"`
 
+	// Status Current health state of the provider
+	Status *ProviderStatus `json:"status,omitempty"`
+
+	// Type Whether the SP is embedded or external
+	Type *ProviderType `json:"type,omitempty"`
+
 	// UpdateTime Timestamp when the provider was last updated
 	UpdateTime *time.Time `json:"update_time,omitempty"`
 }
 
-// ProviderStatus Health status of a registered Service Provider
-type ProviderStatus struct {
-	// LastCheck Timestamp of the last health check
-	LastCheck *time.Time `json:"last_check,omitempty"`
+// ProviderStatus Current health state of the provider
+type ProviderStatus string
 
-	// Name Provider name
-	Name *string `json:"name,omitempty"`
-
-	// ProviderId Unique identifier of the provider
-	ProviderId *string `json:"provider_id,omitempty"`
-
-	// ServiceType Service type served by this provider
-	ServiceType *string `json:"service_type,omitempty"`
-
-	// Status Current health state of the provider
-	Status *ProviderStatusStatus `json:"status,omitempty"`
-
-	// Type Whether the SP is embedded or external
-	Type *ProviderStatusType `json:"type,omitempty"`
-}
-
-// ProviderStatusStatus Current health state of the provider
-type ProviderStatusStatus string
-
-// ProviderStatusType Whether the SP is embedded or external
-type ProviderStatusType string
+// ProviderType Whether the SP is embedded or external
+type ProviderType string
 
 // CreateProviderParams defines parameters for CreateProvider.
 type CreateProviderParams struct {

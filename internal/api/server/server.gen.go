@@ -21,12 +21,15 @@ type ServerInterface interface {
 	// Health check
 	// (GET /health)
 	GetHealth(w http.ResponseWriter, r *http.Request)
+	// List all Service Providers
+	// (GET /providers)
+	ListProviders(w http.ResponseWriter, r *http.Request)
 	// Register an external Service Provider
 	// (POST /providers)
 	CreateProvider(w http.ResponseWriter, r *http.Request, params CreateProviderParams)
-	// Agent status
-	// (GET /status)
-	GetStatus(w http.ResponseWriter, r *http.Request)
+	// Get a Service Provider
+	// (GET /providers/{provider_id})
+	GetProvider(w http.ResponseWriter, r *http.Request, providerId string)
 }
 
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
@@ -39,15 +42,21 @@ func (_ Unimplemented) GetHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// List all Service Providers
+// (GET /providers)
+func (_ Unimplemented) ListProviders(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // Register an external Service Provider
 // (POST /providers)
 func (_ Unimplemented) CreateProvider(w http.ResponseWriter, r *http.Request, params CreateProviderParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// Agent status
-// (GET /status)
-func (_ Unimplemented) GetStatus(w http.ResponseWriter, r *http.Request) {
+// Get a Service Provider
+// (GET /providers/{provider_id})
+func (_ Unimplemented) GetProvider(w http.ResponseWriter, r *http.Request, providerId string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -65,6 +74,20 @@ func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Requ
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetHealth(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListProviders operation middleware
+func (siw *ServerInterfaceWrapper) ListProviders(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListProviders(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -107,11 +130,23 @@ func (siw *ServerInterfaceWrapper) CreateProvider(w http.ResponseWriter, r *http
 	handler.ServeHTTP(w, r)
 }
 
-// GetStatus operation middleware
-func (siw *ServerInterfaceWrapper) GetStatus(w http.ResponseWriter, r *http.Request) {
+// GetProvider operation middleware
+func (siw *ServerInterfaceWrapper) GetProvider(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "provider_id" -------------
+	var providerId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "provider_id", chi.URLParam(r, "provider_id"), &providerId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "provider_id", Err: err})
+		return
+	}
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.GetStatus(w, r)
+		siw.Handler.GetProvider(w, r, providerId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -238,10 +273,13 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/health", wrapper.GetHealth)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/providers", wrapper.ListProviders)
+	})
+	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/providers", wrapper.CreateProvider)
 	})
 	r.Group(func(r chi.Router) {
-		r.Get(options.BaseURL+"/status", wrapper.GetStatus)
+		r.Get(options.BaseURL+"/providers/{provider_id}", wrapper.GetProvider)
 	})
 
 	return r
@@ -264,6 +302,113 @@ func (response GetHealth200JSONResponse) VisitGetHealthResponse(w http.ResponseW
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetHealth400ApplicationProblemPlusJSONResponse Error
+
+func (response GetHealth400ApplicationProblemPlusJSONResponse) VisitGetHealthResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetHealth401ApplicationProblemPlusJSONResponse Error
+
+func (response GetHealth401ApplicationProblemPlusJSONResponse) VisitGetHealthResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetHealth503ApplicationProblemPlusJSONResponse Error
+
+func (response GetHealth503ApplicationProblemPlusJSONResponse) VisitGetHealthResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(503)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListProvidersRequestObject struct {
+}
+
+type ListProvidersResponseObject interface {
+	VisitListProvidersResponse(w http.ResponseWriter) error
+}
+
+type ListProviders200JSONResponse struct {
+	Results *[]Provider `json:"results,omitempty"`
+}
+
+func (response ListProviders200JSONResponse) VisitListProvidersResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListProviders400ApplicationProblemPlusJSONResponse Error
+
+func (response ListProviders400ApplicationProblemPlusJSONResponse) VisitListProvidersResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListProviders401ApplicationProblemPlusJSONResponse Error
+
+func (response ListProviders401ApplicationProblemPlusJSONResponse) VisitListProvidersResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListProviders503ApplicationProblemPlusJSONResponse Error
+
+func (response ListProviders503ApplicationProblemPlusJSONResponse) VisitListProvidersResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(503)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -319,6 +464,20 @@ func (response CreateProvider400ApplicationProblemPlusJSONResponse) VisitCreateP
 	return err
 }
 
+type CreateProvider401ApplicationProblemPlusJSONResponse Error
+
+func (response CreateProvider401ApplicationProblemPlusJSONResponse) VisitCreateProviderResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type CreateProvider409ApplicationProblemPlusJSONResponse Error
 
 func (response CreateProvider409ApplicationProblemPlusJSONResponse) VisitCreateProviderResponse(w http.ResponseWriter) error {
@@ -347,33 +506,31 @@ func (response CreateProvider422ApplicationProblemPlusJSONResponse) VisitCreateP
 	return err
 }
 
-type CreateProviderdefaultApplicationProblemPlusJSONResponse struct {
-	Body       Error
-	StatusCode int
-}
+type CreateProvider503ApplicationProblemPlusJSONResponse Error
 
-func (response CreateProviderdefaultApplicationProblemPlusJSONResponse) VisitCreateProviderResponse(w http.ResponseWriter) error {
+func (response CreateProvider503ApplicationProblemPlusJSONResponse) VisitCreateProviderResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
 		return err
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(response.StatusCode)
+	w.WriteHeader(503)
 	_, err := buf.WriteTo(w)
 	return err
 }
 
-type GetStatusRequestObject struct {
+type GetProviderRequestObject struct {
+	ProviderId string `json:"provider_id"`
 }
 
-type GetStatusResponseObject interface {
-	VisitGetStatusResponse(w http.ResponseWriter) error
+type GetProviderResponseObject interface {
+	VisitGetProviderResponse(w http.ResponseWriter) error
 }
 
-type GetStatus200JSONResponse AgentStatus
+type GetProvider200JSONResponse Provider
 
-func (response GetStatus200JSONResponse) VisitGetStatusResponse(w http.ResponseWriter) error {
+func (response GetProvider200JSONResponse) VisitGetProviderResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -385,17 +542,76 @@ func (response GetStatus200JSONResponse) VisitGetStatusResponse(w http.ResponseW
 	return err
 }
 
+type GetProvider400ApplicationProblemPlusJSONResponse Error
+
+func (response GetProvider400ApplicationProblemPlusJSONResponse) VisitGetProviderResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetProvider401ApplicationProblemPlusJSONResponse Error
+
+func (response GetProvider401ApplicationProblemPlusJSONResponse) VisitGetProviderResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetProvider404ApplicationProblemPlusJSONResponse Error
+
+func (response GetProvider404ApplicationProblemPlusJSONResponse) VisitGetProviderResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetProvider503ApplicationProblemPlusJSONResponse Error
+
+func (response GetProvider503ApplicationProblemPlusJSONResponse) VisitGetProviderResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(503)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
 	// Health check
 	// (GET /health)
 	GetHealth(ctx context.Context, request GetHealthRequestObject) (GetHealthResponseObject, error)
+	// List all Service Providers
+	// (GET /providers)
+	ListProviders(ctx context.Context, request ListProvidersRequestObject) (ListProvidersResponseObject, error)
 	// Register an external Service Provider
 	// (POST /providers)
 	CreateProvider(ctx context.Context, request CreateProviderRequestObject) (CreateProviderResponseObject, error)
-	// Agent status
-	// (GET /status)
-	GetStatus(ctx context.Context, request GetStatusRequestObject) (GetStatusResponseObject, error)
+	// Get a Service Provider
+	// (GET /providers/{provider_id})
+	GetProvider(ctx context.Context, request GetProviderRequestObject) (GetProviderResponseObject, error)
 }
 
 type StrictHandlerFunc func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error)
@@ -451,6 +667,30 @@ func (sh *strictHandler) GetHealth(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ListProviders operation middleware
+func (sh *strictHandler) ListProviders(w http.ResponseWriter, r *http.Request) {
+	var request ListProvidersRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListProviders(ctx, request.(ListProvidersRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListProviders")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListProvidersResponseObject); ok {
+		if err := validResponse.VisitListProvidersResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // CreateProvider operation middleware
 func (sh *strictHandler) CreateProvider(w http.ResponseWriter, r *http.Request, params CreateProviderParams) {
 	var request CreateProviderRequestObject
@@ -484,23 +724,25 @@ func (sh *strictHandler) CreateProvider(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-// GetStatus operation middleware
-func (sh *strictHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
-	var request GetStatusRequestObject
+// GetProvider operation middleware
+func (sh *strictHandler) GetProvider(w http.ResponseWriter, r *http.Request, providerId string) {
+	var request GetProviderRequestObject
+
+	request.ProviderId = providerId
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
-		return sh.ssi.GetStatus(ctx, request.(GetStatusRequestObject))
+		return sh.ssi.GetProvider(ctx, request.(GetProviderRequestObject))
 	}
 	for _, middleware := range sh.middlewares {
-		handler = middleware(handler, "GetStatus")
+		handler = middleware(handler, "GetProvider")
 	}
 
 	response, err := handler(r.Context(), w, r, request)
 
 	if err != nil {
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
-	} else if validResponse, ok := response.(GetStatusResponseObject); ok {
-		if err := validResponse.VisitGetStatusResponse(w); err != nil {
+	} else if validResponse, ok := response.(GetProviderResponseObject); ok {
+		if err := validResponse.VisitGetProviderResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
