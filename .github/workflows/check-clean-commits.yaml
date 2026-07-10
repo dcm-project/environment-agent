@@ -2,7 +2,7 @@ name: Check Clean Commits
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'release/v*']
 
 jobs:
   check-clean-commits:
