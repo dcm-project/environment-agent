@@ -4,6 +4,8 @@
 package v1alpha1
 
 import (
+	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -90,11 +92,20 @@ type Provider struct {
 	// LastCheck Timestamp of the last health check
 	LastCheck *time.Time `json:"last_check,omitempty"`
 
+	// Metadata Additional metadata about the provider
+	Metadata *ProviderMetadata `json:"metadata,omitempty"`
+
 	// Name Unique name of the Service Provider (natural key)
 	Name string `json:"name"`
 
+	// Operations List of operations supported for this service type
+	Operations *[]string `json:"operations,omitempty"`
+
 	// Path Resource path identifier
 	Path *string `json:"path,omitempty"`
+
+	// SchemaVersion Schema version of the service type the SP supports
+	SchemaVersion string `json:"schema_version"`
 
 	// ServiceType Type of service this provider offers (one per SP)
 	ServiceType string `json:"service_type"`
@@ -115,6 +126,37 @@ type ProviderStatus string
 // ProviderType Whether the SP is embedded or external
 type ProviderType string
 
+// ProviderMetadata Additional metadata about the provider
+type ProviderMetadata struct {
+	// RegionCode Geographic region code where the provider operates
+	RegionCode *string `json:"region_code,omitempty"`
+
+	// Resources Resource capacity information
+	Resources *ResourceCapacity `json:"resources,omitempty"`
+
+	// Status Current operational status of the provider
+	Status *string `json:"status,omitempty"`
+
+	// Zone Availability zone or datacenter identifier
+	Zone                 *string                `json:"zone,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// ResourceCapacity Resource capacity information
+type ResourceCapacity struct {
+	// TotalCpu Total CPU cores available
+	TotalCpu *string `json:"total_cpu,omitempty"`
+
+	// TotalMemory Total memory available
+	TotalMemory *string `json:"total_memory,omitempty"`
+
+	// TotalNode Total number of nodes
+	TotalNode *int `json:"total_node,omitempty"`
+
+	// TotalStorage Total storage available
+	TotalStorage *string `json:"total_storage,omitempty"`
+}
+
 // CreateProviderParams defines parameters for CreateProvider.
 type CreateProviderParams struct {
 	// Id Optional provider ID for idempotent registration
@@ -123,3 +165,116 @@ type CreateProviderParams struct {
 
 // CreateProviderJSONRequestBody defines body for CreateProvider for application/json ContentType.
 type CreateProviderJSONRequestBody = Provider
+
+// Getter for additional properties for ProviderMetadata. Returns the specified
+// element and whether it was found
+func (a ProviderMetadata) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for ProviderMetadata
+func (a *ProviderMetadata) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for ProviderMetadata to handle AdditionalProperties
+func (a *ProviderMetadata) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["region_code"]; found {
+		err = json.Unmarshal(raw, &a.RegionCode)
+		if err != nil {
+			return fmt.Errorf("error reading 'region_code': %w", err)
+		}
+		delete(object, "region_code")
+	}
+
+	if raw, found := object["resources"]; found {
+		err = json.Unmarshal(raw, &a.Resources)
+		if err != nil {
+			return fmt.Errorf("error reading 'resources': %w", err)
+		}
+		delete(object, "resources")
+	}
+
+	if raw, found := object["status"]; found {
+		err = json.Unmarshal(raw, &a.Status)
+		if err != nil {
+			return fmt.Errorf("error reading 'status': %w", err)
+		}
+		delete(object, "status")
+	}
+
+	if raw, found := object["zone"]; found {
+		err = json.Unmarshal(raw, &a.Zone)
+		if err != nil {
+			return fmt.Errorf("error reading 'zone': %w", err)
+		}
+		delete(object, "zone")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for ProviderMetadata to handle AdditionalProperties
+func (a ProviderMetadata) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.RegionCode != nil {
+		object["region_code"], err = json.Marshal(a.RegionCode)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'region_code': %w", err)
+		}
+	}
+
+	if a.Resources != nil {
+		object["resources"], err = json.Marshal(a.Resources)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'resources': %w", err)
+		}
+	}
+
+	if a.Status != nil {
+		object["status"], err = json.Marshal(a.Status)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'status': %w", err)
+		}
+	}
+
+	if a.Zone != nil {
+		object["zone"], err = json.Marshal(a.Zone)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'zone': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}

@@ -230,6 +230,7 @@ components:
         - name
         - endpoint
         - service_type
+        - schema_version
       properties:
         id:
           type: string
@@ -261,6 +262,19 @@ components:
           type: string
           description: Type of service this provider offers (one per SP)
           example: "database"
+        schema_version:
+          type: string
+          description: Schema version of the service type the SP supports
+          pattern: "^v[0-9]+(alpha|beta)?[0-9]*$"
+          example: "v1alpha1"
+        operations:
+          type: array
+          items:
+            type: string
+          description: List of operations supported for this service type
+          example: ["create", "delete", "update"]
+        metadata:
+          $ref: '#/components/schemas/ProviderMetadata'
         type:
           type: string
           readOnly: true
@@ -315,6 +329,47 @@ components:
           description: Canonical path of the resource
           example: "health"
           readOnly: true
+
+    ProviderMetadata:
+      type: object
+      description: Additional metadata about the provider
+      additionalProperties: true
+      properties:
+        region_code:
+          type: string
+          description: Geographic region code where the provider operates
+          example: "us-east-1"
+        zone:
+          type: string
+          description: Availability zone or datacenter identifier
+          example: "datacenter-b"
+        status:
+          type: string
+          description: Current operational status of the provider
+          example: "healthy"
+        resources:
+          $ref: '#/components/schemas/ResourceCapacity'
+
+    ResourceCapacity:
+      type: object
+      description: Resource capacity information
+      properties:
+        total_cpu:
+          type: string
+          description: Total CPU cores available
+          example: "200"
+        total_memory:
+          type: string
+          description: Total memory available
+          example: "1TB"
+        total_storage:
+          type: string
+          description: Total storage available
+          example: "2TB"
+        total_node:
+          type: integer
+          description: Total number of nodes
+          example: 100
 
     Error:
       type: object
