@@ -42,18 +42,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Unauthorized
+          description: "Unauthorized — reserved; authentication deferred to future version"
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '503':
-          description: Service unavailable
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Error'
-
   /providers:
     get:
       tags:
@@ -82,7 +75,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Unauthorized
+          description: "Unauthorized — reserved; authentication deferred to future version"
           content:
             application/problem+json:
               schema:
@@ -139,7 +132,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Unauthorized
+          description: "Unauthorized — reserved; authentication deferred to future version"
           content:
             application/problem+json:
               schema:
@@ -197,7 +190,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Unauthorized
+          description: "Unauthorized — reserved; authentication deferred to future version"
           content:
             application/problem+json:
               schema:
@@ -382,7 +375,7 @@ components:
           type: string
           format: uri-reference
           description: URI reference identifying the error type
-          example: "https://dcm.example.com/errors/conflict"
+          example: "CONFLICT"
         title:
           type: string
           description: Short human-readable summary of the problem
