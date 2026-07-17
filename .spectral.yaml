@@ -1,0 +1,14 @@
+extends:
+  - https://raw.githubusercontent.com/aep-dev/aep-openapi-linter/main/spectral.yaml
+
+rules:
+  x-aep-resource-no-boolean:
+    description: x-aep-resource should be an object with full structure, not just true
+    message: "x-aep-resource should define singular, plural, type, and patterns per AEP-4"
+    severity: warn
+    given: $.components.schemas[*].x-aep-resource
+    then:
+      function: schema
+      functionOptions:
+        schema:
+          type: object

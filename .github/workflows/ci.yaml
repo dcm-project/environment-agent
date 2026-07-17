@@ -1,0 +1,11 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'release/v*']
+  pull_request:
+    branches: [main, 'release/v*']
+
+jobs:
+  ci:
+    uses: dcm-project/shared-workflows/.github/workflows/go-ci.yaml@main

@@ -1,0 +1,9 @@
+name: Check Generated Files
+
+on:
+  pull_request:
+    branches: [main, 'release/v*']
+
+jobs:
+  check:
+    uses: dcm-project/shared-workflows/.github/workflows/check-generate.yaml@main
