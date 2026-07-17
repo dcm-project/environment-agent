@@ -89,8 +89,8 @@ type Provider struct {
 	// Id Unique identifier for the Service Provider
 	Id *string `json:"id,omitempty"`
 
-	// LastCheck Timestamp of the last health check
-	LastCheck *time.Time `json:"last_check,omitempty"`
+	// LastCheckTime Timestamp of the last health check
+	LastCheckTime *time.Time `json:"last_check_time,omitempty"`
 
 	// Metadata Additional metadata about the provider
 	Metadata *ProviderMetadata `json:"metadata,omitempty"`
@@ -126,6 +126,13 @@ type ProviderStatus string
 // ProviderType Whether the SP is embedded or external
 type ProviderType string
 
+// ProviderList Paginated list of providers
+type ProviderList struct {
+	// NextPageToken Token for retrieving the next page of results
+	NextPageToken *string     `json:"next_page_token,omitempty"`
+	Results       *[]Provider `json:"results,omitempty"`
+}
+
 // ProviderMetadata Additional metadata about the provider
 type ProviderMetadata struct {
 	// RegionCode Geographic region code where the provider operates
@@ -155,6 +162,16 @@ type ResourceCapacity struct {
 
 	// TotalStorage Total storage available
 	TotalStorage *string `json:"total_storage,omitempty"`
+}
+
+// ListProvidersParams defines parameters for ListProviders.
+type ListProvidersParams struct {
+	// MaxPageSize Maximum number of results per page
+	MaxPageSize *int `form:"max_page_size,omitempty" json:"max_page_size,omitempty"`
+
+	// PageToken Token for retrieving the next page of results.
+	// Obtained from the next_page_token field of a previous response.
+	PageToken *string `form:"page_token,omitempty" json:"page_token,omitempty"`
 }
 
 // CreateProviderParams defines parameters for CreateProvider.

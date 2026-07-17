@@ -23,7 +23,7 @@ type ServerInterface interface {
 	GetHealth(w http.ResponseWriter, r *http.Request)
 	// List all Service Providers
 	// (GET /providers)
-	ListProviders(w http.ResponseWriter, r *http.Request)
+	ListProviders(w http.ResponseWriter, r *http.Request, params ListProvidersParams)
 	// Register an external Service Provider
 	// (POST /providers)
 	CreateProvider(w http.ResponseWriter, r *http.Request, params CreateProviderParams)
@@ -44,7 +44,7 @@ func (_ Unimplemented) GetHealth(w http.ResponseWriter, r *http.Request) {
 
 // List all Service Providers
 // (GET /providers)
-func (_ Unimplemented) ListProviders(w http.ResponseWriter, r *http.Request) {
+func (_ Unimplemented) ListProviders(w http.ResponseWriter, r *http.Request, params ListProvidersParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -86,8 +86,40 @@ func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Requ
 // ListProviders operation middleware
 func (siw *ServerInterfaceWrapper) ListProviders(w http.ResponseWriter, r *http.Request) {
 
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListProvidersParams
+
+	// ------------- Optional query parameter "max_page_size" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "max_page_size", r.URL.Query(), &params.MaxPageSize, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "max_page_size"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "max_page_size", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "page_token" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "page_token", r.URL.Query(), &params.PageToken, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "page_token"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "page_token", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.ListProviders(w, r)
+		siw.Handler.ListProviders(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -335,15 +367,14 @@ func (response GetHealth401ApplicationProblemPlusJSONResponse) VisitGetHealthRes
 }
 
 type ListProvidersRequestObject struct {
+	Params ListProvidersParams
 }
 
 type ListProvidersResponseObject interface {
 	VisitListProvidersResponse(w http.ResponseWriter) error
 }
 
-type ListProviders200JSONResponse struct {
-	Results *[]Provider `json:"results,omitempty"`
-}
+type ListProviders200JSONResponse ProviderList
 
 func (response ListProviders200JSONResponse) VisitListProvidersResponse(w http.ResponseWriter) error {
 
@@ -654,8 +685,10 @@ func (sh *strictHandler) GetHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListProviders operation middleware
-func (sh *strictHandler) ListProviders(w http.ResponseWriter, r *http.Request) {
+func (sh *strictHandler) ListProviders(w http.ResponseWriter, r *http.Request, params ListProvidersParams) {
 	var request ListProvidersRequestObject
+
+	request.Params = params
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.ListProviders(ctx, request.(ListProvidersRequestObject))
