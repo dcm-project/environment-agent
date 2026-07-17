@@ -71,7 +71,7 @@ check-generate-api: generate-api
 		(echo "Generated files out of sync. Run 'make generate-api'." && exit 1)
 
 check-aep:
-	spectral lint --fail-severity=warn ./api/v1alpha1/openapi.yaml
+	npx --yes @stoplight/spectral-cli lint --fail-severity=warn ./api/v1alpha1/openapi.yaml
 
 check-container-engine:
 	@if [ -z "$(CONTAINER_ENGINE)" ]; then \
