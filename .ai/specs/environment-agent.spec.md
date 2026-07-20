@@ -143,7 +143,7 @@ authentication/authorization middleware, rate limiting.
 | REQ-HTTP-050 | The agent MUST load configuration values from environment variables (see REQ-XC-CFG-010 for file support and precedence rules) | MUST | |
 | REQ-HTTP-060 | The agent MUST log each HTTP request at INFO level including method, path, response status code, and duration | MUST | |
 | REQ-HTTP-070 | The agent MUST catch panics in HTTP handlers and return an RFC 7807 INTERNAL error response | MUST | |
-| REQ-HTTP-071 | Panic recovery middleware MUST be applied as the outermost middleware layer | MUST | |
+| REQ-HTTP-071 | Panic recovery middleware SHOULD be applied as the outermost middleware layer | SHOULD | Implementation guidance — observable behavior covered by REQ-HTTP-070 |
 | REQ-HTTP-080 | The agent MUST log server lifecycle events: listen address on startup, shutdown initiation, and shutdown completion | MUST | |
 | REQ-HTTP-090 | The agent MUST return 400 Bad Request with RFC 7807 error body for malformed requests | MUST | |
 | REQ-HTTP-091 | The API framework layer MUST return RFC 7807 error responses for request parsing and response serialization failures | MUST | |
@@ -526,6 +526,13 @@ service type with selection strategies.
 - **When** the request is processed
 - **Then** the response MUST be 422 Unprocessable Entity with RFC 7807 error body (type=UNPROCESSABLE_ENTITY)
 
+##### AC-SPR-108b: Endpoint URI semantic validation returns 422
+
+- **Validates:** REQ-SPR-131
+- **Given** `POST /api/v1alpha1/providers` with a valid JSON body where `endpoint` is not a valid URI (e.g., `"not-a-url"`)
+- **When** the request is processed
+- **Then** the response MUST be 422 Unprocessable Entity with RFC 7807 error body (type=UNPROCESSABLE_ENTITY)
+
 ##### AC-SPR-109: Persistence load failure causes fail-fast
 
 - **Validates:** REQ-SPR-181
@@ -557,7 +564,7 @@ The agent exposes two endpoints for querying Service Provider state:
 - `GET /api/v1alpha1/providers/{provider_id}` — returns a single SP by ID with
   its current health status.
 
-Health state fields (`type`, `status`, `last_check`) are read-only properties on
+Health state fields (`type`, `status`, `last_check_time`) are read-only properties on
 the Provider resource itself, eliminating the need for a separate status schema.
 
 These endpoints are always available regardless of deployment mode (Kubernetes,
@@ -573,7 +580,7 @@ Out of scope: Historical status data, metrics.
 | REQ-STS-015 | The list response MUST return a JSON object with a `results` array containing Provider resources | MUST | |
 | REQ-STS-020 | The agent MUST expose `GET /api/v1alpha1/providers/{provider_id}` returning a single SP by ID | MUST | |
 | REQ-STS-025 | If the requested `provider_id` does not match any registered SP, the agent MUST return 404 Not Found with RFC 7807 error body | MUST | |
-| REQ-STS-030 | Each Provider resource MUST include read-only health fields: `type` (embedded/external), `status` (Ready/Unhealthy/Unavailable), `last_check` timestamp | MUST | |
+| REQ-STS-030 | Each Provider resource MUST include read-only health fields: `type` (embedded/external), `status` (Ready/Unhealthy/Unavailable), `last_check_time` timestamp | MUST | |
 | REQ-STS-040 | The list endpoint MUST include all registered SPs regardless of their health state | MUST | |
 | REQ-STS-050 | The responses MUST set `Content-Type: application/json` | MUST | |
 
@@ -585,7 +592,7 @@ Out of scope: Historical status data, metrics.
 - **Given** an embedded SP "k8s-container" (container, Ready) and an external SP "db-provider" (database, Unhealthy) are registered
 - **When** GET `/api/v1alpha1/providers` is called
 - **Then** the response MUST be 200 OK with a `results` array containing both providers
-- **And** each entry MUST include `type`, `status`, `last_check`
+- **And** each entry MUST include `type`, `status`, `last_check_time`
 
 ##### AC-STS-020: List providers with no providers
 
@@ -600,7 +607,7 @@ Out of scope: Historical status data, metrics.
 - **Given** an SP "db-provider" is registered with ID "sp-db-001"
 - **When** GET `/api/v1alpha1/providers/sp-db-001` is called
 - **Then** the response MUST be 200 OK with the full Provider resource
-- **And** the response MUST include `type`, `status`, `last_check`
+- **And** the response MUST include `type`, `status`, `last_check_time`
 
 ##### AC-STS-026: Get provider — not found
 
@@ -881,7 +888,7 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 |----|-------------|----------|-------|
 | REQ-DCM-010 | The agent MUST register with DCM via `POST /api/v1/agents` once at least one SP (embedded or external) is registered and not Unavailable | MUST | |
 | REQ-DCM-020 | The registration payload MUST include: `name`, `environment`, `serviceTypes`, `cost`, `topicName`. The initial registration MUST include a non-empty `serviceTypes` list. Subsequent updates MAY include an empty list (see REQ-DCM-115) | MUST | |
-| REQ-DCM-030 | The registration payload SHOULD include `resourcesAvailable` when available. Structure: `{totalCpu: integer, totalMemory: string (e.g., "1TB"), totalStorage: string (e.g., "2TB"), totalNode: integer}` — sourced from K8s node info or manual configuration | SHOULD | |
+| REQ-DCM-030 | The registration payload SHOULD include `resourcesAvailable` when available. Structure: `{total_cpu: string, total_memory: string (e.g., "1TB"), total_storage: string (e.g., "2TB"), total_node: integer}` — sourced from K8s node info or manual configuration | SHOULD | Aligned with OpenAPI `ResourceCapacity` schema (snake_case) |
 | REQ-DCM-040 | Registration MUST execute asynchronously without blocking HTTP server startup | MUST | |
 | REQ-DCM-050 | Registration MUST retry with exponential backoff using formula: min(initialInterval × 2^attempt, maxInterval) with full jitter (uniform random in [0, calculated]) on failure | MUST | |
 | REQ-DCM-060 | Non-retryable errors (4xx client errors except 429 Too Many Requests) MUST stop retries immediately. On 429, the agent MUST respect the `Retry-After` header if present, or apply standard backoff | MUST | |
@@ -1386,6 +1393,14 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 - **And** a new cancel CloudEvent arrives for a previously unseen `resourceId`
 - **When** the deny list entry is added
 - **Then** the oldest entry MUST be evicted to make room
+
+##### AC-RTE-076: Deny list consume-on-use
+
+- **Validates:** REQ-RTE-190
+- **Given** the deny list contains `resourceId="res-456"`
+- **When** a creation request for `resourceId="res-456"` is consumed from the main topic and filtered
+- **Then** the deny list entry for `"res-456"` MUST be removed
+- **And** a subsequent creation request for `resourceId="res-456"` MUST NOT be filtered
 - **And** the new entry MUST be present in the deny list
 
 ##### AC-RTE-055: Configurable retry policy
