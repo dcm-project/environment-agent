@@ -82,13 +82,13 @@ Unless overridden, tests use:
 
 ---
 
-### IT-HTTP-050: Shutdown timeout ejects in-flight requests with 503
+### IT-HTTP-050: Shutdown timeout closes in-flight connections
 
 - **Validates AC:** AC-HTTP-030
-- **Test Infrastructure:** Real HTTP server, `AGENT_SERVER_SHUTDOWN_TIMEOUT=1s`, handler that sleeps 5s
-- **Given** the agent is running with shutdown timeout of 1s and a request in-flight that takes 5s
+- **Test Infrastructure:** Real HTTP server, `AGENT_SERVER_SHUTDOWN_TIMEOUT=1s`, raw TCP connection with partial request body
+- **Given** the agent is running with shutdown timeout of 1s and an in-flight connection held open (partial HTTP request body)
 - **When** SIGTERM is sent
-- **Then** the in-flight request MUST receive HTTP 503 after the 1s drain timeout
+- **Then** the in-flight connection MUST be terminated after the 1s drain timeout (client receives connection reset or EOF)
 - **And** the process MUST exit with code 0
 
 ---
