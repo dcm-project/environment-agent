@@ -138,7 +138,7 @@ authentication/authorization middleware, rate limiting.
 |----|-------------|----------|-------|
 | REQ-HTTP-010 | The agent MUST start an HTTP server on the configured address | MUST | |
 | REQ-HTTP-020 | The agent MUST register all OpenAPI-defined routes under `/api/v1alpha1`: `/health` (GET), `/providers` (GET, POST), `/providers/{provider_id}` (GET) | MUST | |
-| REQ-HTTP-030 | The agent MUST initiate graceful shutdown on SIGTERM: stop new connections, drain in-flight requests within configured timeout, exit with code 0 after in-flight requests complete or drain timeout elapses. Requests still in-flight after timeout MUST receive HTTP 503 | MUST | |
+| REQ-HTTP-030 | The agent MUST initiate graceful shutdown on SIGTERM: stop new connections, drain in-flight requests within configured timeout, exit with code 0 after in-flight requests complete or drain timeout elapses. The server MUST close connections that remain in-flight after the drain timeout. Clients connected at timeout MAY receive HTTP 503 or a connection reset | MUST | Amended: Go stdlib limitation, see commit b797493 |
 | REQ-HTTP-040 | The agent MUST initiate graceful shutdown on SIGINT, behaving identically to REQ-HTTP-030 | MUST | |
 | REQ-HTTP-050 | The agent MUST load configuration values from environment variables (see REQ-XC-CFG-010 for file support and precedence rules) | MUST | |
 | REQ-HTTP-060 | The agent MUST log each HTTP request at INFO level including method, path, response status code, and duration | MUST | |
@@ -180,7 +180,7 @@ authentication/authorization middleware, rate limiting.
 - **When** SIGTERM is received
 - **Then** the server MUST stop accepting new connections
 - **And** the server MUST drain in-flight requests within the configured shutdown timeout
-- **And** requests still in-flight after the timeout elapses MUST receive HTTP 503
+- **And** connections still in-flight after the timeout elapses MUST be closed (clients MAY receive HTTP 503 or a connection reset)
 - **And** the process MUST exit with code 0
 
 ##### AC-HTTP-040: Graceful shutdown on SIGINT
