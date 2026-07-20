@@ -59,11 +59,12 @@ make image-build   # Build container image using podman/docker
 
 ## API Endpoints
 
-| Method | Endpoint                  | Description                         |
-|--------|---------------------------|-------------------------------------|
-| GET    | /api/v1alpha1/health      | Agent health check                  |
-| POST   | /api/v1alpha1/providers   | External SP registration            |
-| GET    | /api/v1alpha1/status      | Agent status (health of all SPs)    |
+| Method | Endpoint                              | Description                         |
+|--------|---------------------------------------|-------------------------------------|
+| GET    | /api/v1alpha1/health                  | Agent health check                  |
+| GET    | /api/v1alpha1/providers               | List all SPs (includes health)      |
+| POST   | /api/v1alpha1/providers               | External SP registration            |
+| GET    | /api/v1alpha1/providers/{provider_id} | Get a single SP by ID               |
 
 ## License
 

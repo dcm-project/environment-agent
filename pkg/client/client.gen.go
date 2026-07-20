@@ -94,7 +94,7 @@ type ClientInterface interface {
 	GetHealth(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListProviders request
-	ListProviders(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	ListProviders(ctx context.Context, params *ListProvidersParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CreateProviderWithBody request with any body
 	CreateProviderWithBody(ctx context.Context, params *CreateProviderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -117,8 +117,8 @@ func (c *Client) GetHealth(ctx context.Context, reqEditors ...RequestEditorFn) (
 	return c.Client.Do(req)
 }
 
-func (c *Client) ListProviders(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewListProvidersRequest(c.Server)
+func (c *Client) ListProviders(ctx context.Context, params *ListProvidersParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListProvidersRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +193,7 @@ func NewGetHealthRequest(server string) (*http.Request, error) {
 }
 
 // NewListProvidersRequest generates requests for ListProviders
-func NewListProvidersRequest(server string) (*http.Request, error) {
+func NewListProvidersRequest(server string, params *ListProvidersParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -209,6 +209,45 @@ func NewListProvidersRequest(server string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.MaxPageSize != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "max_page_size", *params.MaxPageSize, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.PageToken != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "page_token", *params.PageToken, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
 	}
 
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
@@ -367,7 +406,7 @@ type ClientWithResponsesInterface interface {
 	GetHealthWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetHealthResponse, error)
 
 	// ListProvidersWithResponse request
-	ListProvidersWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListProvidersResponse, error)
+	ListProvidersWithResponse(ctx context.Context, params *ListProvidersParams, reqEditors ...RequestEditorFn) (*ListProvidersResponse, error)
 
 	// CreateProviderWithBodyWithResponse request with any body
 	CreateProviderWithBodyWithResponse(ctx context.Context, params *CreateProviderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error)
@@ -384,7 +423,6 @@ type GetHealthResponse struct {
 	JSON200                   *Health
 	ApplicationproblemJSON400 *Error
 	ApplicationproblemJSON401 *Error
-	ApplicationproblemJSON503 *Error
 }
 
 // Status returns HTTPResponse.Status
@@ -412,11 +450,9 @@ func (r GetHealthResponse) ContentType() string {
 }
 
 type ListProvidersResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON200      *struct {
-		Results *[]Provider `json:"results,omitempty"`
-	}
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *ProviderList
 	ApplicationproblemJSON400 *Error
 	ApplicationproblemJSON401 *Error
 	ApplicationproblemJSON503 *Error
@@ -526,8 +562,8 @@ func (c *ClientWithResponses) GetHealthWithResponse(ctx context.Context, reqEdit
 }
 
 // ListProvidersWithResponse request returning *ListProvidersResponse
-func (c *ClientWithResponses) ListProvidersWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListProvidersResponse, error) {
-	rsp, err := c.ListProviders(ctx, reqEditors...)
+func (c *ClientWithResponses) ListProvidersWithResponse(ctx context.Context, params *ListProvidersParams, reqEditors ...RequestEditorFn) (*ListProvidersResponse, error) {
+	rsp, err := c.ListProviders(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -595,13 +631,6 @@ func ParseGetHealthResponse(rsp *http.Response) (*GetHealthResponse, error) {
 		}
 		response.ApplicationproblemJSON401 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
-		var dest Error
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSON503 = &dest
-
 	}
 
 	return response, nil
@@ -622,9 +651,7 @@ func ParseListProvidersResponse(rsp *http.Response) (*ListProvidersResponse, err
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest struct {
-			Results *[]Provider `json:"results,omitempty"`
-		}
+		var dest ProviderList
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

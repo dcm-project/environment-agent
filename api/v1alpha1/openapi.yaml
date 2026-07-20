@@ -42,18 +42,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Unauthorized
+          description: "Unauthorized — reserved; authentication deferred to future version"
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '503':
-          description: Service unavailable
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Error'
-
   /providers:
     get:
       tags:
@@ -63,18 +56,29 @@ paths:
       description: |
         Returns all registered Service Providers (both embedded and external)
         including their current health status.
+      parameters:
+        - name: max_page_size
+          in: query
+          description: Maximum number of results per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+        - name: page_token
+          in: query
+          description: |
+            Token for retrieving the next page of results.
+            Obtained from the next_page_token field of a previous response.
+          schema:
+            type: string
       responses:
         '200':
           description: List of registered providers
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  results:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Provider'
+                $ref: '#/components/schemas/ProviderList'
         '400':
           description: Bad request
           content:
@@ -82,7 +86,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Unauthorized
+          description: "Unauthorized — reserved; authentication deferred to future version"
           content:
             application/problem+json:
               schema:
@@ -139,7 +143,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Unauthorized
+          description: "Unauthorized — reserved; authentication deferred to future version"
           content:
             application/problem+json:
               schema:
@@ -197,7 +201,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Unauthorized
+          description: "Unauthorized — reserved; authentication deferred to future version"
           content:
             application/problem+json:
               schema:
@@ -292,7 +296,7 @@ components:
             - Unhealthy
             - Unavailable
           example: "Ready"
-        last_check:
+        last_check_time:
           type: string
           format: date-time
           readOnly: true
@@ -308,6 +312,18 @@ components:
           format: date-time
           readOnly: true
           description: Timestamp when the provider was last updated
+
+    ProviderList:
+      type: object
+      description: Paginated list of providers
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Provider'
+        next_page_token:
+          type: string
+          description: Token for retrieving the next page of results
 
     Health:
       type: object
@@ -382,7 +398,7 @@ components:
           type: string
           format: uri-reference
           description: URI reference identifying the error type
-          example: "https://dcm.example.com/errors/conflict"
+          example: "CONFLICT"
         title:
           type: string
           description: Short human-readable summary of the problem
