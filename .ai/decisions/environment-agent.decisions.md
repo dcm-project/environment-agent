@@ -120,3 +120,53 @@ if the messaging system is down, DCM can still determine whether the agent is
 alive. The agent already has outbound REST connectivity to DCM for registration.
 
 **Related requirements:** REQ-DCM-140
+
+### DD-110: Deny list consume-on-use and LRU eviction
+
+**Decision:** Deny list entries are removed once consumed (used to filter a
+matching creation request). If the deny list exceeds a configurable maximum size
+(`AGENT_DENY_LIST_MAX_SIZE`), the oldest entries are evicted using LRU.
+
+**Rationale:** The enhancement states entries remain for the process lifetime.
+The spec refines this with two additions: (1) consume-on-use — once a
+cancellation filters its matching creation request, the transaction is complete
+and the entry serves no further purpose; keeping it wastes memory and could
+interfere with future legitimate requests for the same resourceId. (2) LRU
+eviction — an unbounded in-memory structure that grows until process exit is not
+production-safe; size-based eviction caps memory usage. On restart, the deny
+list is rebuilt from the cancel topic's durable consumer, so no entries are
+permanently lost. A future refinement may use time-based (TTL) eviction instead
+of or in addition to size-based LRU.
+
+**Related requirements:** REQ-RTE-190
+
+### DD-120: SP registration lease expiry deferred (v1alpha1)
+
+**Decision:** No consequences are defined for SP registration non-renewal in
+v1alpha1. External SPs that stop re-registering retain their slot indefinitely.
+
+**Rationale:** Designing automatic slot reclamation requires defining timeout
+semantics, grace periods, and notification mechanisms. This is deferred to a
+future version to limit initial scope. Manual intervention (clearing local
+persistence) is the v1alpha1 escape hatch. The agent accepts periodic
+re-registration idempotently but does not enforce lease renewal.
+
+**Related requirements:** REQ-SPR-170, REQ-SPR-190
+
+### DD-130: Immediate cancel processing for retry-held requests
+
+**Decision:** When a cancel CloudEvent arrives for a resourceId that is already
+queued in the retry topic, the agent immediately consumes the retry topic,
+removes the matching message, re-publishes non-matching messages, and publishes
+a `cancel-acknowledged` CloudEvent.
+
+**Rationale:** The enhancement specifies immediate removal of cancelled requests
+from the retry topic. The original spec deferred this to the next health state
+transition (Ready), which could leave cancelled requests sitting in the retry
+topic indefinitely if the SP remains Unhealthy. Immediate processing ensures
+DCM receives the cancellation acknowledgment promptly, allowing it to proceed
+with re-evaluation without waiting for an SP health transition. The cost of
+consuming and re-publishing the retry topic is acceptable given that cancels are
+an exceptional path and the retry topic is expected to be small.
+
+**Related requirements:** REQ-RTE-170

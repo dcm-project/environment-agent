@@ -704,6 +704,7 @@ Out of scope: Metrics/observability integration.
 | REQ-HMN-120 | When an SP becomes Unhealthy, the agent MUST publish a `dcm.agent.health.service-type-degraded` CloudEvent to `dcm.agents.health` | MUST | |
 | REQ-HMN-130 | When an SP becomes Unavailable, the agent MUST remove the service type from its advertised list | MUST | |
 | REQ-HMN-140 | When an SP becomes Unavailable, the agent MUST send a `POST /api/v1/agents` to DCM with the updated registration (service types without the affected type) | MUST | |
+| REQ-HMN-145 | When an SP becomes Unavailable, the agent MUST publish a `dcm.agent.health.service-type-unavailable` CloudEvent to `dcm.agents.health` | MUST | |
 | REQ-HMN-150 | When an SP becomes Unavailable, the agent MUST process the retry topic and reject all held requests for that service type with error CloudEvents | MUST | |
 | REQ-HMN-170 | When a previously unhealthy or unavailable SP recovers to Ready, the agent MUST process held requests from the retry topic for that service type | MUST | |
 | REQ-HMN-180 | When an SP recovers from Unavailable to Ready, the agent MUST re-add the service type to its list and send `POST /api/v1/agents` to DCM with the updated registration | MUST | |
@@ -794,6 +795,14 @@ Out of scope: Metrics/observability integration.
 - **Given** the SP for service type "database" transitions to Unhealthy
 - **When** the state change is detected
 - **Then** the agent MUST publish a CloudEvent to `dcm.agents.health` with type `dcm.agent.health.service-type-degraded`
+
+##### AC-HMN-085: Health unavailable CloudEvent
+
+- **Validates:** REQ-HMN-145
+- **Given** the SP for service type "database" transitions to Unavailable
+- **When** the state change is detected
+- **Then** the agent MUST publish a CloudEvent to `dcm.agents.health` with type `dcm.agent.health.service-type-unavailable`
+- **And** the CE data MUST include `agentId`, `agentName`, `topicName`, `serviceType`, `reason`, and `affectedProvider`
 
 ##### AC-HMN-100: Pod conditions updated on state change
 
@@ -1286,7 +1295,7 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 | REQ-RTE-140 | The agent MUST maintain an in-memory deny list of `resourceId` values from consumed cancel CloudEvents | MUST | |
 | REQ-RTE-150 | When processing creation requests from the main topic, the agent MUST check each `resourceId` against the deny list | MUST | |
 | REQ-RTE-160 | If a `resourceId` matches the deny list, the agent MUST drop the creation request without forwarding it to the SP | MUST | |
-| REQ-RTE-170 | If a cancel CloudEvent arrives for a `resourceId` that is already queued in the retry topic, when the retry topic is next consumed (triggered by a health state change to Ready), messages matching cancelled resourceIds MUST be acknowledged without forwarding to the SP, effectively removing them from the pending queue. A `dcm.agent.cancel-acknowledged` CloudEvent MUST be published to `dcm.agents.responses` | MUST | |
+| REQ-RTE-170 | If a cancel CloudEvent arrives for a `resourceId` that is already queued in the retry topic, the agent MUST immediately consume the retry topic, remove the matching message, re-publish any non-matching messages, and publish a `dcm.agent.cancel-acknowledged` CloudEvent to `dcm.agents.responses`. The cancelled resourceId MUST also be added to the deny list | MUST | |
 | REQ-RTE-180 | If a cancel CloudEvent arrives for a `resourceId` that has already been dispatched to the SP (request in-flight or SP response received), the agent MUST reject the cancellation by publishing a `dcm.agent.cancel-rejected` CloudEvent to `dcm.agents.responses` with `{resourceId, agentName, topicName, reason}`. The rejected cancel MUST NOT be added to the deny list | MUST | |
 | REQ-RTE-190 | Deny list entries MUST be removed once consumed (used to filter a creation request from the main topic). If the deny list exceeds a configurable maximum size, the oldest entries MUST be evicted (LRU). On restart, the deny list is rebuilt from the cancel topic | MUST | |
 
@@ -1374,10 +1383,13 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 
 - **Validates:** REQ-RTE-170
 - **Given** a creation request for `resourceId="res-789"` is held in the retry topic
-- **And** a cancel CloudEvent arrives for `resourceId="res-789"` (adding it to the deny list)
-- **When** the SP later transitions to Ready and the retry topic is consumed
-- **Then** the message for `resourceId="res-789"` MUST be acknowledged without forwarding to the SP
+- **And** a cancel CloudEvent arrives for `resourceId="res-789"`
+- **When** the cancel is consumed from the cancel topic
+- **Then** the agent MUST immediately consume the retry topic
+- **And** the message for `resourceId="res-789"` MUST be removed and acknowledged without forwarding to the SP
+- **And** any non-matching messages MUST be re-published to the retry topic
 - **And** a `dcm.agent.cancel-acknowledged` CloudEvent MUST be published to `dcm.agents.responses`
+- **And** `resourceId="res-789"` MUST be added to the deny list
 
 ##### AC-RTE-090: Cancel rejected for in-flight provisioning
 
@@ -1602,6 +1614,7 @@ Integration), and Topic 8 (Resource Operation Routing).
 | Request Queued | `dcm.agent.request-queued` | `dcm/agents/{agentId}` | `dcm.agents.responses` | `{resourceId, agentName, topicName, serviceType, status: "QUEUED"}` |
 | Error | `dcm.agent.error` | `dcm/agents/{agentId}` | `dcm.agents.responses` | `{resourceId, agentName, topicName, error, details}` |
 | Health Degraded | `dcm.agent.health.service-type-degraded` | `dcm/agents/{agentId}` | `dcm.agents.health` | `{agentId, agentName, topicName, serviceType, reason, affectedProvider}` |
+| Health Unavailable | `dcm.agent.health.service-type-unavailable` | `dcm/agents/{agentId}` | `dcm.agents.health` | `{agentId, agentName, topicName, serviceType, reason, affectedProvider}` |
 
 #### Acceptance Criteria
 
