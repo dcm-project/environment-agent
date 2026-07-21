@@ -170,3 +170,61 @@ consuming and re-publishing the retry topic is acceptable given that cancels are
 an exceptional path and the retry topic is expected to be small.
 
 **Related requirements:** REQ-RTE-170
+
+### DD-140: Enhancement doc v1 vs v1alpha1 API version
+
+**Decision:** The enhancement document references `/api/v1/` endpoints as the
+target stable API. The current implementation uses `/api/v1alpha1/` as we are in
+the alpha phase. This is intentional — the enhancement describes the GA target;
+the implementation reflects current maturity.
+
+**Rationale:** v1alpha1 signals to consumers that the API contract may change.
+The enhancement is a forward-looking design document, not a snapshot of the
+current implementation. When the API stabilizes, routes will migrate to v1 and
+the enhancement will reflect the implementation.
+
+**Related requirements:** REQ-HTTP-020
+
+**Ref:** MF-R3 from multi-model review panel (Codex, 2026-07-20)
+
+### DD-150: Non-strict handler pattern (v1alpha1)
+
+**Decision:** Use `HandlerWithOptions` with `server.Unimplemented{}` for Topic 1
+instead of the peer-standard `NewStrictHandlerWithOptions` pattern. Migrate to
+strict handlers when Topic 2 (Health Service) or Topic 3 (SP Registration)
+introduces real handler implementations.
+
+**Rationale:** Strict handlers require typed request/response structs that don't
+yet exist for stub endpoints. The non-strict pattern is simpler for Topic 1's
+placeholder handlers. All 4 peer repos use strict handlers — alignment will
+happen when real handlers are implemented.
+
+**Related requirements:** REQ-HTTP-020
+
+### DD-160: Constructor lifecycle alignment to peer pattern
+
+**Decision:** Align the HTTP server constructor to the dcm-project peer pattern:
+`New(cfg, logger, handler)` + `Run(ctx, ln)` where the listener is passed at
+runtime, not at construction time. This matches all 4 active peer repos.
+
+**Rationale:** Keeping constructor pure (no I/O resources) and passing the
+listener at runtime boundary improves testability and cross-repo consistency.
+`Addr()` reads from a field set during `Run()`. Tests that previously passed the
+listener to `New()` are updated to pass it to `Run()` instead.
+
+**Related requirements:** REQ-HTTP-010
+
+### DD-170: Timeout middleware wall-clock limitation (v1alpha1)
+
+**Decision:** Accept that the sync timeout middleware does not bound wall-clock
+response time for handlers that ignore `ctx.Done()`. Document as known v1alpha1
+limitation. When Topic 8 (SP Forwarding) adds real external HTTP calls, evaluate
+whether goroutine+select timeout is needed.
+
+**Rationale:** The sync approach calls `next.ServeHTTP()` and only checks
+deadline after the handler returns. If a handler ignores context cancellation,
+the client is held until the handler finishes. For v1alpha1, all handlers are
+stub/placeholder and the risk is theoretical. The per-request timeout AC
+(AC-HTTP-095) is satisfied for context-aware handlers.
+
+**Related requirements:** REQ-HTTP-110
