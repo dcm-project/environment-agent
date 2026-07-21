@@ -650,6 +650,18 @@ Unless overridden, tests use:
 
 ---
 
+### IT-HMN-135: Health unavailable CloudEvent
+
+- **Validates AC:** AC-HMN-085
+- **Test Infrastructure:** NATS subscriber on `dcm.agents.health`, SP transitioning to Unavailable
+- **Given** the SP for "database" transitions to Unavailable (failure threshold exceeded)
+- **When** the state change is detected
+- **Then** a CloudEvent MUST be published to `dcm.agents.health`
+- **And** `type` MUST be `dcm.agent.health.service-type-unavailable`
+- **And** the CE data MUST include `agentId`, `agentName`, `topicName`, `serviceType`, `reason`, and `affectedProvider`
+
+---
+
 ### IT-HMN-140: Pod conditions updated on state change
 
 - **Validates AC:** AC-HMN-100
@@ -1107,12 +1119,25 @@ Unless overridden, tests use:
 
 ---
 
-### IT-RTE-060: SP is Unhealthy — request queued
+### IT-RTE-060: SP is Unhealthy — creation request queued
 
 - **Validates AC:** AC-RTE-050
 - **Test Infrastructure:** Unhealthy SP; NATS; responses and retry subscribers
 - **Given** the SP for "database" is Unhealthy
 - **When** a create is consumed from main topic
+- **Then** the original CloudEvent MUST be published to `agent-prod-1.retry`
+- **And** `dcm.agents.responses` MUST receive `dcm.agent.request-queued` with `status="QUEUED"`
+- **And** the CE data MUST include `resourceId`, `agentName`, and `topicName`
+- **And** SP MUST NOT receive a call
+
+---
+
+### IT-RTE-065: SP is Unhealthy — deletion request queued
+
+- **Validates AC:** AC-RTE-050
+- **Test Infrastructure:** Unhealthy SP; NATS; responses and retry subscribers
+- **Given** the SP for "database" is Unhealthy
+- **When** a `dcm.request.delete` for `resourceId="res-del-001"` with `serviceType="database"` is consumed from main topic
 - **Then** the original CloudEvent MUST be published to `agent-prod-1.retry`
 - **And** `dcm.agents.responses` MUST receive `dcm.agent.request-queued` with `status="QUEUED"`
 - **And** the CE data MUST include `resourceId`, `agentName`, and `topicName`
@@ -1189,15 +1214,18 @@ Unless overridden, tests use:
 
 ---
 
-### IT-RTE-120: Cancel for request in retry topic
+### IT-RTE-120: Cancel for request in retry topic — immediate removal
 
 - **Validates AC:** AC-RTE-080
-- **Test Infrastructure:** Unhealthy SP; retry topic; cancel; then SP Ready
-- **Given** create for `resourceId="res-789"` is in retry topic
-- **And** cancel for `res-789` is consumed (deny list updated)
-- **When** SP transitions to Ready and retry topic is processed
-- **Then** SP MUST NOT receive create for `res-789`
-- **And** `dcm.agents.responses` MUST receive `dcm.agent.cancel-acknowledged`
+- **Test Infrastructure:** Unhealthy SP; retry topic with multiple messages; cancel topic
+- **Given** create for `resourceId="res-789"` and create for `resourceId="res-other"` are in retry topic (SP is Unhealthy)
+- **When** cancel for `resourceId="res-789"` is consumed from the cancel topic
+- **Then** the agent MUST immediately consume the retry topic
+- **And** the message for `resourceId="res-789"` MUST be removed and acknowledged
+- **And** the message for `resourceId="res-other"` MUST be re-published to the retry topic
+- **And** `dcm.agents.responses` MUST receive `dcm.agent.cancel-acknowledged` for `res-789`
+- **And** `resourceId="res-789"` MUST be added to the deny list
+- **And** SP MUST NOT receive any call (SP is still Unhealthy)
 
 ---
 
@@ -1502,6 +1530,7 @@ Unless overridden, tests use:
 | AC-HMN-060 | IT-HMN-110 |
 | AC-HMN-070 | IT-HMN-120 |
 | AC-HMN-080 | IT-HMN-130 |
+| AC-HMN-085 | IT-HMN-135 |
 | AC-HMN-100 | IT-HMN-140 |
 | AC-HMN-110 | IT-HMN-150 |
 | AC-HMN-120 | IT-HMN-160 |
@@ -1540,7 +1569,7 @@ Unless overridden, tests use:
 | AC-RTE-030 | IT-RTE-030 |
 | AC-RTE-040 | IT-RTE-040 |
 | AC-RTE-045 | IT-RTE-050 |
-| AC-RTE-050 | IT-RTE-060 |
+| AC-RTE-050 | IT-RTE-060, IT-RTE-065 |
 | AC-RTE-055 | IT-RTE-070 |
 | AC-RTE-060 | IT-RTE-080 |
 | AC-RTE-065 | IT-RTE-090 |
