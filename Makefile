@@ -35,7 +35,23 @@ lint:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 
 test:
-	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending
+	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --skip-package=test/e2e
+
+test-unit:
+	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending ./internal/config ./internal/httperror ./cmd/environment-agent
+
+test-integration:
+	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending ./internal/apiserver
+
+test-e2e:
+	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --tags=e2e ./test/e2e/...
+
+test-all: test test-e2e
+
+coverage:
+	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --cover --coverprofile=coverage.out ./internal/... ./cmd/...
+
+ci: vet lint test check-generate-api
 
 tidy:
 	go mod tidy
@@ -82,4 +98,4 @@ check-container-engine:
 image-build: check-container-engine
 	$(CONTAINER_ENGINE) build -t $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG) .
 
-.PHONY: build run clean fmt vet lint test tidy generate-types generate-spec generate-server generate-client generate-api check-generate-api check-aep check-container-engine image-build
+.PHONY: build run clean fmt vet lint test test-unit test-integration test-e2e test-all coverage ci tidy generate-types generate-spec generate-server generate-client generate-api check-generate-api check-aep check-container-engine image-build
