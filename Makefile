@@ -41,7 +41,7 @@ test-unit:
 	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending ./internal/config ./internal/httperror ./cmd/environment-agent
 
 test-integration:
-	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending ./internal/apiserver
+	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending ./internal/apiserver ./internal/health
 
 test-e2e:
 	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --tags=e2e ./test/e2e/...
@@ -51,10 +51,13 @@ test-all: test test-e2e
 coverage:
 	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --cover --coverprofile=coverage.out ./internal/... ./cmd/...
 
-ci: vet lint test check-generate-api
+ci: check-tidy check-generate-api vet lint test
 
 tidy:
 	go mod tidy
+
+check-tidy:
+	go mod tidy -diff
 
 generate-types:
 	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
@@ -98,4 +101,4 @@ check-container-engine:
 image-build: check-container-engine
 	$(CONTAINER_ENGINE) build -t $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG) .
 
-.PHONY: build run clean fmt vet lint test test-unit test-integration test-e2e test-all coverage ci tidy generate-types generate-spec generate-server generate-client generate-api check-generate-api check-aep check-container-engine image-build
+.PHONY: build run clean fmt vet lint test test-unit test-integration test-e2e test-all coverage ci tidy check-tidy generate-types generate-spec generate-server generate-client generate-api check-generate-api check-aep check-container-engine image-build
