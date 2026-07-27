@@ -9,10 +9,17 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/dcm-project/environment-agent/internal/api/server"
+	oapigen "github.com/dcm-project/environment-agent/internal/api/server"
 	"github.com/dcm-project/environment-agent/internal/apiserver"
 	"github.com/dcm-project/environment-agent/internal/config"
+	"github.com/dcm-project/environment-agent/internal/handler"
+	"github.com/dcm-project/environment-agent/internal/health"
 )
+
+// TODO: replace with real MessagingStatus from the NATS/messaging subsystem.
+type messagingStatus struct{}
+
+func (messagingStatus) IsConnected() bool { return true }
 
 func main() {
 	code := mainRun()
@@ -50,8 +57,10 @@ func run(ctx context.Context) int {
 		}
 	}()
 
-	handler := &server.Unimplemented{}
-	srv := apiserver.New(cfg, logger, handler)
+	healthSvc := health.NewService(messagingStatus{})
+	strictHandler := handler.New(healthSvc)
+	h := oapigen.NewStrictHandler(strictHandler, nil)
+	srv := apiserver.New(cfg, logger, h)
 
 	if err := srv.Run(ctx, ln); err != nil {
 		logger.Error("server error", "error", err)

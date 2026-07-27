@@ -60,7 +60,10 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// RequestTimeout returns middleware that enforces a per-request timeout.
+// RequestTimeout returns middleware that applies a per-request context deadline.
+// The deadline is cooperative: handlers that ignore ctx.Done() will not be
+// preempted (see DD-170). After the handler returns, if the deadline has been
+// exceeded the client receives a 503 instead of the handler's response.
 func RequestTimeout(timeout time.Duration, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		if timeout <= 0 {

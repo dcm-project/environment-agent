@@ -112,6 +112,10 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 }
 
 // Addr returns the address the server is listening on.
+// Returns an empty string if the server has not started yet.
 func (s *Server) Addr() string {
+	if s.listener == nil {
+		return ""
+	}
 	return s.listener.Addr().String()
 }

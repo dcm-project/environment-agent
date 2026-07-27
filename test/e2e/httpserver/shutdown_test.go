@@ -3,6 +3,8 @@
 package httpserver_test
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -43,38 +45,62 @@ func findRepoRoot() string {
 	}
 }
 
-func freePort() string {
-	ln, err := net.Listen("tcp", ":0")
-	Expect(err).NotTo(HaveOccurred())
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-	return fmt.Sprintf("%d", port)
-}
-
-func waitForReady(addr string, timeout time.Duration) error {
+func waitForReady(port string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		client := &http.Client{Timeout: 200 * time.Millisecond}
-		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/api/v1alpha1/health", addr))
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/api/v1alpha1/health", port))
 		if err == nil {
 			resp.Body.Close()
 			return nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return fmt.Errorf("server at :%s did not become ready within %s", addr, timeout)
+	return fmt.Errorf("server at :%s did not become ready within %s", port, timeout)
 }
 
-func startAgent(port string, extraEnv ...string) *exec.Cmd {
+// startAgent launches the agent binary with AGENT_SERVER_ADDRESS=:0 and
+// discovers the OS-assigned port by parsing the JSON "server listening"
+// log line from stdout. It returns the running command and the port string.
+func startAgent(extraEnv ...string) (*exec.Cmd, string) {
 	cmd := exec.Command(binaryPath)
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("AGENT_SERVER_ADDRESS=:%s", port),
-	)
+	cmd.Env = append(os.Environ(), "AGENT_SERVER_ADDRESS=:0")
 	cmd.Env = append(cmd.Env, extraEnv...)
-	cmd.Stdout = GinkgoWriter
+
+	stdout, err := cmd.StdoutPipe()
+	Expect(err).NotTo(HaveOccurred())
 	cmd.Stderr = GinkgoWriter
+
 	Expect(cmd.Start()).To(Succeed())
-	return cmd
+
+	addrCh := make(chan string, 1)
+	go func() {
+		defer GinkgoRecover()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			fmt.Fprintln(GinkgoWriter, line)
+
+			var entry struct {
+				Msg     string `json:"msg"`
+				Address string `json:"address"`
+			}
+			if json.Unmarshal([]byte(line), &entry) == nil && entry.Msg == "server listening" {
+				_, port, err := net.SplitHostPort(entry.Address)
+				Expect(err).NotTo(HaveOccurred(), "parsing address from log line")
+				addrCh <- port
+			}
+		}
+	}()
+
+	var port string
+	select {
+	case port = <-addrCh:
+	case <-time.After(10 * time.Second):
+		Fail("timed out waiting for server to emit listening address")
+	}
+
+	return cmd, port
 }
 
 // holdPartialRequest opens a raw TCP connection and sends an HTTP POST
@@ -115,8 +141,7 @@ func waitForExit(cmd *exec.Cmd, timeout time.Duration) error {
 var _ = Describe("HTTP Server Graceful Shutdown", func() {
 
 	It("drains in-flight requests on SIGTERM and exits 0 (IT-HTTP-030)", func() {
-		port := freePort()
-		cmd := startAgent(port)
+		cmd, port := startAgent()
 		DeferCleanup(func() { cmd.Process.Kill() })
 
 		Expect(waitForReady(port, 5*time.Second)).To(Succeed(),
@@ -144,8 +169,7 @@ var _ = Describe("HTTP Server Graceful Shutdown", func() {
 	})
 
 	It("drains in-flight requests on SIGINT and exits 0 (IT-HTTP-040)", func() {
-		port := freePort()
-		cmd := startAgent(port)
+		cmd, port := startAgent()
 		DeferCleanup(func() { cmd.Process.Kill() })
 
 		Expect(waitForReady(port, 5*time.Second)).To(Succeed(),
@@ -173,8 +197,7 @@ var _ = Describe("HTTP Server Graceful Shutdown", func() {
 	})
 
 	It("closes in-flight connections after shutdown timeout (IT-HTTP-050)", func() {
-		port := freePort()
-		cmd := startAgent(port, "AGENT_SERVER_SHUTDOWN_TIMEOUT=1s")
+		cmd, port := startAgent("AGENT_SERVER_SHUTDOWN_TIMEOUT=1s")
 		DeferCleanup(func() { cmd.Process.Kill() })
 
 		Expect(waitForReady(port, 5*time.Second)).To(Succeed(),
