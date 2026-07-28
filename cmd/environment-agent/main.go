@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +15,10 @@ import (
 	"github.com/dcm-project/environment-agent/internal/config"
 	"github.com/dcm-project/environment-agent/internal/handler"
 	"github.com/dcm-project/environment-agent/internal/health"
+	"github.com/dcm-project/environment-agent/internal/httperror"
+	"github.com/dcm-project/environment-agent/internal/provider"
+	"github.com/dcm-project/environment-agent/internal/provider/service"
+	"github.com/dcm-project/environment-agent/internal/provider/store"
 )
 
 // TODO: replace with real MessagingStatus from the NATS/messaging subsystem.
@@ -57,9 +62,25 @@ func run(ctx context.Context) int {
 		}
 	}()
 
+	fileStore := store.NewFileStore(cfg.Provider.PersistencePath)
+	registry := provider.NewRegistry()
+	providerSvc := service.New(fileStore, registry, logger)
+
+	if err := providerSvc.LoadPersisted(); err != nil {
+		logger.Error("failed to load persisted providers", "error", err)
+		return 1
+	}
+	providerSvc.RegisterEmbedded(cfg.Provider.EmbeddedSPs)
+
 	healthSvc := health.NewService(messagingStatus{})
-	strictHandler := handler.New(healthSvc)
-	h := oapigen.NewStrictHandler(strictHandler, nil)
+	strictHandler := handler.New(healthSvc, providerSvc)
+	h := oapigen.NewStrictHandlerWithOptions(strictHandler, nil, oapigen.StrictHTTPServerOptions{
+		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
+			httperror.WriteResponse(w, logger, http.StatusInternalServerError,
+				"INTERNAL", "Internal Server Error",
+				err.Error(), &r.RequestURI)
+		},
+	})
 	srv := apiserver.New(cfg, logger, h)
 
 	if err := srv.Run(ctx, ln); err != nil {
