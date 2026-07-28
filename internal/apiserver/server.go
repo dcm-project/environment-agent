@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/go-chi/chi/v5"
 	nethttpmiddleware "github.com/oapi-codegen/nethttp-middleware"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/dcm-project/environment-agent/internal/api/server"
 	"github.com/dcm-project/environment-agent/internal/config"
 	"github.com/dcm-project/environment-agent/internal/httperror"
+	"github.com/dcm-project/environment-agent/internal/requestctx"
 )
 
 // Server manages the HTTP server lifecycle.
@@ -44,6 +47,7 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 	r := chi.NewRouter()
 
 	r.Use(PanicRecovery(s.logger))
+	r.Use(requestctx.Middleware)
 	r.Use(RequestLogger(s.logger))
 	r.Use(RequestTimeout(s.cfg.Server.RequestTimeout, s.logger))
 
@@ -51,8 +55,12 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 	if err != nil {
 		return err
 	}
+	stripHandlerValidatedConstraints(spec)
 
 	r.Use(nethttpmiddleware.OapiRequestValidatorWithOptions(spec, &nethttpmiddleware.Options{
+		Options: openapi3filter.Options{
+			RegexCompiler: noopRegexCompiler,
+		},
 		SilenceServersWarning: true,
 		ErrorHandlerWithOpts: func(_ context.Context, valErr error, w http.ResponseWriter, req *http.Request, _ nethttpmiddleware.ErrorHandlerOpts) {
 			httperror.WriteInvalidArgument(w, req, s.logger, valErr.Error())
@@ -118,4 +126,39 @@ func (s *Server) Addr() string {
 		return ""
 	}
 	return s.listener.Addr().String()
+}
+
+// noopRegexCompiler disables pattern validation at the middleware level for
+// request body schemas. Patterns remain in the spec for documentation; the
+// handler enforces them and returns 422 for semantic violations.
+func noopRegexCompiler(_ string) (openapi3.RegexMatcher, error) {
+	return alwaysMatch{}, nil
+}
+
+type alwaysMatch struct{}
+
+func (alwaysMatch) MatchString(string) bool { return true }
+
+// stripHandlerValidatedConstraints removes pattern/minLength/maxLength from
+// parameter schemas annotated with x-validated-by: handler. This works around
+// kin-openapi not applying RegexCompiler to parameter validation (only to
+// request body validation), which would cause the middleware to reject with 400
+// before the handler can return 422.
+func stripHandlerValidatedConstraints(spec *openapi3.T) {
+	for _, pathItem := range spec.Paths.Map() {
+		for _, op := range pathItem.Operations() {
+			for _, paramRef := range op.Parameters {
+				param := paramRef.Value
+				if param == nil || param.Schema == nil || param.Schema.Value == nil {
+					continue
+				}
+				schema := param.Schema.Value
+				if v, ok := schema.Extensions["x-validated-by"]; ok && v == "handler" {
+					schema.Pattern = ""
+					schema.MinLength = 0
+					schema.MaxLength = nil
+				}
+			}
+		}
+	}
 }

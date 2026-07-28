@@ -9,7 +9,14 @@ import (
 
 // Config holds all configuration for the environment agent.
 type Config struct {
-	Server ServerConfig `envPrefix:"AGENT_SERVER_"`
+	Server   ServerConfig   `envPrefix:"AGENT_SERVER_"`
+	Provider ProviderConfig `envPrefix:"AGENT_"`
+}
+
+// ProviderConfig holds SP registration configuration.
+type ProviderConfig struct {
+	EmbeddedSPs     []string `env:"EMBEDDED_SPS" envSeparator:"," envDefault:""`
+	PersistencePath string   `env:"SP_PERSISTENCE_PATH" envDefault:"/var/lib/environment-agent/registrations"`
 }
 
 // ServerConfig holds HTTP server configuration.
