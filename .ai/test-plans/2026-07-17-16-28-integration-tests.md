@@ -279,6 +279,7 @@ Unless overridden, tests use:
 - **Then** the response MUST be HTTP 200 OK
 - **And** `update_time` MUST be refreshed (later than before)
 - **And** `create_time` MUST remain unchanged
+- **And** `id` MUST remain unchanged (provider ID is immutable)
 
 ---
 
@@ -300,6 +301,7 @@ Unless overridden, tests use:
 - **Given** "vm-provider" is registered for service type "vm"
 - **When** "vm-provider" re-registers for service type "vm"
 - **Then** the response MUST be HTTP 200 OK (not 409)
+- **And** `id` MUST remain unchanged (provider ID is immutable)
 
 ---
 
@@ -377,6 +379,39 @@ Unless overridden, tests use:
 - **Then** the response MUST be HTTP 422 Unprocessable Entity
 - **And** the body MUST be RFC 7807 with `type=UNPROCESSABLE_ENTITY`
 - **And** the error MUST identify the `?id=` pattern violation
+
+---
+
+### IT-SPR-145: Re-registration with different `?id=` returns 409
+
+- **Validates AC:** AC-SPR-050
+- **Test Infrastructure:** Real HTTP server
+- **Given** a provider named "immut-provider" is registered with `?id=original-id`
+- **When** `POST /api/v1alpha1/providers?id=different-id` is called with the same name
+- **Then** the response MUST be HTTP 409 Conflict
+- **And** the error body MUST identify both the existing ID and the conflicting requested ID
+
+---
+
+### IT-SPR-146: Re-registration without `?id=` preserves original ID
+
+- **Validates AC:** AC-SPR-050
+- **Test Infrastructure:** Real HTTP server
+- **Given** a provider named "preserve-provider" is registered with `?id=my-stable-id`
+- **When** `POST /api/v1alpha1/providers` is called with the same name but no `?id=` parameter
+- **Then** the response MUST be HTTP 200 OK
+- **And** the response `id` MUST still be `"my-stable-id"` (ID is immutable)
+
+---
+
+### IT-SPR-147: Re-registration with same `?id=` succeeds
+
+- **Validates AC:** AC-SPR-050
+- **Test Infrastructure:** Real HTTP server
+- **Given** a provider named "same-id-provider" is registered with `?id=consistent-id`
+- **When** `POST /api/v1alpha1/providers?id=consistent-id` is called with the same name and same ID
+- **Then** the response MUST be HTTP 200 OK
+- **And** the response `id` MUST be `"consistent-id"`
 
 ---
 
