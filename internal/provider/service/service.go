@@ -20,12 +20,16 @@ type ProviderService struct {
 	mu       sync.Mutex
 	store    store.Store
 	registry *provider.Registry
+	health   provider.HealthTracker
 	logger   *slog.Logger
 }
 
 // New creates a ProviderService with the given dependencies.
-func New(s store.Store, registry *provider.Registry, logger *slog.Logger) *ProviderService {
-	return &ProviderService{store: s, registry: registry, logger: logger}
+func New(s store.Store, registry *provider.Registry, health provider.HealthTracker, logger *slog.Logger) *ProviderService {
+	if health == nil {
+		panic("provider: health tracker must not be nil")
+	}
+	return &ProviderService{store: s, registry: registry, health: health, logger: logger}
 }
 
 // RegistrationInput holds the fields for a provider registration request.
@@ -121,6 +125,9 @@ func (s *ProviderService) assignProviderID(ctx context.Context, requestedID *str
 	if requestedID == nil {
 		return provider.GenerateProviderID(), nil
 	}
+	if *requestedID == "" {
+		return "", &DomainError{Code: ErrCodeValidation, Message: "provider ID must not be empty"}
+	}
 
 	holder, err := s.store.GetByID(ctx, *requestedID)
 	if err != nil {
@@ -159,6 +166,7 @@ func (s *ProviderService) createRegistration(ctx context.Context, id string, in 
 		s.registry.Release(in.ServiceType)
 		return nil, err
 	}
+	s.health.SetState(id, v1alpha1.Unhealthy, now)
 	return s.toAPI(&sp), nil
 }
 
@@ -200,7 +208,9 @@ func (s *ProviderService) LoadPersisted() error {
 		}
 		if err := s.registry.Claim(p.Name, p.ServiceType); err != nil {
 			s.logger.Warn("conflict loading persisted provider", "name", p.Name, "error", err)
+			continue
 		}
+		s.health.SetState(p.ID, v1alpha1.Unhealthy, p.UpdateTime)
 	}
 	return nil
 }
@@ -222,6 +232,7 @@ func (s *ProviderService) RegisterEmbedded(serviceTypes []string) {
 		for _, p := range all {
 			if p.Type == string(v1alpha1.Embedded) && !enabled[p.ServiceType] {
 				_ = s.store.Delete(context.Background(), p.Name)
+				s.health.DeleteState(p.ID)
 			}
 		}
 	}
@@ -249,19 +260,37 @@ func (s *ProviderService) RegisterEmbedded(serviceTypes []string) {
 		}
 
 		now := time.Now().UTC()
+		id := provider.GenerateProviderID()
+		createTime := now
+		if existing != nil && existing.Type == string(v1alpha1.Embedded) {
+			if existing.ID != "" {
+				id = existing.ID
+			}
+			if !existing.CreateTime.IsZero() {
+				createTime = existing.CreateTime
+			}
+		}
+
 		sp := store.StoredProvider{
-			ID:            provider.GenerateProviderID(),
+			ID:            id,
 			Name:          st,
 			Endpoint:      "",
 			ServiceType:   st,
 			SchemaVersion: "v1alpha1",
 			Type:          string(v1alpha1.Embedded),
-			CreateTime:    now,
+			CreateTime:    createTime,
 			UpdateTime:    now,
 		}
 		if err := s.store.Save(context.Background(), sp); err != nil {
 			s.logger.Error("failed to save embedded SP", "service_type", st, "error", err)
+			if existing == nil {
+				s.registry.Release(st)
+				continue
+			}
+			s.health.SetState(sp.ID, v1alpha1.Ready, now)
+			continue
 		}
+		s.health.SetState(sp.ID, v1alpha1.Ready, now)
 	}
 }
 
@@ -280,6 +309,18 @@ func (s *ProviderService) toAPI(sp *store.StoredProvider) *v1alpha1.Provider {
 		Type:          &providerType,
 		CreateTime:    &sp.CreateTime,
 		UpdateTime:    &sp.UpdateTime,
+	}
+	if state, ok := s.health.GetState(sp.ID); ok {
+		status := state.Status
+		p.Status = &status
+		lastCheck := state.LastCheckTime
+		p.LastCheckTime = &lastCheck
+	} else {
+		defaultStatus := v1alpha1.Unhealthy
+		if sp.Type == string(v1alpha1.Embedded) {
+			defaultStatus = v1alpha1.Ready
+		}
+		p.Status = &defaultStatus
 	}
 	if len(sp.Metadata) > 0 {
 		var meta v1alpha1.ProviderMetadata

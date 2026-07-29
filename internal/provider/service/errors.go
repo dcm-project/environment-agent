@@ -4,8 +4,9 @@ package service
 type ErrorCode string
 
 const (
-	ErrCodeConflict ErrorCode = "CONFLICT"
-	ErrCodeNotFound ErrorCode = "NOT_FOUND"
+	ErrCodeConflict   ErrorCode = "CONFLICT"
+	ErrCodeNotFound   ErrorCode = "NOT_FOUND"
+	ErrCodeValidation ErrorCode = "VALIDATION"
 )
 
 // DomainError is the single error type returned by the service layer.

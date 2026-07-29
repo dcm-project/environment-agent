@@ -18,6 +18,9 @@ var _ = Describe("run", func() {
 	It("exits cleanly on cancelled context", func() {
 		Expect(os.Setenv("AGENT_SERVER_ADDRESS", ":0")).To(Succeed())
 		DeferCleanup(os.Unsetenv, "AGENT_SERVER_ADDRESS")
+
+		GinkgoT().Setenv("AGENT_SP_PERSISTENCE_PATH", GinkgoT().TempDir()+"/registrations.json")
+
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		Expect(run(ctx)).To(Equal(0))
