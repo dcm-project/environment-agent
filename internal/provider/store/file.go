@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -16,8 +17,12 @@ type FileStore struct {
 }
 
 // NewFileStore creates a FileStore that persists to the given path.
-func NewFileStore(path string) *FileStore {
-	return &FileStore{path: path}
+// It ensures the parent directory exists, returning an error if it cannot be created.
+func NewFileStore(path string) (*FileStore, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, fmt.Errorf("creating store directory: %w", err)
+	}
+	return &FileStore{path: path}, nil
 }
 
 func (f *FileStore) Save(_ context.Context, p StoredProvider) error {

@@ -2,9 +2,14 @@ package service
 
 import (
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
+	"github.com/dcm-project/environment-agent/internal/provider"
+	"github.com/dcm-project/environment-agent/internal/provider/store"
 )
 
 func TestService(t *testing.T) {
@@ -40,5 +45,29 @@ var _ = Describe("ensureIDConsistency", Label("unit"), func() {
 		Expect(domErr.Code).To(Equal(ErrCodeConflict))
 		Expect(domErr.Message).To(ContainSubstring("existing-id-abc"))
 		Expect(domErr.Message).To(ContainSubstring("different-id-xyz"))
+	})
+})
+
+var _ = Describe("toAPI health fallback", Label("unit"), func() {
+	It("returns type-aware defaults when no health state exists", func() {
+		tracker := provider.NewInMemoryHealthTracker()
+		svc := &ProviderService{health: tracker}
+		now := time.Now().UTC()
+
+		ext := &store.StoredProvider{
+			ID: "ext-1", Name: "ext", ServiceType: "database",
+			Type: string(v1alpha1.External), CreateTime: now, UpdateTime: now,
+		}
+		p := svc.toAPI(ext)
+		Expect(p.Status).To(HaveValue(Equal(v1alpha1.Unhealthy)))
+		Expect(p.LastCheckTime).To(BeNil())
+
+		emb := &store.StoredProvider{
+			ID: "emb-1", Name: "emb", ServiceType: "container",
+			Type: string(v1alpha1.Embedded), CreateTime: now, UpdateTime: now,
+		}
+		p = svc.toAPI(emb)
+		Expect(p.Status).To(HaveValue(Equal(v1alpha1.Ready)))
+		Expect(p.LastCheckTime).To(BeNil())
 	})
 })
