@@ -28,30 +28,42 @@ func New(s store.Store, registry *provider.Registry, logger *slog.Logger) *Provi
 	return &ProviderService{store: s, registry: registry, logger: logger}
 }
 
+// RegistrationInput holds the fields for a provider registration request.
+type RegistrationInput struct {
+	Name          string
+	Endpoint      string
+	ServiceType   string
+	SchemaVersion string
+	DisplayName   *string
+	ProviderID    *string
+	Operations    *[]string
+	Metadata      json.RawMessage
+}
+
 // Register creates or updates a provider registration.
 // The caller (handler) is responsible for input validation (ID, schema_version, endpoint).
-func (s *ProviderService) Register(ctx context.Context, name, endpoint, serviceType, schemaVersion string, displayName, providerID *string, operations *[]string, metadata json.RawMessage) (*v1alpha1.Provider, bool, error) {
+func (s *ProviderService) Register(ctx context.Context, in RegistrationInput) (*v1alpha1.Provider, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	existing, err := s.findByName(ctx, name)
+	existing, err := s.findByName(ctx, in.Name)
 	if err != nil {
 		return nil, false, err
 	}
 
 	if existing != nil {
-		if err := s.ensureIDConsistency(existing.ID, providerID); err != nil {
+		if err := s.ensureIDConsistency(existing.ID, in.ProviderID); err != nil {
 			return nil, false, err
 		}
-		result, err := s.updateRegistration(ctx, existing, endpoint, serviceType, schemaVersion, displayName, operations, metadata)
+		result, err := s.updateRegistration(ctx, existing, in)
 		return result, false, err
 	}
 
-	id, err := s.assignProviderID(ctx, providerID)
+	id, err := s.assignProviderID(ctx, in.ProviderID)
 	if err != nil {
 		return nil, false, err
 	}
-	result, err := s.createRegistration(ctx, id, name, endpoint, serviceType, schemaVersion, displayName, operations, metadata)
+	result, err := s.createRegistration(ctx, id, in)
 	return result, true, err
 }
 
@@ -78,25 +90,25 @@ func (s *ProviderService) ensureIDConsistency(existingID string, requestedID *st
 
 // updateRegistration applies mutable field changes to an existing provider.
 // The provider's ID and CreateTime are immutable and never modified.
-func (s *ProviderService) updateRegistration(ctx context.Context, existing *store.StoredProvider, endpoint, serviceType, schemaVersion string, displayName *string, operations *[]string, metadata json.RawMessage) (*v1alpha1.Provider, error) {
+func (s *ProviderService) updateRegistration(ctx context.Context, existing *store.StoredProvider, in RegistrationInput) (*v1alpha1.Provider, error) {
 	oldServiceType := existing.ServiceType
-	if oldServiceType != serviceType {
-		if err := s.registry.Move(existing.Name, oldServiceType, serviceType); err != nil {
+	if oldServiceType != in.ServiceType {
+		if err := s.registry.Move(existing.Name, oldServiceType, in.ServiceType); err != nil {
 			return nil, &DomainError{Code: ErrCodeConflict, Message: err.Error()}
 		}
 	}
 
-	existing.Endpoint = endpoint
-	existing.ServiceType = serviceType
-	existing.SchemaVersion = schemaVersion
-	existing.DisplayName = displayName
-	existing.Operations = operations
-	existing.Metadata = metadata
+	existing.Endpoint = in.Endpoint
+	existing.ServiceType = in.ServiceType
+	existing.SchemaVersion = in.SchemaVersion
+	existing.DisplayName = in.DisplayName
+	existing.Operations = in.Operations
+	existing.Metadata = in.Metadata
 	existing.UpdateTime = time.Now().UTC()
 
 	if err := s.store.Save(ctx, *existing); err != nil {
-		if oldServiceType != serviceType {
-			_ = s.registry.Move(existing.Name, serviceType, oldServiceType)
+		if oldServiceType != in.ServiceType {
+			_ = s.registry.Move(existing.Name, in.ServiceType, oldServiceType)
 		}
 		return nil, err
 	}
@@ -124,27 +136,27 @@ func (s *ProviderService) assignProviderID(ctx context.Context, requestedID *str
 }
 
 // createRegistration claims the service type slot and persists a new provider record.
-func (s *ProviderService) createRegistration(ctx context.Context, id, name, endpoint, serviceType, schemaVersion string, displayName *string, operations *[]string, metadata json.RawMessage) (*v1alpha1.Provider, error) {
-	if err := s.registry.Claim(name, serviceType); err != nil {
+func (s *ProviderService) createRegistration(ctx context.Context, id string, in RegistrationInput) (*v1alpha1.Provider, error) {
+	if err := s.registry.Claim(in.Name, in.ServiceType); err != nil {
 		return nil, &DomainError{Code: ErrCodeConflict, Message: err.Error()}
 	}
 
 	now := time.Now().UTC()
 	sp := store.StoredProvider{
 		ID:            id,
-		Name:          name,
-		Endpoint:      endpoint,
-		ServiceType:   serviceType,
-		SchemaVersion: schemaVersion,
-		DisplayName:   displayName,
-		Operations:    operations,
-		Metadata:      metadata,
+		Name:          in.Name,
+		Endpoint:      in.Endpoint,
+		ServiceType:   in.ServiceType,
+		SchemaVersion: in.SchemaVersion,
+		DisplayName:   in.DisplayName,
+		Operations:    in.Operations,
+		Metadata:      in.Metadata,
 		Type:          string(v1alpha1.External),
 		CreateTime:    now,
 		UpdateTime:    now,
 	}
 	if err := s.store.Save(ctx, sp); err != nil {
-		s.registry.Release(serviceType)
+		s.registry.Release(in.ServiceType)
 		return nil, err
 	}
 	return s.toAPI(&sp), nil

@@ -58,17 +58,16 @@ func (h *Handler) CreateProvider(ctx context.Context, request oapigen.CreateProv
 		metadataRaw = data
 	}
 
-	result, isNew, err := h.provider.Register(
-		ctx,
-		body.Name,
-		body.Endpoint,
-		body.ServiceType,
-		body.SchemaVersion,
-		body.DisplayName,
-		request.Params.Id,
-		body.Operations,
-		metadataRaw,
-	)
+	result, isNew, err := h.provider.Register(ctx, service.RegistrationInput{
+		Name:          body.Name,
+		Endpoint:      body.Endpoint,
+		ServiceType:   body.ServiceType,
+		SchemaVersion: body.SchemaVersion,
+		DisplayName:   body.DisplayName,
+		ProviderID:    request.Params.Id,
+		Operations:    body.Operations,
+		Metadata:      metadataRaw,
+	})
 	if err != nil {
 		if domErr, ok := err.(*service.DomainError); ok && domErr.Code == service.ErrCodeConflict {
 			return oapigen.CreateProvider409ApplicationProblemPlusJSONResponse(v1alpha1.Error{
