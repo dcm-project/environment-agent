@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,20 +20,11 @@ import (
 	"github.com/dcm-project/environment-agent/internal/health"
 	"github.com/dcm-project/environment-agent/internal/health/monitor"
 	"github.com/dcm-project/environment-agent/internal/httperror"
+	"github.com/dcm-project/environment-agent/internal/messaging"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/service"
 	"github.com/dcm-project/environment-agent/internal/provider/store"
 )
-
-// TODO: replace with real MessagingStatus from the NATS/messaging subsystem.
-type messagingStatus struct{}
-
-func (messagingStatus) IsConnected() bool { return true }
-
-// stubConsumerLagProvider returns 0 until Topic 7 provides real NATS consumer lag.
-type stubConsumerLagProvider struct{}
-
-func (stubConsumerLagProvider) ConsumerLag() int64 { return 0 }
 
 // serviceTypeLister adapts ProviderService to dcm.ServiceTypeLister.
 type serviceTypeLister struct {
@@ -107,19 +99,27 @@ func run(ctx context.Context) int {
 	}
 	providerSvc.RegisterEmbedded(cfg.Provider.EmbeddedSPs)
 
+	// Messaging client — must start before registrar (provides ConsumerLagProvider)
+	msgClient, topicMain, err := setupMessaging(cfg, logger)
+	if err != nil {
+		logger.Error("invalid topic name", "error", err)
+		return 1
+	}
+	if err := msgClient.Start(ctx); err != nil {
+		logger.Error("failed to start messaging client", "error", err)
+		return 1
+	}
+	defer msgClient.Stop()
+
 	// DCM Registrar — created before monitor starts so callbacks can be wired
 	// before any health transitions fire. Deferred after monitor so LIFO shuts
 	// registrar down first.
-	topicName := cfg.Messaging.TopicName
-	if topicName == "" {
-		topicName = cfg.Agent.Name
-	}
 	registrar, err := dcm.NewRegistrar(
 		dcm.RegistrarConfig{
 			AgentName:                 cfg.Agent.Name,
 			Environment:               cfg.Agent.Environment,
 			Cost:                      cfg.Agent.Cost,
-			TopicName:                 topicName,
+			TopicName:                 topicMain,
 			RegistrationURL:           cfg.DCM.RegistrationURL,
 			InitialBackoff:            cfg.DCM.InitialBackoff,
 			MaxBackoff:                cfg.DCM.MaxBackoff,
@@ -127,7 +127,7 @@ func run(ctx context.Context) int {
 			PrerequisiteRetryInterval: cfg.DCM.PrerequisiteRetryInterval,
 		},
 		&serviceTypeLister{providerSvc: providerSvc, logger: logger},
-		stubConsumerLagProvider{},
+		msgClient,
 		nil,
 		logger,
 	)
@@ -159,7 +159,7 @@ func run(ctx context.Context) int {
 		<-registrar.Done()
 	}()
 
-	healthSvc := health.NewService(messagingStatus{})
+	healthSvc := health.NewService(msgClient)
 	strictHandler := handler.New(healthSvc, providerSvc)
 	h := oapigen.NewStrictHandlerWithOptions(strictHandler, nil, oapigen.StrictHTTPServerOptions{
 		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -176,4 +176,17 @@ func run(ctx context.Context) int {
 	}
 	logger.Info("Environment Agent stopped")
 	return 0
+}
+
+func setupMessaging(cfg *config.Config, logger *slog.Logger) (*messaging.Client, string, error) {
+	topics := messaging.DeriveTopicNames(cfg.Agent.Name, cfg.Messaging.TopicName)
+	if err := messaging.ValidateTopicName(topics.Main); err != nil {
+		return nil, "", fmt.Errorf("invalid topic name: %w", err)
+	}
+	client := messaging.NewClient(messaging.ClientConfig{
+		URL:       cfg.Messaging.URL,
+		TopicName: topics.Main,
+		AgentName: cfg.Agent.Name,
+	}, logger)
+	return client, topics.Main, nil
 }

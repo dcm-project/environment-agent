@@ -85,18 +85,19 @@ var _ = Describe("Server Configuration", Label("unit"), func() {
 	})
 })
 
-// setValidTopicSixEnv sets all required Topic 6 env vars to valid defaults.
-func setValidTopicSixEnv() {
+// setValidEnv sets all required env vars to valid defaults.
+func setValidEnv() {
 	GinkgoT().Setenv("AGENT_NAME", "test-agent")
 	GinkgoT().Setenv("AGENT_ENVIRONMENT", "test")
 	GinkgoT().Setenv("AGENT_COST", "medium")
 	GinkgoT().Setenv("DCM_REGISTRATION_URL", "http://localhost:8080")
+	GinkgoT().Setenv("AGENT_MESSAGING_URL", "nats://localhost:4222")
 }
 
 var _ = Describe("Topic 6 Config", Label("unit"), func() {
 	Describe("Load", func() {
 		It("parses Topic 6 config fields from env (UT-XC-CFG-040)", func() {
-			setValidTopicSixEnv()
+			setValidEnv()
 			GinkgoT().Setenv("DCM_REGISTRATION_INITIAL_BACKOFF", "2s")
 			GinkgoT().Setenv("DCM_REGISTRATION_MAX_BACKOFF", "10m")
 			GinkgoT().Setenv("AGENT_HEARTBEAT_INTERVAL", "45s")
@@ -125,7 +126,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 		})
 
 		It("rejects malformed duration string at parse time (UT-XC-CFG-035)", func() {
-			setValidTopicSixEnv()
+			setValidEnv()
 			GinkgoT().Setenv("AGENT_HEARTBEAT_INTERVAL", "abc")
 			_, err := config.Load()
 			Expect(err).To(HaveOccurred())
@@ -135,7 +136,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 	Describe("Validate", func() {
 		DescribeTable("rejects absent required field (UT-XC-CFG-010, UT-XC-CFG-011)",
 			func(envVar string) {
-				setValidTopicSixEnv()
+				setValidEnv()
 				GinkgoT().Setenv(envVar, "")
 				cfg, err := config.Load()
 				Expect(err).NotTo(HaveOccurred())
@@ -147,10 +148,11 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 			Entry("AGENT_ENVIRONMENT", "AGENT_ENVIRONMENT"),
 			Entry("AGENT_COST", "AGENT_COST"),
 			Entry("DCM_REGISTRATION_URL", "DCM_REGISTRATION_URL"),
+			Entry("AGENT_MESSAGING_URL (UT-XC-CFG-011)", "AGENT_MESSAGING_URL"),
 		)
 
 		It("accepts all required fields present (UT-XC-CFG-012)", func() {
-			setValidTopicSixEnv()
+			setValidEnv()
 			cfg, err := config.Load()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cfg.Validate()).To(Succeed())
@@ -158,7 +160,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 
 		DescribeTable("rejects whitespace-only required field (UT-XC-CFG-013)",
 			func(envVar string) {
-				setValidTopicSixEnv()
+				setValidEnv()
 				GinkgoT().Setenv(envVar, "   ")
 				cfg, err := config.Load()
 				Expect(err).NotTo(HaveOccurred())
@@ -171,7 +173,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 		)
 
 		It("rejects invalid AGENT_COST value (UT-XC-CFG-020)", func() {
-			setValidTopicSixEnv()
+			setValidEnv()
 			GinkgoT().Setenv("AGENT_COST", "expensive")
 			cfg, err := config.Load()
 			Expect(err).NotTo(HaveOccurred())
@@ -183,7 +185,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 
 		DescribeTable("accepts valid cost values (UT-XC-CFG-021, UT-XC-CFG-022, UT-XC-CFG-023)",
 			func(cost string) {
-				setValidTopicSixEnv()
+				setValidEnv()
 				GinkgoT().Setenv("AGENT_COST", cost)
 				cfg, err := config.Load()
 				Expect(err).NotTo(HaveOccurred())
@@ -197,7 +199,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 		)
 
 		It("rejects case-sensitive cost (UT-XC-CFG-024)", func() {
-			setValidTopicSixEnv()
+			setValidEnv()
 			GinkgoT().Setenv("AGENT_COST", "Medium")
 			cfg, err := config.Load()
 			Expect(err).NotTo(HaveOccurred())
@@ -207,7 +209,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 		})
 
 		It("rejects empty cost (UT-XC-CFG-025)", func() {
-			setValidTopicSixEnv()
+			setValidEnv()
 			GinkgoT().Setenv("AGENT_COST", "")
 			cfg, err := config.Load()
 			Expect(err).NotTo(HaveOccurred())
@@ -217,7 +219,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 		})
 
 		It("accepts heartbeat interval at minimum 5s (UT-XC-CFG-031)", func() {
-			setValidTopicSixEnv()
+			setValidEnv()
 			GinkgoT().Setenv("AGENT_HEARTBEAT_INTERVAL", "5s")
 			cfg, err := config.Load()
 			Expect(err).NotTo(HaveOccurred())
@@ -225,7 +227,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 		})
 
 		It("accepts heartbeat interval at maximum 10m (UT-XC-CFG-032)", func() {
-			setValidTopicSixEnv()
+			setValidEnv()
 			GinkgoT().Setenv("AGENT_HEARTBEAT_INTERVAL", "10m")
 			cfg, err := config.Load()
 			Expect(err).NotTo(HaveOccurred())
@@ -233,7 +235,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 		})
 
 		It("rejects heartbeat interval below minimum 5s (UT-XC-CFG-033)", func() {
-			setValidTopicSixEnv()
+			setValidEnv()
 			GinkgoT().Setenv("AGENT_HEARTBEAT_INTERVAL", "4s")
 			cfg, err := config.Load()
 			Expect(err).NotTo(HaveOccurred())
@@ -243,7 +245,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 		})
 
 		It("rejects heartbeat interval above maximum 10m (UT-XC-CFG-034)", func() {
-			setValidTopicSixEnv()
+			setValidEnv()
 			GinkgoT().Setenv("AGENT_HEARTBEAT_INTERVAL", "11m")
 			cfg, err := config.Load()
 			Expect(err).NotTo(HaveOccurred())
@@ -254,7 +256,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 
 		DescribeTable("integer config range (UT-XC-CFG-036)",
 			func(value int, shouldPass bool) {
-				setValidTopicSixEnv()
+				setValidEnv()
 				GinkgoT().Setenv("AGENT_HEALTH_FAILURE_THRESHOLD", fmt.Sprintf("%d", value))
 				cfg, err := config.Load()
 				Expect(err).NotTo(HaveOccurred())
@@ -273,7 +275,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 		)
 
 		It("accepts timeout equal to interval (UT-XC-CFG-041)", func() {
-			setValidTopicSixEnv()
+			setValidEnv()
 			GinkgoT().Setenv("AGENT_HEALTH_CHECK_TIMEOUT", "10s")
 			GinkgoT().Setenv("AGENT_HEALTH_CHECK_INTERVAL", "10s")
 			cfg, err := config.Load()
@@ -282,7 +284,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 		})
 
 		It("accepts timeout below interval (UT-XC-CFG-042)", func() {
-			setValidTopicSixEnv()
+			setValidEnv()
 			GinkgoT().Setenv("AGENT_HEALTH_CHECK_TIMEOUT", "9s")
 			GinkgoT().Setenv("AGENT_HEALTH_CHECK_INTERVAL", "10s")
 			cfg, err := config.Load()
@@ -291,7 +293,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 		})
 
 		It("rejects initial backoff exceeding max backoff (UT-XC-CFG-032 cross-field)", func() {
-			setValidTopicSixEnv()
+			setValidEnv()
 			GinkgoT().Setenv("DCM_REGISTRATION_INITIAL_BACKOFF", "10m")
 			GinkgoT().Setenv("DCM_REGISTRATION_MAX_BACKOFF", "1m")
 			cfg, err := config.Load()
