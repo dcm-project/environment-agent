@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -14,6 +15,22 @@ var (
 	providerIDRegex    = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	schemaVersionRegex = regexp.MustCompile(`^v[0-9]+(alpha|beta)?[0-9]*$`)
 )
+
+// ValidateName checks that name is non-empty (after trimming whitespace).
+func ValidateName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	return nil
+}
+
+// ValidateServiceType checks that serviceType is non-empty (after trimming whitespace).
+func ValidateServiceType(serviceType string) error {
+	if strings.TrimSpace(serviceType) == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	return nil
+}
 
 // ValidateProviderID checks that id matches the AEP-122 resource ID pattern:
 // lowercase alphanumeric and hyphens, 1-63 chars, must not start or end with hyphen.

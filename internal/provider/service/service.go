@@ -24,6 +24,9 @@ type ProviderService struct {
 	health   provider.HealthTracker
 	mon      *monitor.Monitor // nil-safe: if nil, no monitoring
 	logger   *slog.Logger
+
+	onChangeMu sync.RWMutex
+	onChange   func()
 }
 
 // New creates a ProviderService with the given dependencies.
@@ -32,6 +35,23 @@ func New(s store.Store, registry *provider.Registry, health provider.HealthTrack
 		panic("provider: health tracker must not be nil")
 	}
 	return &ProviderService{store: s, registry: registry, health: health, mon: mon, logger: logger}
+}
+
+// SetOnChange sets a callback invoked after a provider is registered or updated.
+// Safe to call before or after providers are registered.
+func (s *ProviderService) SetOnChange(fn func()) {
+	s.onChangeMu.Lock()
+	defer s.onChangeMu.Unlock()
+	s.onChange = fn
+}
+
+func (s *ProviderService) notifyChange() {
+	s.onChangeMu.RLock()
+	fn := s.onChange
+	s.onChangeMu.RUnlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // RegistrationInput holds the fields for a provider registration request.
@@ -49,6 +69,14 @@ type RegistrationInput struct {
 // Register creates or updates a provider registration.
 // The caller (handler) is responsible for input validation (ID, schema_version, endpoint).
 func (s *ProviderService) Register(ctx context.Context, in RegistrationInput) (*v1alpha1.Provider, bool, error) {
+	result, created, err := s.registerLocked(ctx, in)
+	if err == nil {
+		s.notifyChange()
+	}
+	return result, created, err
+}
+
+func (s *ProviderService) registerLocked(ctx context.Context, in RegistrationInput) (*v1alpha1.Provider, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -268,17 +296,27 @@ func (s *ProviderService) RegisterEmbedded(serviceTypes []string) {
 func (s *ProviderService) removeStaleEmbedded(enabled map[string]bool) {
 	all, err := s.store.List(context.Background())
 	if err != nil {
+		s.logger.Error("failed to list providers for stale embedded cleanup", "error", err)
 		return
 	}
 	for _, p := range all {
 		if p.Type == string(v1alpha1.Embedded) && !enabled[p.ServiceType] {
-			_ = s.store.Delete(context.Background(), p.Name)
 			s.registry.Release(p.ServiceType)
-			s.health.DeleteState(p.ID)
-			if s.mon != nil {
-				s.mon.DeregisterProvider(p.ID)
-			}
+			s.cleanupEmbeddedRecord(p)
 		}
+	}
+}
+
+// cleanupEmbeddedRecord removes an embedded provider record from the store,
+// health tracker, and monitor. Used when an embedded service type is displaced
+// or no longer enabled.
+func (s *ProviderService) cleanupEmbeddedRecord(p store.StoredProvider) {
+	if err := s.store.Delete(context.Background(), p.Name); err != nil {
+		s.logger.Error("failed to delete embedded record", "name", p.Name, "error", err)
+	}
+	s.health.DeleteState(p.ID)
+	if s.mon != nil {
+		s.mon.DeregisterProvider(p.ID)
 	}
 }
 
@@ -296,6 +334,11 @@ func (s *ProviderService) registerEmbeddedType(st string) {
 
 	if err := s.registry.Claim(st, st); err != nil {
 		s.logger.Warn("skipping embedded SP: slot occupied", "service_type", st, "error", err)
+		if existing != nil && existing.Type == string(v1alpha1.Embedded) {
+			s.logger.Info("removing stale embedded record for occupied service type",
+				"service_type", st, "provider_id", existing.ID)
+			s.cleanupEmbeddedRecord(*existing)
+		}
 		return
 	}
 
@@ -314,7 +357,7 @@ func (s *ProviderService) registerEmbeddedType(st string) {
 	sp := store.StoredProvider{
 		ID:            id,
 		Name:          st,
-		Endpoint:      "",
+		Endpoint:      "embedded://" + st,
 		ServiceType:   st,
 		SchemaVersion: "v1alpha1",
 		Type:          string(v1alpha1.Embedded),
@@ -361,10 +404,12 @@ func (s *ProviderService) toAPI(sp *store.StoredProvider) *v1alpha1.Provider {
 			p.LastCheckTime = &lastCheck
 		}
 	} else {
-		defaultStatus := v1alpha1.Unhealthy
-		if sp.Type == string(v1alpha1.Embedded) {
-			defaultStatus = v1alpha1.Ready
-		}
+		// Properly registered providers always have health state:
+		// external → trackExternalProvider sets Unhealthy,
+		// embedded → registerEmbeddedType sets Ready via monitor/tracker.
+		// Missing state means the record is stale; default to Unavailable
+		// so it won't be advertised.
+		defaultStatus := v1alpha1.Unavailable
 		p.Status = &defaultStatus
 	}
 	if len(sp.Metadata) > 0 {

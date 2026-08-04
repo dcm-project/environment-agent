@@ -16,6 +16,9 @@ type providerEntry struct {
 	checker Checker
 }
 
+// TransitionFunc is called when a provider's health state changes.
+type TransitionFunc func(providerID string, from, to v1alpha1.ProviderStatus)
+
 // Monitor runs periodic health checks for registered providers.
 type Monitor struct {
 	healthTracker    provider.HealthTracker
@@ -24,13 +27,14 @@ type Monitor struct {
 	checkTimeout     time.Duration
 	failureThreshold int
 
-	mu         sync.Mutex
-	providers  map[string]*providerEntry
-	started    bool
-	stopped    bool
-	stopCtx    context.Context
-	stopCancel context.CancelFunc
-	wg         sync.WaitGroup
+	mu           sync.Mutex
+	providers    map[string]*providerEntry
+	onTransition TransitionFunc
+	started      bool
+	stopped      bool
+	stopCtx      context.Context
+	stopCancel   context.CancelFunc
+	wg           sync.WaitGroup
 }
 
 func New(healthTracker provider.HealthTracker, cfg config.HealthConfig, logger *slog.Logger) *Monitor {
@@ -87,15 +91,46 @@ func (m *Monitor) RegisterProvider(id string, checker Checker, initialState v1al
 		result := checker.Check(checkCtx)
 		cancel()
 
+		var (
+			cb           TransitionFunc
+			from, to     v1alpha1.ProviderStatus
+			transitionID string
+		)
+
 		m.mu.Lock()
 		if !m.stopped {
 			if entry := m.providers[id]; entry != nil && entry.sm == sm {
-				_, to := sm.RecordResult(result)
+				from, to = sm.RecordResult(result)
 				m.healthTracker.SetState(id, to, time.Now().UTC())
+				if from != to && m.onTransition != nil {
+					cb = m.onTransition
+					transitionID = id
+				}
 			}
 		}
 		m.mu.Unlock()
+
+		if cb != nil {
+			m.safeTransitionCallback(cb, transitionID, from, to)
+		}
 	}
+}
+
+func (m *Monitor) safeTransitionCallback(cb TransitionFunc, id string, from, to v1alpha1.ProviderStatus) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.logger.Error("transition callback panicked", "provider_id", id, "panic", r)
+		}
+	}()
+	cb(id, from, to)
+}
+
+// SetOnTransition sets a callback invoked when a provider's health state changes.
+// Must be called before Start.
+func (m *Monitor) SetOnTransition(fn TransitionFunc) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onTransition = fn
 }
 
 // DeregisterProvider removes a provider from monitoring.
@@ -152,13 +187,23 @@ func (m *Monitor) checkProvider(ctx context.Context, p providerSnapshot) {
 	result := p.checker.Check(checkCtx)
 	cancel()
 
+	var cb TransitionFunc
+	var from, to v1alpha1.ProviderStatus
+
 	m.mu.Lock()
 	if entry := m.providers[p.id]; entry != nil && entry.sm == p.sm {
-		from, to := p.sm.RecordResult(result)
+		from, to = p.sm.RecordResult(result)
 		m.healthTracker.SetState(p.id, to, time.Now().UTC())
 		if from != to {
 			m.logger.Warn("provider health transition", "provider_id", p.id, "from", from, "to", to)
+			if m.onTransition != nil {
+				cb = m.onTransition
+			}
 		}
 	}
 	m.mu.Unlock()
+
+	if cb != nil {
+		m.safeTransitionCallback(cb, p.id, from, to)
+	}
 }
