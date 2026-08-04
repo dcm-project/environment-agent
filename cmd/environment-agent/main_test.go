@@ -20,6 +20,10 @@ var _ = Describe("run", Label("unit"), func() {
 		DeferCleanup(os.Unsetenv, "AGENT_SERVER_ADDRESS")
 
 		GinkgoT().Setenv("AGENT_SP_PERSISTENCE_PATH", GinkgoT().TempDir()+"/registrations.json")
+		GinkgoT().Setenv("AGENT_NAME", "test-agent")
+		GinkgoT().Setenv("AGENT_ENVIRONMENT", "test")
+		GinkgoT().Setenv("AGENT_COST", "medium")
+		GinkgoT().Setenv("DCM_REGISTRATION_URL", "http://localhost:8080")
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
