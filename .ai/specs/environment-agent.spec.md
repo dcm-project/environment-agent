@@ -690,6 +690,7 @@ Out of scope: Metrics/observability integration.
 | REQ-HMN-050 | SP responding with `200 OK` and `status: "healthy"` (external) or internal check passing (embedded) MUST set state to Ready | MUST | |
 | REQ-HMN-051 | Newly registered external SPs MUST start in Unhealthy state until the first successful health check sets them to Ready | MUST | |
 | REQ-HMN-052 | Newly registered embedded SPs MUST have their in-process health check executed immediately. The initial state is set based on the result: Ready if passing, Unhealthy if reporting unhealthy | MUST | |
+| REQ-HMN-054 | When an external SP re-registers with a changed endpoint, its health state MUST reset to Unhealthy. Non-endpoint field changes MUST NOT affect health state | MUST | |
 | REQ-HMN-060 | SP responding with `200 OK` and `status: "unhealthy"` (external) or internal check reporting unhealthy (embedded) MUST set state to Unhealthy | MUST | |
 | REQ-HMN-070 | SP not responding (connection refused, DNS failure, TCP timeout, HTTP status other than 200, or response body unparseable) after exceeding a configurable failure threshold MUST set state to Unavailable | MUST | |
 | REQ-HMN-080 | A healthy response MUST reset the failure counter for the SP | MUST | |
@@ -857,6 +858,21 @@ Out of scope: Metrics/observability integration.
 - **Given** an embedded SP is registered at startup
 - **When** the in-process health check reports unhealthy
 - **Then** the SP state MUST be Unhealthy
+
+##### AC-HMN-054: Endpoint change resets health
+
+- **Validates:** REQ-HMN-054
+- **Given** an external SP is registered and has reached Ready state
+- **When** the SP re-registers with a different endpoint
+- **Then** its health state MUST reset to Unhealthy
+- **And** the health monitor MUST begin polling the new endpoint
+
+##### AC-HMN-055: Non-endpoint update preserves health
+
+- **Validates:** REQ-HMN-054
+- **Given** an external SP is registered and has reached Ready state
+- **When** the SP re-registers with the same endpoint but different display_name
+- **Then** its health state MUST remain Ready
 
 ##### AC-HMN-185: Unavailable to Unhealthy re-advertises
 
