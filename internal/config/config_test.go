@@ -10,7 +10,7 @@ import (
 	"github.com/dcm-project/environment-agent/internal/config"
 )
 
-var _ = Describe("Server Configuration", func() {
+var _ = Describe("Server Configuration", Label("unit"), func() {
 	Describe("Load", func() {
 		It("parses all server config fields from environment variables (UT-HTTP-010)", func() {
 			Expect(os.Setenv("AGENT_SERVER_ADDRESS", ":9090")).To(Succeed())
@@ -47,6 +47,22 @@ var _ = Describe("Server Configuration", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cfg).NotTo(BeNil())
 			Expect(cfg.Server.RequestTimeout).To(Equal(30 * time.Second))
+		})
+	})
+
+	Describe("Health Config", func() {
+		It("parses health check config from env (UT-HMN-070)", func() {
+			GinkgoT().Setenv("AGENT_HEALTH_CHECK_INTERVAL", "20s")
+			GinkgoT().Setenv("AGENT_HEALTH_CHECK_TIMEOUT", "2s")
+			GinkgoT().Setenv("AGENT_HEALTH_FAILURE_THRESHOLD", "5")
+			GinkgoT().Setenv("AGENT_POD_CONDITIONS_ENABLED", "true")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Health.CheckInterval).To(Equal(20 * time.Second))
+			Expect(cfg.Health.CheckTimeout).To(Equal(2 * time.Second))
+			Expect(cfg.Health.FailureThreshold).To(Equal(5))
+			Expect(cfg.Health.PodConditionsEnabled).To(Equal("true"))
 		})
 	})
 

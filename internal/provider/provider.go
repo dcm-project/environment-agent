@@ -45,7 +45,8 @@ func ValidateSchemaVersion(version string) error {
 	return nil
 }
 
-// ValidateEndpoint checks that endpoint is a well-formed http or https URL with a host.
+// ValidateEndpoint checks that endpoint is a well-formed http(s) URL with a host
+// and no query or fragment.
 func ValidateEndpoint(endpoint string) error {
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -56,6 +57,12 @@ func ValidateEndpoint(endpoint string) error {
 	}
 	if u.Host == "" {
 		return fmt.Errorf("missing host")
+	}
+	if u.RawQuery != "" {
+		return fmt.Errorf("endpoint must not contain query parameters")
+	}
+	if u.Fragment != "" {
+		return fmt.Errorf("endpoint must not contain a fragment")
 	}
 	return nil
 }

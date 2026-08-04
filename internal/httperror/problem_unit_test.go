@@ -13,7 +13,7 @@ import (
 	"github.com/dcm-project/environment-agent/internal/httperror"
 )
 
-var _ = Describe("RFC 7807 Error Construction", func() {
+var _ = Describe("RFC 7807 Error Construction", Label("unit"), func() {
 	Describe("WriteResponse", func() {
 		It("constructs error body with all required fields (UT-XC-ERR-010)", func() {
 			recorder := httptest.NewRecorder()

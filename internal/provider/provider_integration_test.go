@@ -23,6 +23,7 @@ import (
 	"github.com/dcm-project/environment-agent/internal/config"
 	"github.com/dcm-project/environment-agent/internal/handler"
 	"github.com/dcm-project/environment-agent/internal/health"
+	"github.com/dcm-project/environment-agent/internal/health/monitor"
 	"github.com/dcm-project/environment-agent/internal/httperror"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/service"
@@ -64,9 +65,12 @@ func startRealServer() (baseURL string, stop func()) {
 	Expect(err).NotTo(HaveOccurred())
 	registry := provider.NewRegistry()
 	healthTracker := provider.NewInMemoryHealthTracker()
-	providerSvc := service.New(fileStore, registry, healthTracker, logger)
+	healthMonitor := monitor.New(healthTracker, cfg.Health, logger)
+	providerSvc := service.New(fileStore, registry, healthTracker, healthMonitor, logger)
 	Expect(providerSvc.LoadPersisted()).To(Succeed())
 	providerSvc.RegisterEmbedded(cfg.Provider.EmbeddedSPs)
+	healthMonitor.Start(ctx)
+	DeferCleanup(healthMonitor.Stop)
 
 	healthSvc := health.NewService(noopMessaging{})
 	strictHandler := handler.New(healthSvc, providerSvc)
@@ -137,7 +141,7 @@ func startWithPersistence(path string) error {
 	registry := provider.NewRegistry()
 	healthTracker := provider.NewInMemoryHealthTracker()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	providerSvc := service.New(fileStore, registry, healthTracker, logger)
+	providerSvc := service.New(fileStore, registry, healthTracker, nil, logger)
 	return providerSvc.LoadPersisted()
 }
 
