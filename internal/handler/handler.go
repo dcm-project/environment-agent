@@ -38,7 +38,7 @@ func (h *Handler) CreateProvider(ctx context.Context, request oapigen.CreateProv
 	instance := requestctx.URIFromContext(ctx)
 
 	var providerID *string
-	if request.Params.Id != nil && *request.Params.Id != "" {
+	if request.Params.Id != nil {
 		if err := provider.ValidateProviderID(*request.Params.Id); err != nil {
 			return validationError("id", err, instance), nil
 		}

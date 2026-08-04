@@ -87,7 +87,7 @@ func httpClient() *http.Client {
 	return &http.Client{Timeout: 2 * time.Second}
 }
 
-var _ = Describe("Health Service Integration", func() {
+var _ = Describe("Health Service Integration", Label("integration"), func() {
 	var (
 		cfg       *config.Config
 		logger    *slog.Logger

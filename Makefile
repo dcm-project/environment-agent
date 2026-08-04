@@ -37,11 +37,18 @@ lint:
 test:
 	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --skip-package=test/e2e
 
+# Every Describe() in the repo carries Label("unit") or Label("integration"),
+# so these targets filter by label rather than curating package lists (a
+# package list alone doesn't work: ginkgo -r recurses into subpackages like
+# ./internal/health/monitor regardless of whether they're named explicitly,
+# and packages like ./internal/provider legitimately mix both labels). Any
+# package under ./internal/... or ./cmd/... can be listed in both targets
+# below without risk of double-running specs.
 test-unit:
-	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending ./internal/config ./internal/httperror ./internal/provider ./cmd/environment-agent
+	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --label-filter=unit ./internal/config ./internal/httperror ./internal/provider ./internal/health/monitor ./cmd/environment-agent
 
 test-integration:
-	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending ./internal/apiserver ./internal/health ./internal/provider
+	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --label-filter=integration ./internal/apiserver ./internal/health ./internal/provider
 
 test-e2e:
 	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --tags=e2e ./test/e2e/...

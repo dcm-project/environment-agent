@@ -14,7 +14,7 @@ func TestMain(t *testing.T) {
 	RunSpecs(t, "Main Suite")
 }
 
-var _ = Describe("run", func() {
+var _ = Describe("run", Label("unit"), func() {
 	It("exits cleanly on cancelled context", func() {
 		Expect(os.Setenv("AGENT_SERVER_ADDRESS", ":0")).To(Succeed())
 		DeferCleanup(os.Unsetenv, "AGENT_SERVER_ADDRESS")
