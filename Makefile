@@ -38,10 +38,10 @@ test:
 	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --skip-package=test/e2e
 
 test-unit:
-	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending ./internal/config ./internal/httperror ./internal/provider ./cmd/environment-agent
+	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending ./internal/config ./internal/httperror ./internal/provider ./internal/health/monitor ./cmd/environment-agent
 
 test-integration:
-	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending ./internal/apiserver ./internal/health ./internal/provider
+	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending ./internal/apiserver ./internal/health ./internal/health/monitor ./internal/provider
 
 test-e2e:
 	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --tags=e2e ./test/e2e/...

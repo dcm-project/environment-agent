@@ -15,6 +15,7 @@ import (
 	"github.com/dcm-project/environment-agent/internal/config"
 	"github.com/dcm-project/environment-agent/internal/handler"
 	"github.com/dcm-project/environment-agent/internal/health"
+	"github.com/dcm-project/environment-agent/internal/health/monitor"
 	"github.com/dcm-project/environment-agent/internal/httperror"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/service"
@@ -69,13 +70,21 @@ func run(ctx context.Context) int {
 	}
 	registry := provider.NewRegistry()
 	healthTracker := provider.NewInMemoryHealthTracker()
-	providerSvc := service.New(fileStore, registry, healthTracker, logger)
+	healthMonitor := monitor.New(healthTracker, cfg.Health, logger)
+	providerSvc := service.New(fileStore, registry, healthTracker, healthMonitor, logger)
 
 	if err := providerSvc.LoadPersisted(); err != nil {
 		logger.Error("failed to load persisted providers", "error", err)
 		return 1
 	}
 	providerSvc.RegisterEmbedded(cfg.Provider.EmbeddedSPs)
+
+	monitorCtx, monitorCancel := context.WithCancel(context.Background())
+	healthMonitor.Start(monitorCtx)
+	defer func() {
+		monitorCancel()
+		healthMonitor.Stop()
+	}()
 
 	healthSvc := health.NewService(messagingStatus{})
 	strictHandler := handler.New(healthSvc, providerSvc)
