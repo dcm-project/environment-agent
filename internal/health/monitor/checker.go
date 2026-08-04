@@ -20,7 +20,7 @@ type ExternalChecker struct {
 }
 
 func NewExternalChecker(endpoint string) *ExternalChecker {
-	return &ExternalChecker{endpoint: endpoint, client: &http.Client{}}
+	return &ExternalChecker{endpoint: strings.TrimRight(endpoint, "/"), client: &http.Client{}}
 }
 
 func (c *ExternalChecker) Check(ctx context.Context) HealthCheckResult {

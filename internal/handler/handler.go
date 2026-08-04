@@ -44,6 +44,12 @@ func (h *Handler) CreateProvider(ctx context.Context, request oapigen.CreateProv
 		}
 		providerID = request.Params.Id
 	}
+	if err := provider.ValidateName(body.Name); err != nil {
+		return validationError("name", err, instance), nil
+	}
+	if err := provider.ValidateServiceType(body.ServiceType); err != nil {
+		return validationError("service_type", err, instance), nil
+	}
 	if err := provider.ValidateSchemaVersion(body.SchemaVersion); err != nil {
 		return validationError("schema_version", err, instance), nil
 	}

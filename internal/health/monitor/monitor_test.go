@@ -208,6 +208,155 @@ var _ = Describe("Monitor", Label("unit"), func() {
 		})
 	})
 
+	Describe("OnTransition callback", func() {
+		It("fires on state transition during periodic check", func() {
+			ht := newFakeHealthTracker()
+			checker := &countingChecker{result: monitor.CheckFailed}
+
+			m := newTestMonitor(ht, config.HealthConfig{
+				CheckInterval:    50 * time.Millisecond,
+				CheckTimeout:     5 * time.Second,
+				FailureThreshold: 1,
+			})
+
+			var mu sync.Mutex
+			var transitions []struct{ from, to v1alpha1.ProviderStatus }
+			m.SetOnTransition(func(_ string, from, to v1alpha1.ProviderStatus) {
+				mu.Lock()
+				transitions = append(transitions, struct{ from, to v1alpha1.ProviderStatus }{from, to})
+				mu.Unlock()
+			})
+
+			m.RegisterProvider("p1", checker, v1alpha1.Ready, false)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			m.Start(ctx)
+			DeferCleanup(m.Stop)
+			DeferCleanup(cancel)
+
+			Eventually(func() int {
+				mu.Lock()
+				defer mu.Unlock()
+				return len(transitions)
+			}).WithTimeout(2 * time.Second).WithPolling(20 * time.Millisecond).Should(BeNumerically(">=", 1))
+
+			mu.Lock()
+			Expect(transitions[0].from).To(Equal(v1alpha1.Ready))
+			Expect(transitions[0].to).To(Equal(v1alpha1.Unavailable))
+			mu.Unlock()
+		})
+
+		It("fires on state transition during initial check", func() {
+			ht := newFakeHealthTracker()
+			checker := &countingChecker{result: monitor.CheckUnhealthy}
+
+			m := newTestMonitor(ht, config.HealthConfig{
+				CheckInterval:    10 * time.Second,
+				CheckTimeout:     5 * time.Second,
+				FailureThreshold: 3,
+			})
+
+			var mu sync.Mutex
+			var transitions []struct{ from, to v1alpha1.ProviderStatus }
+			m.SetOnTransition(func(_ string, from, to v1alpha1.ProviderStatus) {
+				mu.Lock()
+				transitions = append(transitions, struct{ from, to v1alpha1.ProviderStatus }{from, to})
+				mu.Unlock()
+			})
+
+			m.RegisterProvider("p1", checker, v1alpha1.Ready, true)
+
+			mu.Lock()
+			Expect(transitions).To(HaveLen(1))
+			Expect(transitions[0].from).To(Equal(v1alpha1.Ready))
+			Expect(transitions[0].to).To(Equal(v1alpha1.Unhealthy))
+			mu.Unlock()
+		})
+
+		It("recovers from panicking callback and keeps monitoring", func() {
+			ht := newFakeHealthTracker()
+			checker := &countingChecker{result: monitor.CheckFailed}
+
+			m := newTestMonitor(ht, config.HealthConfig{
+				CheckInterval:    50 * time.Millisecond,
+				CheckTimeout:     5 * time.Second,
+				FailureThreshold: 1,
+			})
+
+			panicOnce := sync.Once{}
+			postPanicCalls := atomic.Int64{}
+			m.SetOnTransition(func(_ string, _, _ v1alpha1.ProviderStatus) {
+				panicOnce.Do(func() { panic("boom") })
+				postPanicCalls.Add(1)
+			})
+
+			m.RegisterProvider("p1", checker, v1alpha1.Ready, false)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			m.Start(ctx)
+			DeferCleanup(m.Stop)
+			DeferCleanup(cancel)
+
+			// First transition panics; monitor must survive and keep checking.
+			Eventually(func() int64 {
+				return checker.count.Load()
+			}).WithTimeout(2 * time.Second).WithPolling(20 * time.Millisecond).Should(BeNumerically(">=", 3))
+		})
+
+		It("recovers from panicking callback during initial check", func() {
+			ht := newFakeHealthTracker()
+			checker := &countingChecker{result: monitor.CheckUnhealthy}
+
+			m := newTestMonitor(ht, config.HealthConfig{
+				CheckInterval:    10 * time.Second,
+				CheckTimeout:     5 * time.Second,
+				FailureThreshold: 3,
+			})
+
+			m.SetOnTransition(func(_ string, _, _ v1alpha1.ProviderStatus) {
+				panic("boom during initial check")
+			})
+
+			Expect(func() {
+				m.RegisterProvider("p1", checker, v1alpha1.Ready, true)
+			}).NotTo(Panic())
+
+			state, ok := ht.GetState("p1")
+			Expect(ok).To(BeTrue())
+			Expect(state.Status).To(Equal(v1alpha1.Unhealthy))
+		})
+
+		It("does not fire when state stays the same", func() {
+			ht := newFakeHealthTracker()
+			checker := &countingChecker{result: monitor.CheckHealthy}
+
+			m := newTestMonitor(ht, config.HealthConfig{
+				CheckInterval:    50 * time.Millisecond,
+				CheckTimeout:     5 * time.Second,
+				FailureThreshold: 3,
+			})
+
+			callCount := atomic.Int64{}
+			m.SetOnTransition(func(_ string, _, _ v1alpha1.ProviderStatus) {
+				callCount.Add(1)
+			})
+
+			m.RegisterProvider("p1", checker, v1alpha1.Ready, false)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			m.Start(ctx)
+			DeferCleanup(m.Stop)
+			DeferCleanup(cancel)
+
+			// Wait for multiple checks to run
+			Eventually(func() int64 {
+				return checker.count.Load()
+			}).WithTimeout(2 * time.Second).WithPolling(20 * time.Millisecond).Should(BeNumerically(">=", 3))
+
+			Expect(callCount.Load()).To(Equal(int64(0)))
+		})
+	})
+
 	Describe("Start idempotency", func() {
 		It("only starts one monitoring loop when called twice", func() {
 			ht := newFakeHealthTracker()
