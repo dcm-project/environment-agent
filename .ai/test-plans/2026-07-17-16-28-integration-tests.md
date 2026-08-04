@@ -904,7 +904,17 @@ Unless overridden, tests use:
 - **Given** DCM returns 429 with `Retry-After: 2` on first attempt
 - **When** the agent retries
 - **Then** the second attempt MUST occur no earlier than ~2s after the first response
-- **And** when 429 has no `Retry-After`, standard backoff MUST apply
+
+---
+
+### IT-DCM-105: Standard backoff on 429 without Retry-After
+
+- **Validates AC:** AC-DCM-061 (second clause)
+- **Test Infrastructure:** Mock DCM returning 429 (no Retry-After header) then 201
+- **Given** DCM returns 429 without `Retry-After` on first attempt
+- **When** the agent retries
+- **Then** the gap between attempts MUST be bounded by MaxBackoff + tolerance (standard backoff applied, not infinite wait)
+- **And** the gap MUST be greater than 0
 
 ---
 
@@ -1623,7 +1633,7 @@ Unless overridden, tests use:
 | AC-DCM-040 | IT-DCM-070 |
 | AC-DCM-050 | IT-DCM-080 |
 | AC-DCM-060 | IT-DCM-090 |
-| AC-DCM-061 | IT-DCM-100 |
+| AC-DCM-061 | IT-DCM-100, IT-DCM-105 |
 | AC-DCM-070 | IT-DCM-110 |
 | AC-DCM-080 | IT-DCM-120 |
 | AC-DCM-085 | IT-DCM-130 |
