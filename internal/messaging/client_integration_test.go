@@ -6,20 +6,25 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-
 	"github.com/google/uuid"
 	natstest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 
 	"github.com/dcm-project/environment-agent/internal/messaging"
 )
+
+func setNoopHandlers(c *messaging.Client) {
+	c.SetMainHandler(func(_ context.Context, _ []byte) error { return nil })
+	c.SetCancelHandler(func(_ context.Context, _ []byte) error { return nil })
+}
 
 func deleteStreams(js jetstream.JetStream, topicName string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -76,6 +81,7 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 			TopicName: topicName,
 			AgentName: "test-agent",
 		}, logger)
+		setNoopHandlers(client)
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
@@ -98,6 +104,7 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 			TopicName: topicName,
 			AgentName: "test-agent",
 		}, logger)
+		setNoopHandlers(client)
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
@@ -125,10 +132,12 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 		}
 
 		client1 := messaging.NewClient(cfg, logger)
+		setNoopHandlers(client1)
 		Expect(client1.Start(ctx)).To(Succeed())
 		client1.Stop()
 
 		client2 := messaging.NewClient(cfg, logger)
+		setNoopHandlers(client2)
 		Expect(client2.Start(ctx)).To(Succeed())
 		client2.Stop()
 	})
@@ -141,6 +150,7 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 		}
 
 		client1 := messaging.NewClient(cfg, logger)
+		setNoopHandlers(client1)
 		Expect(client1.Start(ctx)).To(Succeed())
 
 		stream, err := testJS.Stream(ctx, topicName)
@@ -149,6 +159,7 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 		client1.Stop()
 
 		client2 := messaging.NewClient(cfg, logger)
+		setNoopHandlers(client2)
 		Expect(client2.Start(ctx)).To(Succeed())
 		defer client2.Stop()
 
@@ -195,6 +206,7 @@ var _ = Describe("Message Durability", Label("integration"), func() {
 
 		received := make(chan []byte, 1)
 		client1 := messaging.NewClient(cfg, logger)
+		client1.SetCancelHandler(func(_ context.Context, _ []byte) error { return nil })
 		client1.SetMainHandler(func(_ context.Context, msg []byte) error {
 			received <- msg
 			return fmt.Errorf("simulated failure")
@@ -208,6 +220,7 @@ var _ = Describe("Message Durability", Label("integration"), func() {
 
 		redelivered := make(chan []byte, 1)
 		client2 := messaging.NewClient(cfg, logger)
+		client2.SetCancelHandler(func(_ context.Context, _ []byte) error { return nil })
 		client2.SetMainHandler(func(_ context.Context, msg []byte) error {
 			redelivered <- msg
 			return nil
@@ -253,6 +266,7 @@ var _ = Describe("Topic Advertising", Label("integration"), func() {
 			TopicName: topicName,
 			AgentName: "test-agent",
 		}, logger)
+		setNoopHandlers(client)
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
@@ -297,9 +311,26 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 
 		handlerCalled := make(chan []byte, 1)
 		client := messaging.NewClient(cfg, logger)
+		client.SetCancelHandler(func(_ context.Context, _ []byte) error { return nil })
 		client.SetMainHandler(func(_ context.Context, msg []byte) error {
 			handlerCalled <- msg
-			return nil
+			var event cloudevents.Event
+			_ = json.Unmarshal(msg, &event)
+			var p map[string]string
+			_ = json.Unmarshal(event.Data(), &p)
+			respEvent := cloudevents.NewEvent()
+			respEvent.SetID(uuid.New().String())
+			respEvent.SetSource("dcm/agents/test-agent")
+			respEvent.SetType("dcm.agent.creation-acknowledged")
+			respEvent.SetTime(time.Now())
+			_ = respEvent.SetData(cloudevents.ApplicationJSON, map[string]any{
+				"agentName":  "test-agent",
+				"topicName":  topicName,
+				"resourceId": p["resourceId"],
+				"status":     "PROVISIONING",
+			})
+			data, _ := json.Marshal(respEvent)
+			return testConn.Publish("dcm.agents.responses", data)
 		})
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
@@ -329,22 +360,27 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 
 		mainReceived := make(chan string, 5)
 		cancelReceived := make(chan string, 5)
+		denied := &sync.Map{}
 
 		client := messaging.NewClient(cfg, logger)
-		client.SetMainHandler(func(_ context.Context, msg []byte) error {
-			var event cloudevents.Event
-			_ = json.Unmarshal(msg, &event)
-			var payload map[string]string
-			_ = json.Unmarshal(event.Data(), &payload)
-			mainReceived <- payload["resourceId"]
-			return nil
-		})
 		client.SetCancelHandler(func(_ context.Context, msg []byte) error {
 			var event cloudevents.Event
 			_ = json.Unmarshal(msg, &event)
 			var payload map[string]string
 			_ = json.Unmarshal(event.Data(), &payload)
+			denied.Store(payload["resourceId"], struct{}{})
 			cancelReceived <- payload["resourceId"]
+			return nil
+		})
+		client.SetMainHandler(func(_ context.Context, msg []byte) error {
+			var event cloudevents.Event
+			_ = json.Unmarshal(msg, &event)
+			var payload map[string]string
+			_ = json.Unmarshal(event.Data(), &payload)
+			if _, found := denied.Load(payload["resourceId"]); found {
+				return nil
+			}
+			mainReceived <- payload["resourceId"]
 			return nil
 		})
 		Expect(client.Start(ctx)).To(Succeed())
@@ -470,16 +506,44 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 			AgentName: "test-agent",
 		}
 
-		handlerCalled := make(chan []byte, 1)
+		handlerCalled := make(chan []byte, 5)
 		cancelProcessed := make(chan struct{}, 1)
+		denied := &sync.Map{}
 		client := messaging.NewClient(cfg, logger)
-		client.SetMainHandler(func(_ context.Context, msg []byte) error {
-			handlerCalled <- msg
-			return nil
-		})
-		client.SetCancelHandler(func(_ context.Context, _ []byte) error {
+		client.SetCancelHandler(func(_ context.Context, msg []byte) error {
+			var event cloudevents.Event
+			_ = json.Unmarshal(msg, &event)
+			var p map[string]any
+			_ = json.Unmarshal(event.Data(), &p)
+			if id, ok := p["resourceId"].(string); ok {
+				denied.Store(id, struct{}{})
+			}
 			cancelProcessed <- struct{}{}
 			return nil
+		})
+		client.SetMainHandler(func(_ context.Context, msg []byte) error {
+			var event cloudevents.Event
+			_ = json.Unmarshal(msg, &event)
+			var p map[string]any
+			_ = json.Unmarshal(event.Data(), &p)
+			id, _ := p["resourceId"].(string)
+			if _, found := denied.Load(id); found {
+				return nil
+			}
+			handlerCalled <- msg
+			respEvent := cloudevents.NewEvent()
+			respEvent.SetID(uuid.New().String())
+			respEvent.SetSource("dcm/agents/test-agent")
+			respEvent.SetType("dcm.agent.creation-acknowledged")
+			respEvent.SetTime(time.Now())
+			_ = respEvent.SetData(cloudevents.ApplicationJSON, map[string]any{
+				"agentName":  "test-agent",
+				"topicName":  topicName,
+				"resourceId": id,
+				"status":     "PROVISIONING",
+			})
+			data, _ := json.Marshal(respEvent)
+			return testConn.Publish("dcm.agents.responses", data)
 		})
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
@@ -557,6 +621,7 @@ var _ = Describe("Connection Resilience", Label("integration"), func() {
 			TopicName: topicName,
 			AgentName: "test-agent",
 		}, logger)
+		setNoopHandlers(client)
 
 		// Start must NOT block — non-blocking per REQ-MSG-110
 		startDone := make(chan error, 1)
@@ -623,6 +688,7 @@ var _ = Describe("Acknowledgment", Label("integration"), func() {
 		handlerBlock := make(chan struct{})
 		var invocation atomic.Int32
 		client := messaging.NewClient(cfg, logger)
+		client.SetCancelHandler(func(_ context.Context, _ []byte) error { return nil })
 		client.SetMainHandler(func(_ context.Context, _ []byte) error {
 			current := int(invocation.Add(1))
 			callCount <- current
@@ -685,8 +751,25 @@ var _ = Describe("CloudEvent Correlation", Label("integration"), func() {
 		}
 
 		client := messaging.NewClient(cfg, logger)
-		client.SetMainHandler(func(_ context.Context, _ []byte) error {
-			return nil
+		client.SetCancelHandler(func(_ context.Context, _ []byte) error { return nil })
+		client.SetMainHandler(func(_ context.Context, msg []byte) error {
+			var event cloudevents.Event
+			_ = json.Unmarshal(msg, &event)
+			var p map[string]string
+			_ = json.Unmarshal(event.Data(), &p)
+			respEvent := cloudevents.NewEvent()
+			respEvent.SetID(uuid.New().String())
+			respEvent.SetSource("dcm/agents/test-agent")
+			respEvent.SetType("dcm.agent.creation-acknowledged")
+			respEvent.SetTime(time.Now())
+			_ = respEvent.SetData(cloudevents.ApplicationJSON, map[string]any{
+				"agentName":  "test-agent",
+				"topicName":  topicName,
+				"resourceId": p["resourceId"],
+				"status":     "PROVISIONING",
+			})
+			data, _ := json.Marshal(respEvent)
+			return testConn.Publish("dcm.agents.responses", data)
 		})
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
@@ -727,8 +810,25 @@ var _ = Describe("CloudEvent Correlation", Label("integration"), func() {
 		}
 
 		client := messaging.NewClient(cfg, logger)
-		client.SetMainHandler(func(_ context.Context, _ []byte) error {
-			return nil
+		client.SetCancelHandler(func(_ context.Context, _ []byte) error { return nil })
+		client.SetMainHandler(func(_ context.Context, msg []byte) error {
+			var event cloudevents.Event
+			_ = json.Unmarshal(msg, &event)
+			var p map[string]string
+			_ = json.Unmarshal(event.Data(), &p)
+			respEvent := cloudevents.NewEvent()
+			respEvent.SetID(uuid.New().String())
+			respEvent.SetSource("dcm/agents/test-agent")
+			respEvent.SetType("dcm.agent.deletion-acknowledged")
+			respEvent.SetTime(time.Now())
+			_ = respEvent.SetData(cloudevents.ApplicationJSON, map[string]any{
+				"agentName":  "test-agent",
+				"topicName":  topicName,
+				"resourceId": p["resourceId"],
+				"status":     "DELETING",
+			})
+			data, _ := json.Marshal(respEvent)
+			return testConn.Publish("dcm.agents.responses", data)
 		})
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
@@ -754,17 +854,21 @@ var _ = Describe("CloudEvent Correlation", Label("integration"), func() {
 		Expect(respPayload["topicName"]).To(Equal(topicName))
 	})
 
-	It("publishResponseCE failure causes nak and redelivery (IT-MSG-073)", func() {
+	It("handler failure causes nak and redelivery (IT-MSG-073)", func() {
 		cfg := messaging.ClientConfig{
 			URL:       testNATSServer.ClientURL(),
 			TopicName: topicName,
-			AgentName: "", // Empty AgentName → FormatSource error → publishResponseCE fails
+			AgentName: "test-agent",
 		}
 
 		var deliveryCount atomic.Int32
 		client := messaging.NewClient(cfg, logger)
+		client.SetCancelHandler(func(_ context.Context, _ []byte) error { return nil })
 		client.SetMainHandler(func(_ context.Context, _ []byte) error {
-			deliveryCount.Add(1)
+			count := deliveryCount.Add(1)
+			if count <= 2 {
+				return fmt.Errorf("simulated handler failure")
+			}
 			return nil
 		})
 		Expect(client.Start(ctx)).To(Succeed())
@@ -773,7 +877,7 @@ var _ = Describe("CloudEvent Correlation", Label("integration"), func() {
 		publishCE(ctx, testJS, topicName, "dcm.command.create", "dcm/control-plane",
 			map[string]string{"resourceId": "res-nak-001"})
 
-		// Message should be redelivered because publishResponseCE fails (empty AgentName)
+		// Message should be redelivered because handler returns error
 		Eventually(deliveryCount.Load, 10*time.Second, 100*time.Millisecond).
 			Should(BeNumerically(">=", int32(2)))
 	})

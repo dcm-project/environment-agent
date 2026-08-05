@@ -24,6 +24,7 @@ import (
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/service"
 	"github.com/dcm-project/environment-agent/internal/provider/store"
+	"github.com/dcm-project/environment-agent/internal/routing"
 )
 
 // serviceTypeLister adapts ProviderService to dcm.ServiceTypeLister.
@@ -105,6 +106,19 @@ func run(ctx context.Context) int {
 		logger.Error("invalid topic name", "error", err)
 		return 1
 	}
+
+	// Wire routing before starting messaging so handlers are set
+	denyList := routing.NewDenyList(cfg.Routing.DenyListMaxSize)
+	router := routing.NewRouter(
+		registry, healthTracker, fileStore,
+		nil, // SPForwarder — wired when forwarder implemented
+		msgClient,
+		nil, // RetryTopicConsumer — wired in Topic 9
+		denyList, cfg.Routing, logger, cfg.Agent.Name, topicMain,
+	)
+	msgClient.SetMainHandler(router.HandleRequest)
+	msgClient.SetCancelHandler(router.HandleCancel)
+
 	if err := msgClient.Start(ctx); err != nil {
 		logger.Error("failed to start messaging client", "error", err)
 		return 1
@@ -184,9 +198,11 @@ func setupMessaging(cfg *config.Config, logger *slog.Logger) (*messaging.Client,
 		return nil, "", fmt.Errorf("invalid topic name: %w", err)
 	}
 	client := messaging.NewClient(messaging.ClientConfig{
-		URL:       cfg.Messaging.URL,
-		TopicName: topics.Main,
-		AgentName: cfg.Agent.Name,
+		URL:           cfg.Messaging.URL,
+		TopicName:     topics.Main,
+		AgentName:     cfg.Agent.Name,
+		AckWait:       cfg.Messaging.AckWait,
+		CancelAckWait: cfg.Messaging.CancelAckWait,
 	}, logger)
 	return client, topics.Main, nil
 }
