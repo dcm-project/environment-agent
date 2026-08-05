@@ -1812,6 +1812,10 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
   permissions for the `pods/status` subresource
 - SP idempotent creation behavior is the final safety net for duplicate requests
   (see DD-060)
+- ASM-RTE-010: Service Providers MUST implement idempotent create and delete
+  operations with respect to `resourceId`. Duplicate invocations (from JetStream
+  redelivery or retry) MUST NOT produce side effects beyond the first successful
+  execution.
 - NATS JetStream provides durable persistence for streams using file-based
   storage (messages survive consumer and server restarts)
 
