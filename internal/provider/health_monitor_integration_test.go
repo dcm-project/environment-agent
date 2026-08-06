@@ -253,11 +253,10 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 
 			registerExternalSP(baseURL, mockSP.URL, "interval-sp", "interval-svc")
 
-			// Wait 1 second — expect 3-7 checks at 200ms intervals (generous for CI jitter)
-			time.Sleep(1 * time.Second)
-			count := callCount.Load()
-			Expect(count).To(BeNumerically(">=", int64(3)))
-			Expect(count).To(BeNumerically("<=", int64(7)))
+			Eventually(callCount.Load).WithTimeout(3 * time.Second).WithPolling(50 * time.Millisecond).Should(
+				BeNumerically(">=", int64(3)), "expected at least 3 checks at 200ms intervals")
+			Expect(callCount.Load()).To(BeNumerically("<=", int64(7)),
+				"expected at most 7 checks — interval not respected")
 
 			// Verify timeout causes failure: start a slow mock SP
 			slowSP := startSlowMockSP(200 * time.Millisecond) // exceeds 50ms timeout

@@ -45,18 +45,17 @@ func findRepoRoot() string {
 	}
 }
 
-func waitForReady(port string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+func waitForReady(port string, timeout time.Duration) {
+	Eventually(func() error {
 		client := &http.Client{Timeout: 200 * time.Millisecond}
 		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/api/v1alpha1/health", port))
-		if err == nil {
-			resp.Body.Close()
-			return nil
+		if err != nil {
+			return err
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return fmt.Errorf("server at :%s did not become ready within %s", port, timeout)
+		resp.Body.Close()
+		return nil
+	}).WithTimeout(timeout).WithPolling(50 * time.Millisecond).Should(Succeed(),
+		fmt.Sprintf("server at :%s must become ready", port))
 }
 
 // startAgent launches the agent binary with AGENT_SERVER_ADDRESS=:0 and
@@ -144,8 +143,7 @@ var _ = Describe("HTTP Server Graceful Shutdown", func() {
 		cmd, port := startAgent()
 		DeferCleanup(func() { cmd.Process.Kill() })
 
-		Expect(waitForReady(port, 5*time.Second)).To(Succeed(),
-			"server must start and be ready before signal test")
+		waitForReady(port, 5*time.Second)
 
 		conn, body := holdPartialRequest(port)
 		DeferCleanup(func() { conn.Close() })
@@ -172,8 +170,7 @@ var _ = Describe("HTTP Server Graceful Shutdown", func() {
 		cmd, port := startAgent()
 		DeferCleanup(func() { cmd.Process.Kill() })
 
-		Expect(waitForReady(port, 5*time.Second)).To(Succeed(),
-			"server must start and be ready before signal test")
+		waitForReady(port, 5*time.Second)
 
 		conn, body := holdPartialRequest(port)
 		DeferCleanup(func() { conn.Close() })
@@ -200,8 +197,7 @@ var _ = Describe("HTTP Server Graceful Shutdown", func() {
 		cmd, port := startAgent("AGENT_SERVER_SHUTDOWN_TIMEOUT=1s")
 		DeferCleanup(func() { cmd.Process.Kill() })
 
-		Expect(waitForReady(port, 5*time.Second)).To(Succeed(),
-			"server must start and be ready before timeout test")
+		waitForReady(port, 5*time.Second)
 
 		conn, _ := holdPartialRequest(port)
 		DeferCleanup(func() { conn.Close() })
