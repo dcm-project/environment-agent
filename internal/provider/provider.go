@@ -45,9 +45,8 @@ func ValidateSchemaVersion(version string) error {
 	return nil
 }
 
-// ValidateEndpoint checks that endpoint is a well-formed http or https URL with a host
-// and no query parameters or fragment. The endpoint is used as a base URL for health
-// checks (/health) and request routing, so it must be a clean origin+path.
+// ValidateEndpoint checks that endpoint is a well-formed http(s) URL with a host
+// and no query or fragment.
 func ValidateEndpoint(endpoint string) error {
 	u, err := url.Parse(endpoint)
 	if err != nil {
