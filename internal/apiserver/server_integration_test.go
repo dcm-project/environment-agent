@@ -76,7 +76,7 @@ func httpClient() *http.Client {
 	return &http.Client{Timeout: 2 * time.Second}
 }
 
-var _ = Describe("HTTP Server Integration", func() {
+var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 	var (
 		cfg    *config.Config
 		logBuf *bytes.Buffer

@@ -234,3 +234,44 @@ stub/placeholder and the risk is theoretical. The per-request timeout AC
 (AC-HTTP-095) is satisfied for context-aware handlers.
 
 **Related requirements:** REQ-HTTP-110
+
+### DD-180: Health state keyed by StoredProvider.ID
+
+**Decision:** The HealthTracker interface is keyed by `StoredProvider.ID` (UUID),
+not by provider name. The routing subsystem uses `sp.ID` from the store record
+when querying health state.
+
+**Rationale:** Provider names are human-readable registration identifiers; IDs
+are system-generated UUIDs that survive re-registration. The health monitor and
+provider service both use `sp.ID` as the authoritative key when calling
+`SetState`. The router must use the same key for lookups. The trust boundary is:
+after `store.GetByName()` returns a `StoredProvider`, its `.ID` field matches
+the key used by the health subsystem (guaranteed by the single-writer
+registration path in `provider.Service`).
+
+**Related requirements:** REQ-HMN-050, REQ-RTE-030
+
+### DD-190: SP-side idempotency for JetStream redelivery protection
+
+**Decision:** The router does NOT implement message-level deduplication for
+JetStream redeliveries. Protection against duplicate side effects is the
+service provider's responsibility (idempotent create/delete operations).
+
+**Rationale:** The `dispatchedSet` is a cancel-rejection ledger that persists
+across the resource lifecycle (create → delete). It cannot double as a
+message-level dedup mechanism without distinguishing operation type. A naive
+`AddIfAbsent` short-circuit would block legitimate delete-after-create
+operations. Proper message dedup would require CE event ID tracking or a
+TTL-based idempotency key store, which is deferred to Topic 9 (retry/lifecycle
+redesign). The ack-error logging in messaging handlers provides operational
+visibility into redelivery occurrences.
+
+**Related requirements:** REQ-RTE-180, REQ-MSG-116
+
+**Amendment (Topic 8 hardening):** The agent sets explicit JetStream `AckWait`
+(default 120s for main, 10s for cancel) to prevent spurious redelivery during
+in-line SP retries. This is a static stopgap; Topic 9 will introduce
+`InProgress()` heartbeats, `MaxDeliver` with terminal error CE emission, handler
+context deadlines, and CE event ID forwarding as `Idempotency-Key` to enable
+proper SP-side event-level dedup. SP idempotency for create/delete by resourceId
+is a MUST requirement (not merely an assumption).
