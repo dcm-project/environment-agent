@@ -610,13 +610,23 @@ Unless overridden, tests use:
 
 ---
 
-### IT-HMN-070: External SP starts Unhealthy
+### IT-HMN-070: External SP becomes Ready when healthy on registration
 
 - **Validates AC:** AC-HMN-051
-- **Test Infrastructure:** Real HTTP server, external SP registration
-- **Given** an external SP registers successfully
-- **When** the registration response is returned (before any health check runs)
-- **Then** the SP state MUST be Unhealthy (initial state per spec)
+- **Test Infrastructure:** Real HTTP server, mock SP returning healthy
+- **Given** an external SP registers with a reachable, healthy endpoint
+- **When** the registration completes
+- **Then** the SP state MUST be Ready
+
+---
+
+### IT-HMN-071: External SP stays Unhealthy when unreachable on registration
+
+- **Validates AC:** AC-HMN-051b
+- **Test Infrastructure:** Real HTTP server, mock SP closed before registration
+- **Given** an external SP registers with an unreachable endpoint
+- **When** the registration completes
+- **Then** the SP state MUST be Unhealthy
 
 ---
 
@@ -744,6 +754,36 @@ Unless overridden, tests use:
 
 ---
 
+### IT-HMN-180: Endpoint change with healthy new endpoint becomes Ready
+
+- **Validates AC:** AC-HMN-054
+- **Test Infrastructure:** Real HTTP server, two mock SPs both returning healthy
+- **Given** an external SP is registered and has reached Ready state
+- **When** the SP re-registers with a different, healthy endpoint
+- **Then** the SP state MUST be Ready after the re-registration completes
+
+---
+
+### IT-HMN-181: Endpoint change with unreachable new endpoint stays Unhealthy
+
+- **Validates AC:** AC-HMN-054b
+- **Test Infrastructure:** Real HTTP server, first mock SP healthy, second mock SP closed
+- **Given** an external SP is registered and has reached Ready state
+- **When** the SP re-registers with an unreachable endpoint
+- **Then** the SP state MUST be Unhealthy after the re-registration completes
+
+---
+
+### IT-HMN-182: Non-endpoint update preserves health state
+
+- **Validates AC:** AC-HMN-055
+- **Test Infrastructure:** Real HTTP server, mock SP returning healthy
+- **Given** an external SP is registered and has reached Ready state
+- **When** the SP re-registers with the same endpoint but a different display_name
+- **Then** the SP state MUST remain Ready
+
+---
+
 ## Topic 6: DCM Registration & Heartbeat
 
 ### IT-DCM-010: Initial registration after first non-Unavailable SP
@@ -864,7 +904,17 @@ Unless overridden, tests use:
 - **Given** DCM returns 429 with `Retry-After: 2` on first attempt
 - **When** the agent retries
 - **Then** the second attempt MUST occur no earlier than ~2s after the first response
-- **And** when 429 has no `Retry-After`, standard backoff MUST apply
+
+---
+
+### IT-DCM-105: Standard backoff on 429 without Retry-After
+
+- **Validates AC:** AC-DCM-061 (second clause)
+- **Test Infrastructure:** Mock DCM returning 429 (no Retry-After header) then 201
+- **Given** DCM returns 429 without `Retry-After` on first attempt
+- **When** the agent retries
+- **Then** the gap between attempts MUST be bounded by MaxBackoff + tolerance (standard backoff applied, not infinite wait)
+- **And** the gap MUST be greater than 0
 
 ---
 
@@ -1560,8 +1610,12 @@ Unless overridden, tests use:
 | AC-HMN-040 | IT-HMN-040 |
 | AC-HMN-050 | IT-HMN-100 |
 | AC-HMN-051 | IT-HMN-070 |
+| AC-HMN-051b | IT-HMN-071 |
 | AC-HMN-052 | IT-HMN-080 |
 | AC-HMN-053 | IT-HMN-090 |
+| AC-HMN-054 | IT-HMN-180 |
+| AC-HMN-054b | IT-HMN-181 |
+| AC-HMN-055 | IT-HMN-182 |
 | AC-HMN-060 | IT-HMN-110 |
 | AC-HMN-070 | IT-HMN-120 |
 | AC-HMN-080 | IT-HMN-130 |
@@ -1579,7 +1633,7 @@ Unless overridden, tests use:
 | AC-DCM-040 | IT-DCM-070 |
 | AC-DCM-050 | IT-DCM-080 |
 | AC-DCM-060 | IT-DCM-090 |
-| AC-DCM-061 | IT-DCM-100 |
+| AC-DCM-061 | IT-DCM-100, IT-DCM-105 |
 | AC-DCM-070 | IT-DCM-110 |
 | AC-DCM-080 | IT-DCM-120 |
 | AC-DCM-085 | IT-DCM-130 |

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
+	"github.com/dcm-project/environment-agent/internal/health/monitor"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/store"
 )
@@ -21,15 +22,36 @@ type ProviderService struct {
 	store    store.Store
 	registry *provider.Registry
 	health   provider.HealthTracker
+	mon      *monitor.Monitor // nil-safe: if nil, no monitoring
 	logger   *slog.Logger
+
+	onChangeMu sync.RWMutex
+	onChange   func()
 }
 
 // New creates a ProviderService with the given dependencies.
-func New(s store.Store, registry *provider.Registry, health provider.HealthTracker, logger *slog.Logger) *ProviderService {
+func New(s store.Store, registry *provider.Registry, health provider.HealthTracker, mon *monitor.Monitor, logger *slog.Logger) *ProviderService {
 	if health == nil {
 		panic("provider: health tracker must not be nil")
 	}
-	return &ProviderService{store: s, registry: registry, health: health, logger: logger}
+	return &ProviderService{store: s, registry: registry, health: health, mon: mon, logger: logger}
+}
+
+// SetOnChange sets a callback invoked after a provider is registered or updated.
+// Safe to call before or after providers are registered.
+func (s *ProviderService) SetOnChange(fn func()) {
+	s.onChangeMu.Lock()
+	defer s.onChangeMu.Unlock()
+	s.onChange = fn
+}
+
+func (s *ProviderService) notifyChange() {
+	s.onChangeMu.RLock()
+	fn := s.onChange
+	s.onChangeMu.RUnlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // RegistrationInput holds the fields for a provider registration request.
@@ -47,6 +69,14 @@ type RegistrationInput struct {
 // Register creates or updates a provider registration.
 // The caller (handler) is responsible for input validation (ID, schema_version, endpoint).
 func (s *ProviderService) Register(ctx context.Context, in RegistrationInput) (*v1alpha1.Provider, bool, error) {
+	result, created, err := s.registerLocked(ctx, in)
+	if err == nil {
+		s.notifyChange()
+	}
+	return result, created, err
+}
+
+func (s *ProviderService) registerLocked(ctx context.Context, in RegistrationInput) (*v1alpha1.Provider, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -96,6 +126,7 @@ func (s *ProviderService) ensureIDConsistency(existingID string, requestedID *st
 // The provider's ID and CreateTime are immutable and never modified.
 func (s *ProviderService) updateRegistration(ctx context.Context, existing *store.StoredProvider, in RegistrationInput) (*v1alpha1.Provider, error) {
 	oldServiceType := existing.ServiceType
+	oldEndpoint := existing.Endpoint
 	if oldServiceType != in.ServiceType {
 		if err := s.registry.Move(existing.Name, oldServiceType, in.ServiceType); err != nil {
 			return nil, &DomainError{Code: ErrCodeConflict, Message: err.Error()}
@@ -115,6 +146,9 @@ func (s *ProviderService) updateRegistration(ctx context.Context, existing *stor
 			_ = s.registry.Move(existing.Name, in.ServiceType, oldServiceType)
 		}
 		return nil, err
+	}
+	if oldEndpoint != in.Endpoint {
+		s.trackExternalProvider(existing.ID, in.Endpoint, true)
 	}
 	return s.toAPI(existing), nil
 }
@@ -166,7 +200,7 @@ func (s *ProviderService) createRegistration(ctx context.Context, id string, in 
 		s.registry.Release(in.ServiceType)
 		return nil, err
 	}
-	s.health.SetState(id, v1alpha1.Unhealthy, now)
+	s.trackExternalProvider(id, in.Endpoint, true)
 	return s.toAPI(&sp), nil
 }
 
@@ -210,86 +244,126 @@ func (s *ProviderService) LoadPersisted() error {
 			s.logger.Warn("conflict loading persisted provider", "name", p.Name, "error", err)
 			continue
 		}
-		s.health.SetState(p.ID, v1alpha1.Unhealthy, p.UpdateTime)
+		s.trackExternalProvider(p.ID, p.Endpoint, false)
 	}
 	return nil
+}
+
+// trackExternalProvider sets initial health state and registers for periodic monitoring.
+// When initialCheck is true, performs an immediate health check so a healthy SP
+// becomes Ready without waiting for the next poll tick. LoadPersisted passes false
+// to avoid blocking startup with N sequential HTTP checks.
+func (s *ProviderService) trackExternalProvider(id, endpoint string, initialCheck bool) {
+	s.health.SetState(id, v1alpha1.Unhealthy, time.Time{})
+	if s.mon != nil {
+		s.mon.RegisterProvider(id, monitor.NewExternalChecker(endpoint), v1alpha1.Unhealthy, initialCheck)
+	}
 }
 
 // RegisterEmbedded registers embedded SPs for the given service types.
 // Removes stale embedded records not in the current enabled list.
 func (s *ProviderService) RegisterEmbedded(serviceTypes []string) {
-	enabled := make(map[string]bool, len(serviceTypes))
+	types := make([]string, 0, len(serviceTypes))
 	for _, st := range serviceTypes {
-		st = strings.TrimSpace(st)
-		if st != "" {
-			enabled[st] = true
+		if st = strings.TrimSpace(st); st != "" {
+			types = append(types, st)
 		}
 	}
 
-	// Remove persisted embedded providers that are no longer enabled.
+	enabled := make(map[string]bool, len(types))
+	for _, st := range types {
+		enabled[st] = true
+	}
+
+	s.removeStaleEmbedded(enabled)
+	for _, st := range types {
+		s.registerEmbeddedType(st)
+	}
+}
+
+func (s *ProviderService) removeStaleEmbedded(enabled map[string]bool) {
 	all, err := s.store.List(context.Background())
-	if err == nil {
-		for _, p := range all {
-			if p.Type == string(v1alpha1.Embedded) && !enabled[p.ServiceType] {
-				_ = s.store.Delete(context.Background(), p.Name)
-				s.health.DeleteState(p.ID)
-			}
+	if err != nil {
+		s.logger.Error("failed to list providers for stale embedded cleanup", "error", err)
+		return
+	}
+	for _, p := range all {
+		if p.Type == string(v1alpha1.Embedded) && !enabled[p.ServiceType] {
+			s.registry.Release(p.ServiceType)
+			s.cleanupEmbeddedRecord(p)
+		}
+	}
+}
+
+// cleanupEmbeddedRecord removes an embedded provider record from the store,
+// health tracker, and monitor. Used when an embedded service type is displaced
+// or no longer enabled.
+func (s *ProviderService) cleanupEmbeddedRecord(p store.StoredProvider) {
+	if err := s.store.Delete(context.Background(), p.Name); err != nil {
+		s.logger.Error("failed to delete embedded record", "name", p.Name, "error", err)
+	}
+	s.health.DeleteState(p.ID)
+	if s.mon != nil {
+		s.mon.DeregisterProvider(p.ID)
+	}
+}
+
+func (s *ProviderService) registerEmbeddedType(st string) {
+	existing, err := s.store.GetByName(context.Background(), st)
+	if err != nil {
+		s.logger.Error("failed to check store for embedded SP", "service_type", st, "error", err)
+		return
+	}
+	if existing != nil && existing.Type == string(v1alpha1.External) {
+		s.logger.Warn("skipping embedded SP: slot occupied by external provider",
+			"service_type", st, "holder", existing.Name)
+		return
+	}
+
+	if err := s.registry.Claim(st, st); err != nil {
+		s.logger.Warn("skipping embedded SP: slot occupied", "service_type", st, "error", err)
+		if existing != nil && existing.Type == string(v1alpha1.Embedded) {
+			s.logger.Info("removing stale embedded record for occupied service type",
+				"service_type", st, "provider_id", existing.ID)
+			s.cleanupEmbeddedRecord(*existing)
+		}
+		return
+	}
+
+	now := time.Now().UTC()
+	id := provider.GenerateProviderID()
+	createTime := now
+	if existing != nil && existing.Type == string(v1alpha1.Embedded) {
+		if existing.ID != "" {
+			id = existing.ID
+		}
+		if !existing.CreateTime.IsZero() {
+			createTime = existing.CreateTime
 		}
 	}
 
-	for _, st := range serviceTypes {
-		st = strings.TrimSpace(st)
-		if st == "" {
-			continue
+	sp := store.StoredProvider{
+		ID:            id,
+		Name:          st,
+		Endpoint:      "embedded://" + st,
+		ServiceType:   st,
+		SchemaVersion: "v1alpha1",
+		Type:          string(v1alpha1.Embedded),
+		CreateTime:    createTime,
+		UpdateTime:    now,
+	}
+	if err := s.store.Save(context.Background(), sp); err != nil {
+		s.logger.Error("failed to save embedded SP", "service_type", st, "error", err)
+		if existing == nil {
+			s.registry.Release(st)
+			return
 		}
-
-		existing, err := s.store.GetByName(context.Background(), st)
-		if err != nil {
-			s.logger.Error("failed to check store for embedded SP", "service_type", st, "error", err)
-			continue
-		}
-		if existing != nil && existing.Type == string(v1alpha1.External) {
-			s.logger.Warn("skipping embedded SP: slot occupied by external provider",
-				"service_type", st, "holder", existing.Name)
-			continue
-		}
-
-		if err := s.registry.Claim(st, st); err != nil {
-			s.logger.Warn("skipping embedded SP: slot occupied", "service_type", st, "error", err)
-			continue
-		}
-
-		now := time.Now().UTC()
-		id := provider.GenerateProviderID()
-		createTime := now
-		if existing != nil && existing.Type == string(v1alpha1.Embedded) {
-			if existing.ID != "" {
-				id = existing.ID
-			}
-			if !existing.CreateTime.IsZero() {
-				createTime = existing.CreateTime
-			}
-		}
-
-		sp := store.StoredProvider{
-			ID:            id,
-			Name:          st,
-			Endpoint:      "",
-			ServiceType:   st,
-			SchemaVersion: "v1alpha1",
-			Type:          string(v1alpha1.Embedded),
-			CreateTime:    createTime,
-			UpdateTime:    now,
-		}
-		if err := s.store.Save(context.Background(), sp); err != nil {
-			s.logger.Error("failed to save embedded SP", "service_type", st, "error", err)
-			if existing == nil {
-				s.registry.Release(st)
-				continue
-			}
-			s.health.SetState(sp.ID, v1alpha1.Ready, now)
-			continue
-		}
+		// existing != nil: fall through to register health/monitor for the re-upserted SP
+	}
+	checker := monitor.NewEmbeddedChecker(monitor.DefaultEmbeddedCheckFn(st))
+	if s.mon != nil {
+		s.mon.RegisterProvider(sp.ID, checker, v1alpha1.Ready, true)
+	} else {
 		s.health.SetState(sp.ID, v1alpha1.Ready, now)
 	}
 }
@@ -313,13 +387,17 @@ func (s *ProviderService) toAPI(sp *store.StoredProvider) *v1alpha1.Provider {
 	if state, ok := s.health.GetState(sp.ID); ok {
 		status := state.Status
 		p.Status = &status
-		lastCheck := state.LastCheckTime
-		p.LastCheckTime = &lastCheck
-	} else {
-		defaultStatus := v1alpha1.Unhealthy
-		if sp.Type == string(v1alpha1.Embedded) {
-			defaultStatus = v1alpha1.Ready
+		if !state.LastCheckTime.IsZero() {
+			lastCheck := state.LastCheckTime
+			p.LastCheckTime = &lastCheck
 		}
+	} else {
+		// Properly registered providers always have health state:
+		// external → trackExternalProvider sets Unhealthy,
+		// embedded → registerEmbeddedType sets Ready via monitor/tracker.
+		// Missing state means the record is stale; default to Unavailable
+		// so it won't be advertised.
+		defaultStatus := v1alpha1.Unavailable
 		p.Status = &defaultStatus
 	}
 	if len(sp.Metadata) > 0 {
