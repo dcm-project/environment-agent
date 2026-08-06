@@ -261,6 +261,7 @@ func (s *ProviderService) removeStaleEmbedded(enabled map[string]bool) {
 	for _, p := range all {
 		if p.Type == string(v1alpha1.Embedded) && !enabled[p.ServiceType] {
 			_ = s.store.Delete(context.Background(), p.Name)
+			s.registry.Release(p.ServiceType)
 			s.health.DeleteState(p.ID)
 			if s.mon != nil {
 				s.mon.DeregisterProvider(p.ID)

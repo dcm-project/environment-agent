@@ -1,6 +1,10 @@
 package service
 
 import (
+	"context"
+	"io"
+	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -69,5 +73,32 @@ var _ = Describe("toAPI health fallback", Label("unit"), func() {
 		p = svc.toAPI(emb)
 		Expect(p.Status).To(HaveValue(Equal(v1alpha1.Ready)))
 		Expect(p.LastCheckTime).To(BeNil())
+	})
+})
+
+var _ = Describe("RegisterEmbedded stale removal", Label("unit"), func() {
+	It("releases the registry slot when removing a stale embedded provider", func() {
+		tmpDir := GinkgoT().TempDir()
+		fileStore, err := store.NewFileStore(filepath.Join(tmpDir, "providers.json"))
+		Expect(err).NotTo(HaveOccurred())
+
+		registry := provider.NewRegistry()
+		tracker := provider.NewInMemoryHealthTracker()
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		svc := New(fileStore, registry, tracker, nil, logger)
+
+		now := time.Now().UTC()
+		Expect(fileStore.Save(context.Background(), store.StoredProvider{
+			ID: "stale-id", Name: "old-service", ServiceType: "old-service",
+			SchemaVersion: "v1alpha1", Type: string(v1alpha1.Embedded),
+			CreateTime: now, UpdateTime: now,
+		})).To(Succeed())
+		Expect(registry.Claim("old-service", "old-service")).To(Succeed())
+		tracker.SetState("stale-id", v1alpha1.Ready, now)
+
+		svc.RegisterEmbedded([]string{"new-service"})
+
+		_, occupied := registry.Lookup("old-service")
+		Expect(occupied).To(BeFalse(), "stale embedded slot should be released")
 	})
 })
