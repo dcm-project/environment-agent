@@ -61,7 +61,7 @@ var _ = Describe("Health State Machine", Label("unit"), func() {
 			sm.RecordResult(monitor.CheckFailed)
 			sm.RecordResult(monitor.CheckUnhealthy)
 
-			Expect(sm.FailureCounter()).To(Equal(2))
+			Expect(sm.FailureCounter()).To(Equal(0))
 			Expect(sm.State()).To(Equal(v1alpha1.Unhealthy))
 		})
 	})

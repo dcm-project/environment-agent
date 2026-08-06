@@ -54,7 +54,7 @@ func waitForReady(port string, timeout time.Duration) {
 		}
 		resp.Body.Close()
 		return nil
-	}).WithTimeout(timeout).WithPolling(50 * time.Millisecond).Should(Succeed(),
+	}).WithTimeout(timeout).WithPolling(50*time.Millisecond).Should(Succeed(),
 		fmt.Sprintf("server at :%s must become ready", port))
 }
 

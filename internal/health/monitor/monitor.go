@@ -24,16 +24,17 @@ type Monitor struct {
 	checkTimeout     time.Duration
 	failureThreshold int
 
-	mu        sync.Mutex
-	providers map[string]*providerEntry
-	started   bool
-	stopped   bool
-	stopOnce  sync.Once
-	stopCh    chan struct{}
-	wg        sync.WaitGroup
+	mu         sync.Mutex
+	providers  map[string]*providerEntry
+	started    bool
+	stopped    bool
+	stopCtx    context.Context
+	stopCancel context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 func New(healthTracker provider.HealthTracker, cfg config.HealthConfig, logger *slog.Logger) *Monitor {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Monitor{
 		healthTracker:    healthTracker,
 		logger:           logger,
@@ -41,7 +42,8 @@ func New(healthTracker provider.HealthTracker, cfg config.HealthConfig, logger *
 		checkTimeout:     cfg.CheckTimeout,
 		failureThreshold: cfg.FailureThreshold,
 		providers:        make(map[string]*providerEntry),
-		stopCh:           make(chan struct{}),
+		stopCtx:          ctx,
+		stopCancel:       cancel,
 	}
 }
 
@@ -63,7 +65,7 @@ func (m *Monitor) Stop() {
 	m.mu.Lock()
 	m.stopped = true
 	m.mu.Unlock()
-	m.stopOnce.Do(func() { close(m.stopCh) })
+	m.stopCancel()
 	m.wg.Wait()
 	m.logger.Info("health monitor stopped")
 }
@@ -81,7 +83,7 @@ func (m *Monitor) RegisterProvider(id string, checker Checker, initialState v1al
 	m.mu.Unlock()
 
 	if initialCheck {
-		checkCtx, cancel := context.WithTimeout(context.Background(), m.checkTimeout)
+		checkCtx, cancel := context.WithTimeout(m.stopCtx, m.checkTimeout)
 		result := checker.Check(checkCtx)
 		cancel()
 
@@ -112,7 +114,7 @@ func (m *Monitor) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-m.stopCh:
+		case <-m.stopCtx.Done():
 			return
 		case <-ticker.C:
 			m.checkAll(ctx)
@@ -134,19 +136,29 @@ func (m *Monitor) checkAll(ctx context.Context) {
 	}
 	m.mu.Unlock()
 
+	var wg sync.WaitGroup
 	for _, p := range snap {
-		checkCtx, cancel := context.WithTimeout(ctx, m.checkTimeout)
-		result := p.checker.Check(checkCtx)
-		cancel()
-
-		m.mu.Lock()
-		if entry := m.providers[p.id]; entry != nil && entry.sm == p.sm {
-			from, to := p.sm.RecordResult(result)
-			m.healthTracker.SetState(p.id, to, time.Now().UTC())
-			if from != to {
-				m.logger.Warn("provider health transition", "provider_id", p.id, "from", from, "to", to)
-			}
-		}
-		m.mu.Unlock()
+		wg.Add(1)
+		go func(p providerSnapshot) {
+			defer wg.Done()
+			m.checkProvider(ctx, p)
+		}(p)
 	}
+	wg.Wait()
+}
+
+func (m *Monitor) checkProvider(ctx context.Context, p providerSnapshot) {
+	checkCtx, cancel := context.WithTimeout(ctx, m.checkTimeout)
+	result := p.checker.Check(checkCtx)
+	cancel()
+
+	m.mu.Lock()
+	if entry := m.providers[p.id]; entry != nil && entry.sm == p.sm {
+		from, to := p.sm.RecordResult(result)
+		m.healthTracker.SetState(p.id, to, time.Now().UTC())
+		if from != to {
+			m.logger.Warn("provider health transition", "provider_id", p.id, "from", from, "to", to)
+		}
+	}
+	m.mu.Unlock()
 }

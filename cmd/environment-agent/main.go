@@ -79,12 +79,8 @@ func run(ctx context.Context) int {
 	}
 	providerSvc.RegisterEmbedded(cfg.Provider.EmbeddedSPs)
 
-	monitorCtx, monitorCancel := context.WithCancel(context.Background())
-	healthMonitor.Start(monitorCtx)
-	defer func() {
-		monitorCancel()
-		healthMonitor.Stop()
-	}()
+	healthMonitor.Start(ctx)
+	defer healthMonitor.Stop()
 
 	healthSvc := health.NewService(messagingStatus{})
 	strictHandler := handler.New(healthSvc, providerSvc)

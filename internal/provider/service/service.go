@@ -120,7 +120,7 @@ func (s *ProviderService) updateRegistration(ctx context.Context, existing *stor
 		return nil, err
 	}
 	if oldEndpoint != in.Endpoint {
-		s.trackExternalProvider(existing.ID, in.Endpoint, existing.UpdateTime)
+		s.trackExternalProvider(existing.ID, in.Endpoint, true)
 	}
 	return s.toAPI(existing), nil
 }
@@ -172,7 +172,7 @@ func (s *ProviderService) createRegistration(ctx context.Context, id string, in 
 		s.registry.Release(in.ServiceType)
 		return nil, err
 	}
-	s.trackExternalProvider(id, in.Endpoint, now)
+	s.trackExternalProvider(id, in.Endpoint, true)
 	return s.toAPI(&sp), nil
 }
 
@@ -216,16 +216,19 @@ func (s *ProviderService) LoadPersisted() error {
 			s.logger.Warn("conflict loading persisted provider", "name", p.Name, "error", err)
 			continue
 		}
-		s.trackExternalProvider(p.ID, p.Endpoint, p.UpdateTime)
+		s.trackExternalProvider(p.ID, p.Endpoint, false)
 	}
 	return nil
 }
 
 // trackExternalProvider sets initial health state and registers for periodic monitoring.
-func (s *ProviderService) trackExternalProvider(id, endpoint string, at time.Time) {
-	s.health.SetState(id, v1alpha1.Unhealthy, at)
+// When initialCheck is true, performs an immediate health check so a healthy SP
+// becomes Ready without waiting for the next poll tick. LoadPersisted passes false
+// to avoid blocking startup with N sequential HTTP checks.
+func (s *ProviderService) trackExternalProvider(id, endpoint string, initialCheck bool) {
+	s.health.SetState(id, v1alpha1.Unhealthy, time.Time{})
 	if s.mon != nil {
-		s.mon.RegisterProvider(id, monitor.NewExternalChecker(endpoint), v1alpha1.Unhealthy, false)
+		s.mon.RegisterProvider(id, monitor.NewExternalChecker(endpoint), v1alpha1.Unhealthy, initialCheck)
 	}
 }
 
@@ -340,8 +343,10 @@ func (s *ProviderService) toAPI(sp *store.StoredProvider) *v1alpha1.Provider {
 	if state, ok := s.health.GetState(sp.ID); ok {
 		status := state.Status
 		p.Status = &status
-		lastCheck := state.LastCheckTime
-		p.LastCheckTime = &lastCheck
+		if !state.LastCheckTime.IsZero() {
+			lastCheck := state.LastCheckTime
+			p.LastCheckTime = &lastCheck
+		}
 	} else {
 		defaultStatus := v1alpha1.Unhealthy
 		if sp.Type == string(v1alpha1.Embedded) {

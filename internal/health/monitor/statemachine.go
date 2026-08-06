@@ -36,12 +36,12 @@ func (sm *StateMachine) RecordResult(result HealthCheckResult) (from, to v1alpha
 		sm.failureCounter = 0
 		sm.state = v1alpha1.Ready
 	case CheckUnhealthy:
-		if sm.state == v1alpha1.Unavailable {
-			sm.failureCounter = 0
-		}
+		sm.failureCounter = 0
 		sm.state = v1alpha1.Unhealthy
 	case CheckFailed:
-		sm.failureCounter++
+		if sm.state != v1alpha1.Unavailable {
+			sm.failureCounter++
+		}
 		if sm.failureCounter >= sm.failureThreshold {
 			sm.state = v1alpha1.Unavailable
 		}

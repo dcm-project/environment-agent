@@ -253,7 +253,7 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 
 			registerExternalSP(baseURL, mockSP.URL, "interval-sp", "interval-svc")
 
-			Eventually(callCount.Load).WithTimeout(3 * time.Second).WithPolling(50 * time.Millisecond).Should(
+			Eventually(callCount.Load).WithTimeout(3*time.Second).WithPolling(50*time.Millisecond).Should(
 				BeNumerically(">=", int64(3)), "expected at least 3 checks at 200ms intervals")
 			Expect(callCount.Load()).To(BeNumerically("<=", int64(7)),
 				"expected at most 7 checks — interval not respected")
@@ -289,7 +289,7 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 				"last_check_time must be after startup, proving embedded health check ran")
 		})
 
-		It("starts Unhealthy for external SPs before first check (IT-HMN-070)", func() {
+		It("runs initial check on registration so healthy SP becomes Ready immediately (IT-HMN-070)", func() {
 			mockSP := startMockSP(`{"status":"healthy"}`)
 			DeferCleanup(mockSP.Close)
 
@@ -298,9 +298,23 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 
 			registerExternalSP(baseURL, mockSP.URL, "new-sp", "new-svc")
 
-			// Immediately check status — should be Unhealthy (before any health check)
 			status := getProviderStatus(baseURL, "new-svc")
-			Expect(status).To(Equal(v1alpha1.Unhealthy))
+			Expect(status).To(Equal(v1alpha1.Ready),
+				"initial check should transition a healthy SP to Ready immediately")
+		})
+
+		It("stays Unhealthy after initial check when SP is unreachable (IT-HMN-071)", func() {
+			mockSP := startMockSP(`{"status":"healthy"}`)
+			mockSP.Close()
+
+			baseURL, stop := startRealServer()
+			DeferCleanup(stop)
+
+			registerExternalSP(baseURL, mockSP.URL, "dead-new-sp", "dead-new-svc")
+
+			status := getProviderStatus(baseURL, "dead-new-svc")
+			Expect(status).To(Equal(v1alpha1.Unhealthy),
+				"initial check should leave unreachable SP as Unhealthy")
 		})
 
 		It("sets embedded SP to Ready when immediate health check passes (IT-HMN-080)", func() {
@@ -523,7 +537,7 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 	})
 
 	Describe("Endpoint Change Health Reset", func() {
-		It("resets health to Unhealthy when endpoint changes", func() {
+		It("resets and re-checks when endpoint changes to a healthy SP", func() {
 			mockSP := startMockSP(`{"status":"healthy"}`)
 			DeferCleanup(mockSP.Close)
 
@@ -539,14 +553,42 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 			}).WithTimeout(2*time.Second).WithPolling(50*time.Millisecond).Should(
 				Equal(v1alpha1.Ready), "precondition: must be Ready before endpoint change")
 
-			// Re-register with a different endpoint
+			// Re-register with a different healthy endpoint — initial check
+			// resets to Unhealthy then immediately transitions to Ready.
 			newMockSP := startMockSP(`{"status":"healthy"}`)
 			DeferCleanup(newMockSP.Close)
 			registerExternalSP(baseURL, newMockSP.URL, "endpoint-sp", "endpoint-svc")
 
-			// Immediately after re-registration, status should be Unhealthy
 			status := getProviderStatus(baseURL, "endpoint-svc")
-			Expect(status).To(Equal(v1alpha1.Unhealthy), "must reset to Unhealthy on endpoint change")
+			Expect(status).To(Equal(v1alpha1.Ready),
+				"initial check on new endpoint should transition back to Ready")
+		})
+
+		It("resets to Unhealthy when endpoint changes to an unreachable SP", func() {
+			mockSP := startMockSP(`{"status":"healthy"}`)
+			DeferCleanup(mockSP.Close)
+
+			GinkgoT().Setenv("AGENT_HEALTH_CHECK_INTERVAL", "100ms")
+
+			baseURL, stop := startRealServer()
+			DeferCleanup(stop)
+
+			registerExternalSP(baseURL, mockSP.URL, "endpoint-sp2", "endpoint-svc2")
+
+			Eventually(func() (v1alpha1.ProviderStatus, error) {
+				return tryGetProviderStatus(baseURL, "endpoint-svc2")
+			}).WithTimeout(2*time.Second).WithPolling(50*time.Millisecond).Should(
+				Equal(v1alpha1.Ready), "precondition: must be Ready before endpoint change")
+
+			// Re-register with a dead endpoint — initial check fails,
+			// state resets to Unhealthy and stays there.
+			deadSP := startMockSP(`{"status":"healthy"}`)
+			deadSP.Close()
+			registerExternalSP(baseURL, deadSP.URL, "endpoint-sp2", "endpoint-svc2")
+
+			status := getProviderStatus(baseURL, "endpoint-svc2")
+			Expect(status).To(Equal(v1alpha1.Unhealthy),
+				"must stay Unhealthy when new endpoint is unreachable")
 		})
 
 		It("does NOT reset health when updating non-endpoint fields", func() {
