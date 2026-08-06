@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -10,21 +11,41 @@ import (
 	"os/signal"
 	"syscall"
 
+	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 	oapigen "github.com/dcm-project/environment-agent/internal/api/server"
 	"github.com/dcm-project/environment-agent/internal/apiserver"
 	"github.com/dcm-project/environment-agent/internal/config"
+	"github.com/dcm-project/environment-agent/internal/dcm"
 	"github.com/dcm-project/environment-agent/internal/handler"
 	"github.com/dcm-project/environment-agent/internal/health"
+	"github.com/dcm-project/environment-agent/internal/health/monitor"
 	"github.com/dcm-project/environment-agent/internal/httperror"
+	"github.com/dcm-project/environment-agent/internal/messaging"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/service"
 	"github.com/dcm-project/environment-agent/internal/provider/store"
 )
 
-// TODO: replace with real MessagingStatus from the NATS/messaging subsystem.
-type messagingStatus struct{}
+// serviceTypeLister adapts ProviderService to dcm.ServiceTypeLister.
+type serviceTypeLister struct {
+	providerSvc *service.ProviderService
+	logger      *slog.Logger
+}
 
-func (messagingStatus) IsConnected() bool { return true }
+func (s *serviceTypeLister) AdvertisableServiceTypes() []string {
+	providers, err := s.providerSvc.List(context.Background())
+	if err != nil {
+		s.logger.Error("failed to list providers for advertisable service types", "error", err)
+		return nil
+	}
+	var types []string
+	for _, p := range providers {
+		if p.Status != nil && *p.Status != v1alpha1.Unavailable {
+			types = append(types, p.ServiceType)
+		}
+	}
+	return types
+}
 
 func main() {
 	code := mainRun()
@@ -69,7 +90,8 @@ func run(ctx context.Context) int {
 	}
 	registry := provider.NewRegistry()
 	healthTracker := provider.NewInMemoryHealthTracker()
-	providerSvc := service.New(fileStore, registry, healthTracker, logger)
+	healthMonitor := monitor.New(healthTracker, cfg.Health, logger)
+	providerSvc := service.New(fileStore, registry, healthTracker, healthMonitor, logger)
 
 	if err := providerSvc.LoadPersisted(); err != nil {
 		logger.Error("failed to load persisted providers", "error", err)
@@ -77,7 +99,67 @@ func run(ctx context.Context) int {
 	}
 	providerSvc.RegisterEmbedded(cfg.Provider.EmbeddedSPs)
 
-	healthSvc := health.NewService(messagingStatus{})
+	// Messaging client — must start before registrar (provides ConsumerLagProvider)
+	msgClient, topicMain, err := setupMessaging(cfg, logger)
+	if err != nil {
+		logger.Error("invalid topic name", "error", err)
+		return 1
+	}
+	if err := msgClient.Start(ctx); err != nil {
+		logger.Error("failed to start messaging client", "error", err)
+		return 1
+	}
+	defer msgClient.Stop()
+
+	// DCM Registrar — created before monitor starts so callbacks can be wired
+	// before any health transitions fire. Deferred after monitor so LIFO shuts
+	// registrar down first.
+	registrar, err := dcm.NewRegistrar(
+		dcm.RegistrarConfig{
+			AgentName:                 cfg.Agent.Name,
+			Environment:               cfg.Agent.Environment,
+			Cost:                      cfg.Agent.Cost,
+			TopicName:                 topicMain,
+			RegistrationURL:           cfg.DCM.RegistrationURL,
+			InitialBackoff:            cfg.DCM.InitialBackoff,
+			MaxBackoff:                cfg.DCM.MaxBackoff,
+			HeartbeatInterval:         cfg.Heartbeat.Interval,
+			PrerequisiteRetryInterval: cfg.DCM.PrerequisiteRetryInterval,
+		},
+		&serviceTypeLister{providerSvc: providerSvc, logger: logger},
+		msgClient,
+		nil,
+		logger,
+	)
+	if err != nil {
+		logger.Error("failed to create DCM registrar", "error", err)
+		return 1
+	}
+
+	// Wire service-type change notifications before starting the periodic
+	// monitor loop. Note: embedded initialCheck transitions (from RegisterEmbedded
+	// above) may fire before this wiring, but the one-time kick below compensates
+	// by forcing a state re-evaluation.
+	healthMonitor.SetOnTransition(func(_ string, from, to v1alpha1.ProviderStatus) {
+		if from == v1alpha1.Unavailable || to == v1alpha1.Unavailable {
+			registrar.NotifyServiceTypeChange()
+		}
+	})
+	providerSvc.SetOnChange(registrar.NotifyServiceTypeChange)
+
+	healthMonitor.Start(ctx)
+	defer healthMonitor.Stop()
+
+	registrar.NotifyServiceTypeChange()
+
+	regCtx, regCancel := context.WithCancel(context.Background())
+	registrar.Start(regCtx)
+	defer func() {
+		regCancel()
+		<-registrar.Done()
+	}()
+
+	healthSvc := health.NewService(msgClient)
 	strictHandler := handler.New(healthSvc, providerSvc)
 	h := oapigen.NewStrictHandlerWithOptions(strictHandler, nil, oapigen.StrictHTTPServerOptions{
 		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -94,4 +176,17 @@ func run(ctx context.Context) int {
 	}
 	logger.Info("Environment Agent stopped")
 	return 0
+}
+
+func setupMessaging(cfg *config.Config, logger *slog.Logger) (*messaging.Client, string, error) {
+	topics := messaging.DeriveTopicNames(cfg.Agent.Name, cfg.Messaging.TopicName)
+	if err := messaging.ValidateTopicName(topics.Main); err != nil {
+		return nil, "", fmt.Errorf("invalid topic name: %w", err)
+	}
+	client := messaging.NewClient(messaging.ClientConfig{
+		URL:       cfg.Messaging.URL,
+		TopicName: topics.Main,
+		AgentName: cfg.Agent.Name,
+	}, logger)
+	return client, topics.Main, nil
 }

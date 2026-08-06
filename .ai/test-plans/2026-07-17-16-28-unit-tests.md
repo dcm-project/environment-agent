@@ -52,19 +52,21 @@ This plan identifies pure logic functions suitable for isolated unit testing in 
 
 ---
 
-### UT-XC-CFG-030: Duration string parsing and range validation
+### UT-XC-CFG-030: Duration range boundary validation (AGENT_HEARTBEAT_INTERVAL)
 
 - **Validates AC:** AC-XC-CFG-050
 - **Component Under Test:** duration config parser/validator
-- **Given** `AGENT_HEALTH_CHECK_INTERVAL` is `"0ms"` with valid range [1s, 5m]
+- **Given** `AGENT_HEARTBEAT_INTERVAL` is `"4s"` with valid range [5s, 10m]
 - **When** the duration range validator is invoked
-- **Then** it MUST return an error identifying the value `0ms`, the field name, and its valid range `[1s, 5m]`
+- **Then** it MUST return an error identifying the value `4s`, the field name, and its valid range `[5s, 10m0s]`
+
+> These boundary cases validate AGENT_HEARTBEAT_INTERVAL per spec §6 [5s, 10m]
 
 #### Boundary Cases
-- UT-XC-CFG-031: Value exactly at minimum (`"1s"`) accepted
-- UT-XC-CFG-032: Value exactly at maximum (`"5m"`) accepted
-- UT-XC-CFG-033: Value below minimum (`"999ms"`) rejected
-- UT-XC-CFG-034: Value above maximum (`"6m"`) rejected
+- UT-XC-CFG-031: Value exactly at minimum (`"5s"`) accepted
+- UT-XC-CFG-032: Value exactly at maximum (`"10m"`) accepted
+- UT-XC-CFG-033: Value below minimum (`"4s"`) rejected
+- UT-XC-CFG-034: Value above maximum (`"11m"`) rejected
 - UT-XC-CFG-035: Malformed duration string (`"abc"`) rejected with parse error
 - UT-XC-CFG-036: Integer config range (e.g., `AGENT_HEALTH_FAILURE_THRESHOLD` min=1 max=100): value 0 rejected, 1 accepted, 100 accepted, 101 rejected
 
@@ -311,6 +313,10 @@ This plan identifies pure logic functions suitable for isolated unit testing in 
 - UT-DCM-031: HTTP-date format `"Thu, 01 Dec 2025 16:00:00 GMT"` — parsed correctly relative to current time
 - UT-DCM-032: `"0"` — result is 0s (immediate retry)
 - UT-DCM-033: Invalid value `"abc"` — falls back to standard backoff (returns sentinel/error)
+- UT-DCM-034: Empty string returns (0, false)
+- UT-DCM-035: Whitespace-only returns (0, false)
+- UT-DCM-036: Negative seconds returns (0, false)
+- UT-DCM-037: Very large seconds parses without overflow
 
 ---
 
@@ -493,6 +499,11 @@ This plan identifies pure logic functions suitable for isolated unit testing in 
 - UT-MSG-034: `"agent-prod.1"` (dot separator) — valid (dots allowed in NATS subjects)
 - UT-MSG-035: `"agent-prod-1"` (alphanumeric + hyphens) — valid
 - UT-MSG-036: Empty string — invalid
+- UT-MSG-037: Contains `"!"` — invalid (whitelist regex rejects)
+- UT-MSG-038: Contains `"@"` — invalid (whitelist regex rejects)
+- UT-MSG-039: Contains `"/"` — invalid (whitelist regex rejects)
+- UT-MSG-040: Contains underscore `"test_topic"` — valid (underscores allowed)
+- UT-MSG-041: Exactly 255 characters — valid (boundary acceptance)
 
 ---
 
@@ -637,8 +648,8 @@ This plan identifies pure logic functions suitable for isolated unit testing in 
 | AC-HMN-185 | UT-HMN-065 |
 | AC-HMN-005 | UT-HMN-070 |
 | AC-DCM-050 | UT-DCM-010, UT-DCM-011–014, UT-DCM-020–023 |
-| AC-DCM-061 | UT-DCM-030, UT-DCM-031–033 |
-| AC-MSG-010 | UT-MSG-010, UT-MSG-020, UT-MSG-030–036 |
+| AC-DCM-061 | UT-DCM-030, UT-DCM-031–037 |
+| AC-MSG-010 | UT-MSG-010, UT-MSG-020, UT-MSG-030–041 |
 | AC-RTE-055 | UT-RTE-050, UT-RTE-051–053 |
 | AC-RTE-070 | UT-RTE-010 |
 | AC-RTE-075 | UT-RTE-030, UT-RTE-040 |

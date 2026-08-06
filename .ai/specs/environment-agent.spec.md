@@ -688,8 +688,9 @@ Out of scope: Metrics/observability integration.
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
 | REQ-HMN-050 | SP responding with `200 OK` and `status: "healthy"` (external) or internal check passing (embedded) MUST set state to Ready | MUST | |
-| REQ-HMN-051 | Newly registered external SPs MUST start in Unhealthy state until the first successful health check sets them to Ready | MUST | |
+| REQ-HMN-051 | Newly registered external SPs MUST receive an immediate health check. The resulting state MUST reflect the check outcome: Ready if healthy, Unhealthy otherwise. On agent restart, previously persisted external SPs MAY defer their first check to the next periodic tick | MUST | |
 | REQ-HMN-052 | Newly registered embedded SPs MUST have their in-process health check executed immediately. The initial state is set based on the result: Ready if passing, Unhealthy if reporting unhealthy | MUST | |
+| REQ-HMN-054 | When an external SP re-registers with a changed endpoint, its health state MUST reset to Unhealthy and an immediate health check MUST be performed. Non-endpoint field changes MUST NOT affect health state | MUST | |
 | REQ-HMN-060 | SP responding with `200 OK` and `status: "unhealthy"` (external) or internal check reporting unhealthy (embedded) MUST set state to Unhealthy | MUST | |
 | REQ-HMN-070 | SP not responding (connection refused, DNS failure, TCP timeout, HTTP status other than 200, or response body unparseable) after exceeding a configurable failure threshold MUST set state to Unavailable | MUST | |
 | REQ-HMN-080 | A healthy response MUST reset the failure counter for the SP | MUST | |
@@ -837,11 +838,18 @@ Out of scope: Metrics/observability integration.
 - **When** the health check runs
 - **Then** it MUST execute in-process without any network call
 
-##### AC-HMN-051: External SP starts Unhealthy
+##### AC-HMN-051: External SP becomes Ready when healthy on registration
 
 - **Validates:** REQ-HMN-051
-- **Given** an external SP registers successfully
-- **When** the registration completes (before any health check)
+- **Given** an external SP registers with a reachable, healthy endpoint
+- **When** the registration completes
+- **Then** the SP state MUST be Ready
+
+##### AC-HMN-051b: External SP stays Unhealthy when unreachable on registration
+
+- **Validates:** REQ-HMN-051
+- **Given** an external SP registers with an unreachable endpoint
+- **When** the registration completes
 - **Then** the SP state MUST be Unhealthy
 
 ##### AC-HMN-052: Embedded SP immediate health check — passes
@@ -857,6 +865,28 @@ Out of scope: Metrics/observability integration.
 - **Given** an embedded SP is registered at startup
 - **When** the in-process health check reports unhealthy
 - **Then** the SP state MUST be Unhealthy
+
+##### AC-HMN-054: Endpoint change with healthy new endpoint
+
+- **Validates:** REQ-HMN-054
+- **Given** an external SP is registered and has reached Ready state
+- **When** the SP re-registers with a different, healthy endpoint
+- **Then** the SP state MUST be Ready after the re-registration completes
+- **And** subsequent health checks MUST poll the new endpoint
+
+##### AC-HMN-054b: Endpoint change with unreachable new endpoint
+
+- **Validates:** REQ-HMN-054
+- **Given** an external SP is registered and has reached Ready state
+- **When** the SP re-registers with an unreachable endpoint
+- **Then** the SP state MUST be Unhealthy after the re-registration completes
+
+##### AC-HMN-055: Non-endpoint update preserves health
+
+- **Validates:** REQ-HMN-054
+- **Given** an external SP is registered and has reached Ready state
+- **When** the SP re-registers with the same endpoint but different display_name
+- **Then** its health state MUST remain Ready
 
 ##### AC-HMN-185: Unavailable to Unhealthy re-advertises
 

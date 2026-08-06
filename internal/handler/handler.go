@@ -38,11 +38,17 @@ func (h *Handler) CreateProvider(ctx context.Context, request oapigen.CreateProv
 	instance := requestctx.URIFromContext(ctx)
 
 	var providerID *string
-	if request.Params.Id != nil && *request.Params.Id != "" {
+	if request.Params.Id != nil {
 		if err := provider.ValidateProviderID(*request.Params.Id); err != nil {
 			return validationError("id", err, instance), nil
 		}
 		providerID = request.Params.Id
+	}
+	if err := provider.ValidateName(body.Name); err != nil {
+		return validationError("name", err, instance), nil
+	}
+	if err := provider.ValidateServiceType(body.ServiceType); err != nil {
+		return validationError("service_type", err, instance), nil
 	}
 	if err := provider.ValidateSchemaVersion(body.SchemaVersion); err != nil {
 		return validationError("schema_version", err, instance), nil
