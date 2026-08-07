@@ -279,16 +279,85 @@ is a MUST requirement (not merely an assumption).
 ### DD-200: CloudEvent source uses agentName (v1alpha1)
 
 **Decision:** CloudEvent source is `dcm/agents/{agentName}`, not
-`dcm/agents/{agentId}`, in v1alpha1.
+`dcm/agents/{agent_id}`, in v1alpha1.
 
-**Rationale:** The DCM-assigned `agentId` is only available after successful
-registration (`POST /api/v1/agents` → 201). CloudEvents are published before
+**Rationale:** The DCM-assigned `agent_id` is only available after successful
+registration (`POST /api/v1alpha1/agents` → 201). CloudEvents are published before
 registration completes (e.g., health degraded CEs during startup health checks,
 error CEs for unsupported service types). Using `agentName` — which is a required
 config value available from startup — provides a stable, always-available source
-identifier. Switching to `agentId` post-registration would create a split-brain
+identifier. Switching to `agent_id` post-registration would create a split-brain
 where CEs from the same agent session carry different source values, complicating
 control plane correlation. A future version may introduce a dynamic source that
-switches to `agentId` after registration, but v1alpha1 accepts this trade-off.
+switches to `agent_id` after registration, but v1alpha1 accepts this trade-off.
 
 **Related requirements:** REQ-XC-CE-030
+
+### DD-210: CloudEvent data payload snake_case (AEP convention)
+
+**Decision:** All CloudEvent `data` JSON field names exchanged with the control
+plane use snake_case (`resource_id`, `service_type`, `agent_name`, `topic_name`,
+etc.), matching the control-plane's AEP-style structs.
+
+**Rationale:** Go's `encoding/json` does not fold underscores — camelCase tags
+cannot bind to snake_case wire payloads. The control-plane review (2026-08-07, F1)
+identified silent message drops in both directions when casing diverged. Internal
+Go identifiers and config env vars (e.g. `AGENT_TOPIC_NAME`, struct field
+`TopicName`) remain unchanged; only marshaled JSON field names follow snake_case.
+
+**Related requirements:** REQ-MSG-130, REQ-RCM-140, REQ-XC-CE-010
+
+### DD-220: Control-plane topic prefix (`dcm.agent.`)
+
+**Decision:** Control-plane-facing request subjects are prefixed with
+`dcm.agent.`. The agent derives subjects from an unprefixed **base name**
+(`AGENT_TOPIC_NAME` or `AGENT_NAME`):
+
+- Main: `dcm.agent.{base}` (advertised to DCM as `topic_name`)
+- Cancel: `dcm.agent.{base}.cancel`
+- Retry (agent-internal): `{base}.retry` — **no prefix**
+
+**Rationale:** The control-plane owns a wildcard JetStream stream
+(`dcm-agent-requests`, subject `dcm.agent.>`). Registration requires
+`topic_name` to match `^dcm\.agent\..+`. The retry subject is never published to
+by the control plane, so it stays unprefixed and agent-owned.
+
+**Related requirements:** REQ-MSG-010, REQ-MSG-030, REQ-MSG-050
+
+### DD-230: JetStream stream ownership split (CP vs agent)
+
+**Decision:** The control plane owns JetStream streams for CP-facing subjects.
+The agent MUST NOT create streams on those subjects. Specifically:
+
+| Stream | Owner | Subject binding | Agent action |
+|--------|-------|-----------------|--------------|
+| `dcm-agent-requests` | Control plane | `dcm.agent.>` | Create durable consumers filtered to its main and cancel subjects |
+| `dcm-agent-responses` | Control plane | `dcm.agents.responses` | Publish directly (no stream creation) |
+| `{base}-retry` | Agent | `{base}.retry` | CreateOrUpdateStream |
+| `dcm-health` | Agent | `dcm.agents.health` | CreateOrUpdateStream |
+
+On startup, if `dcm-agent-requests` does not exist yet, the agent retries
+durable consumer creation every 2s for up to 30s (phase 1, synchronous with
+startup). If it's still missing after that, the agent does NOT give up — it
+retries the full setup again every 30s in the background, indefinitely
+(phase 2), until it succeeds or the agent shuts down. A hard give-up would
+leave the agent silently consuming nothing if the CP takes longer than 30s to
+start (e.g. a rolling restart), with no further chance to recover short of a
+manual agent restart.
+
+**Rationale:** NATS rejects overlapping stream subject bindings (error 10065).
+Startup order between control plane and agent is not guaranteed. The agent only
+administers resources it owns; CP-facing traffic uses CP-provisioned streams.
+
+**Related requirements:** REQ-MSG-048, REQ-MSG-049, REQ-MSG-051, REQ-MSG-140
+
+### DD-240: JetStream publish dedup via CloudEvent id (Nats-Msg-Id)
+
+**Decision:** All agent-originated response and health CloudEvents are published
+to JetStream with the `Nats-Msg-Id` header set to the CloudEvent's own `id`.
+
+**Rationale:** Enables server-side deduplication if publish retry logic is added
+later (control-plane review F34). Without a stable message ID, a retried publish
+could duplicate delivery to the control-plane's response consumer.
+
+**Related requirements:** REQ-MSG-135, REQ-XC-CE-050
