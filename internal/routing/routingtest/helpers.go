@@ -172,7 +172,8 @@ func (p *NATSPublisher) Publish(ctx context.Context, subject string, data []byte
 
 // FakeStore implements store.Store for test purposes.
 type FakeStore struct {
-	Providers map[string]*store.StoredProvider
+	Providers    map[string]*store.StoredProvider
+	GetByNameErr error // when non-nil, GetByName returns this error
 }
 
 func NewFakeStore() *FakeStore {
@@ -207,6 +208,9 @@ func (s *FakeStore) GetByID(_ context.Context, id string) (*store.StoredProvider
 }
 
 func (s *FakeStore) GetByName(_ context.Context, name string) (*store.StoredProvider, error) {
+	if s.GetByNameErr != nil {
+		return nil, s.GetByNameErr
+	}
 	p, ok := s.Providers[name]
 	if !ok {
 		return nil, fmt.Errorf("not found")

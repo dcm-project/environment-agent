@@ -138,7 +138,11 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 		return nil
 	}
 
-	sp, status, ok := r.resolveProvider(ctx, payload.ServiceType)
+	sp, status, ok, storeErr := r.resolveProvider(ctx, payload.ServiceType)
+	if storeErr != nil {
+		r.logger.Warn("transient store error during provider resolution", "error", storeErr, "serviceType", payload.ServiceType)
+		return storeErr
+	}
 	if !ok {
 		r.publishCE(ctx, cloudevent.TypeError, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
@@ -203,7 +207,7 @@ func (r *Router) parseRequestCE(msg []byte) (isCreate bool, payload inboundPaylo
 	return isCreate, payload, false
 }
 
-func (r *Router) resolveProvider(ctx context.Context, serviceType string) (*store.StoredProvider, v1alpha1.ProviderStatus, bool) {
+func (r *Router) resolveProvider(ctx context.Context, serviceType string) (*store.StoredProvider, v1alpha1.ProviderStatus, bool, error) {
 	return ResolveProvider(ctx, r.registry, r.store, r.healthTracker, r.logger, serviceType)
 }
 

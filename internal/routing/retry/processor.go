@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	fetchBatchSize = 100
-	fetchMaxWait   = 200 * time.Millisecond
+	fetchBatchSize       = 100
+	fetchMaxWait         = 200 * time.Millisecond
+	storeErrorRetryDelay = 10 * time.Second
 )
 
 // ProcessorConfig holds retry processor tuning knobs.
@@ -169,7 +170,9 @@ func (p *Processor) RunTransition(ctx context.Context, providerID string, from, 
 				p.deps.Logger.Error("panic in transition processor", "panic", r, "providerID", providerID)
 			}
 		}()
-		_ = p.ProcessOnTransition(ctx, providerID, from, to)
+		if err := p.ProcessOnTransition(ctx, providerID, from, to); err != nil {
+			p.deps.Logger.Error("transition processing failed", "error", err, "providerID", providerID, "to", to)
+		}
 	}()
 }
 
@@ -182,8 +185,11 @@ func (p *Processor) ProcessOnTransition(ctx context.Context, providerID string, 
 	}
 
 	sp, err := p.deps.Store.GetByID(ctx, providerID)
-	if err != nil || sp == nil {
-		p.deps.Logger.Warn("ProcessOnTransition: provider not found", "providerID", providerID, "error", err)
+	if err != nil {
+		return fmt.Errorf("ProcessOnTransition: store lookup failed for provider %s: %w", providerID, err)
+	}
+	if sp == nil {
+		p.deps.Logger.Warn("ProcessOnTransition: provider not found in store", "providerID", providerID)
 		return nil
 	}
 
@@ -203,12 +209,15 @@ func (p *Processor) ProcessOnTransition(ctx context.Context, providerID string, 
 // processTransitionItems dispatches surviving (non-deduped) retry items after a
 // provider health transition.
 func (p *Processor) processTransitionItems(ctx context.Context, sp *store.StoredProvider, to v1alpha1.ProviderStatus, items []parsedMessage) {
+	heartbeatAll(items)
 	for _, item := range items {
-		if p.deps.DenyList.Contains(item.resourceID) {
+		isCreate := item.ceType == cloudevent.TypeRequestCreate
+		if isCreate && p.deps.DenyList.Contains(item.resourceID) {
 			_ = item.msg.Ack()
 			continue
 		}
 		if item.serviceType != sp.ServiceType {
+			_ = item.msg.InProgress()
 			p.routeMessage(ctx, item.msg, item.ceResult)
 			continue
 		}
@@ -220,10 +229,12 @@ func (p *Processor) processTransitionItems(ctx context.Context, sp *store.Stored
 			_ = item.msg.Ack()
 			continue
 		}
-		// to == Ready: TOCTOU guard — SP may have been deregistered since
-		// the transition trigger. Only guard against Unavailable (terminal);
-		// Unhealthy may be stale (health monitor updates tracker before callback).
-		_, currentStatus, ok := p.resolveProviderForServiceType(ctx, item.serviceType)
+		_, currentStatus, ok, storeErr := p.resolveProviderForServiceType(ctx, item.serviceType)
+		if storeErr != nil {
+			p.deps.Logger.Warn("transient store error during transition processing", "error", storeErr, "resourceId", item.resourceID)
+			_ = item.msg.NakWithDelay(storeErrorRetryDelay)
+			continue
+		}
 		if !ok || currentStatus == v1alpha1.Unavailable {
 			p.publishCE(ctx, cloudevent.TypeError, routing.ErrorData{
 				ResponseContext: p.responseCtx(item.resourceID),
@@ -232,6 +243,7 @@ func (p *Processor) processTransitionItems(ctx context.Context, sp *store.Stored
 			_ = item.msg.Ack()
 			continue
 		}
+		_ = item.msg.InProgress()
 		if !p.forwardRequest(ctx, sp, item.ceResult) {
 			if err := p.deps.Publisher.Publish(ctx, p.deps.TopicName+".retry", item.msg.Data()); err == nil {
 				_ = item.msg.Ack()
@@ -280,16 +292,18 @@ func (p *Processor) drainMainTopic(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	heartbeatAllMsgs(mainMsgs)
 	for _, m := range mainMsgs {
 		res, ok := p.parseCE(m.Data())
 		if !ok {
 			_ = m.Term()
 			continue
 		}
-		if p.deps.DenyList.Contains(res.resourceID) {
+		if res.ceType == cloudevent.TypeRequestCreate && p.deps.DenyList.Contains(res.resourceID) {
 			_ = m.Ack()
 			continue
 		}
+		_ = m.InProgress()
 		p.routeMessage(ctx, m, res)
 	}
 	return nil
@@ -306,11 +320,13 @@ func (p *Processor) drainRetryTopicWithDedup(ctx context.Context) error {
 
 	items := p.parseMessages(retryMsgs)
 	items = p.dedupCreateDeletePairs(ctx, items)
+	heartbeatAll(items)
 	for _, item := range items {
-		if p.deps.DenyList.Contains(item.resourceID) {
+		if item.ceType == cloudevent.TypeRequestCreate && p.deps.DenyList.Contains(item.resourceID) {
 			_ = item.msg.Ack()
 			continue
 		}
+		_ = item.msg.InProgress()
 		p.routeMessage(ctx, item.msg, item.ceResult)
 	}
 	return nil
@@ -328,7 +344,12 @@ func (p *Processor) handleMessage(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
-	sp, _, ok := p.resolveProviderForServiceType(ctx, res.serviceType)
+	sp, _, ok, storeErr := p.resolveProviderForServiceType(ctx, res.serviceType)
+	if storeErr != nil {
+		p.deps.Logger.Warn("transient store error during message handling", "error", storeErr, "resourceId", res.resourceID)
+		_ = msg.NakWithDelay(storeErrorRetryDelay)
+		return
+	}
 	if !ok {
 		p.publishCE(ctx, cloudevent.TypeError, routing.ErrorData{
 			ResponseContext: p.responseCtx(res.resourceID),
@@ -560,6 +581,12 @@ func (p *Processor) parseCE(data []byte) (ceResult, bool) {
 		p.deps.Logger.Warn("dropping malformed CE", "error", err)
 		return ceResult{}, false
 	}
+	switch event.Type() {
+	case cloudevent.TypeRequestCreate, cloudevent.TypeRequestDelete, cloudevent.TypeRequestCancel:
+	default:
+		p.deps.Logger.Warn("dropping unknown CE type", "type", event.Type())
+		return ceResult{}, false
+	}
 	var payload struct {
 		ResourceID  string          `json:"resourceId"`
 		ServiceType string          `json:"serviceType"`
@@ -588,7 +615,7 @@ func (p *Processor) publishCE(ctx context.Context, ceType string, data any) {
 	}
 }
 
-func (p *Processor) resolveProviderForServiceType(ctx context.Context, serviceType string) (*store.StoredProvider, v1alpha1.ProviderStatus, bool) {
+func (p *Processor) resolveProviderForServiceType(ctx context.Context, serviceType string) (*store.StoredProvider, v1alpha1.ProviderStatus, bool, error) {
 	return routing.ResolveProvider(ctx, p.deps.Registry, p.deps.Store, p.deps.HealthTracker, p.deps.Logger, serviceType)
 }
 
@@ -608,8 +635,10 @@ func (p *Processor) forwardRequest(ctx context.Context, sp *store.StoredProvider
 
 	// TOCTOU mitigation: re-check denyList after claiming the claimedResourcesSet
 	// slot. A concurrent HandleCancel may have added to denyList between the
-	// ProcessOnTransition denyList.Contains check and here.
-	if p.deps.DenyList.Contains(res.resourceID) {
+	// ProcessOnTransition denyList.Contains check and here. Only creates are
+	// deny-listed (REQ-RTE-150/160).
+	isCreate := res.ceType == cloudevent.TypeRequestCreate
+	if isCreate && p.deps.DenyList.Contains(res.resourceID) {
 		if newlyAdded {
 			p.deps.ClaimedResourcesSet.Remove(res.resourceID)
 		}
@@ -642,7 +671,12 @@ func (p *Processor) forwardRequest(ctx context.Context, sp *store.StoredProvider
 }
 
 func (p *Processor) routeMessage(ctx context.Context, msg jetstream.Msg, res ceResult) {
-	sp, status, ok := p.resolveProviderForServiceType(ctx, res.serviceType)
+	sp, status, ok, storeErr := p.resolveProviderForServiceType(ctx, res.serviceType)
+	if storeErr != nil {
+		p.deps.Logger.Warn("transient store error during routing", "error", storeErr, "resourceId", res.resourceID)
+		_ = msg.NakWithDelay(storeErrorRetryDelay)
+		return
+	}
 	if !ok {
 		if err := p.deps.Publisher.Publish(ctx, p.deps.TopicName+".retry", msg.Data()); err == nil {
 			_ = msg.Ack()
@@ -716,4 +750,20 @@ func (p *Processor) fetchAllFromConsumer(ctx context.Context, streamName, consum
 		}
 	}
 	return collected, nil //nolint:nilerr // fetchErr from Fetch timeout is expected, not a failure
+}
+
+// heartbeatAll resets AckWait on every message in the batch. Called once before
+// the processing loop to give all messages a fresh AckWait window. Individual
+// messages are heartbeated again (inline) right before potentially-long work.
+func heartbeatAll(items []parsedMessage) {
+	for i := range items {
+		_ = items[i].msg.InProgress()
+	}
+}
+
+// heartbeatAllMsgs is like heartbeatAll but for raw JetStream messages.
+func heartbeatAllMsgs(msgs []jetstream.Msg) {
+	for i := range msgs {
+		_ = msgs[i].InProgress()
+	}
 }

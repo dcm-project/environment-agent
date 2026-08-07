@@ -63,7 +63,14 @@ func waitForReady(port string, timeout time.Duration) {
 // log line from stdout. It returns the running command and the port string.
 func startAgent(extraEnv ...string) (*exec.Cmd, string) {
 	cmd := exec.Command(binaryPath)
-	cmd.Env = append(os.Environ(), "AGENT_SERVER_ADDRESS=:0")
+	cmd.Env = append(os.Environ(),
+		"AGENT_SERVER_ADDRESS=:0",
+		"AGENT_NAME=e2e-test",
+		"AGENT_ENVIRONMENT=test",
+		"AGENT_COST=low",
+		"DCM_REGISTRATION_URL=http://127.0.0.1:19999/register",
+		"AGENT_MESSAGING_URL=nats://127.0.0.1:19999",
+	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 
 	stdout, err := cmd.StdoutPipe()

@@ -3,6 +3,7 @@ package messaging
 import (
 	"context"
 	"encoding/json"
+	"runtime/debug"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -12,6 +13,14 @@ import (
 )
 
 func (c *Client) handleCancelMessage(msg jetstream.Msg) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Error("panic in cancel message handler",
+				"panic", r, "subject", msg.Subject(), "stack", string(debug.Stack()))
+			_ = msg.Term()
+		}
+	}()
+
 	if err := c.cancelHandler(context.Background(), msg.Data()); err != nil {
 		if nakErr := msg.NakWithDelay(c.nakDelay()); nakErr != nil {
 			c.logMessageResolutionFailure("failed to nak cancel message", msg, nakErr)
@@ -24,6 +33,14 @@ func (c *Client) handleCancelMessage(msg jetstream.Msg) {
 }
 
 func (c *Client) handleMainMessage(msg jetstream.Msg) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Error("panic in main message handler",
+				"panic", r, "subject", msg.Subject(), "stack", string(debug.Stack()))
+			_ = msg.NakWithDelay(c.nakDelay())
+		}
+	}()
+
 	if c.cfg.MaxDeliver > 0 {
 		meta, err := msg.Metadata()
 		if err != nil {

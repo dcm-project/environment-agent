@@ -48,14 +48,15 @@ func (h *captureHandler) count() int {
 
 // fakeMsg implements the subset of jetstream.Msg needed by handlers.
 type fakeMsg struct {
-	data     []byte
-	subject  string
-	ackErr   error
-	nakErr   error
-	meta     *jetstream.MsgMetadata
-	metaErr  error
-	ackCount int
-	nakCount int
+	data      []byte
+	subject   string
+	ackErr    error
+	nakErr    error
+	meta      *jetstream.MsgMetadata
+	metaErr   error
+	ackCount  int
+	nakCount  int
+	termCount int
 }
 
 func (m *fakeMsg) Data() []byte         { return m.data }
@@ -76,8 +77,11 @@ func (m *fakeMsg) NakWithDelay(d time.Duration) error {
 	return m.nakErr
 }
 
-func (m *fakeMsg) InProgress() error               { return nil }
-func (m *fakeMsg) Term() error                     { return nil }
+func (m *fakeMsg) InProgress() error { return nil }
+func (m *fakeMsg) Term() error {
+	m.termCount++
+	return nil
+}
 func (m *fakeMsg) TermWithReason(string) error     { return nil }
 func (m *fakeMsg) DoubleAck(context.Context) error { return nil }
 
@@ -400,4 +404,64 @@ func assertAttrNotExists(t *testing.T, rec slog.Record, key string) {
 		}
 		return true
 	})
+}
+
+func TestHandleMainMessage_PanicRecovery(t *testing.T) {
+	ch := &captureHandler{}
+	c := &Client{
+		logger:      slog.New(ch),
+		mainHandler: func(_ context.Context, _ []byte) error { panic("boom") },
+	}
+
+	msg := &fakeMsg{
+		data:    buildTestCE("evt-panic-main", cloudevent.TypeRequestCreate),
+		subject: "agent-test.main",
+		meta:    &jetstream.MsgMetadata{NumDelivered: 1},
+	}
+
+	c.handleMainMessage(msg)
+
+	if msg.nakCount != 1 {
+		t.Errorf("expected 1 NakWithDelay after panic, got %d", msg.nakCount)
+	}
+	if msg.ackCount != 0 {
+		t.Errorf("expected 0 acks after panic, got %d", msg.ackCount)
+	}
+	rec := ch.lastRecord()
+	if rec.Message != "panic in main message handler" {
+		t.Errorf("unexpected log message: %s", rec.Message)
+	}
+	assertAttrExists(t, rec, "panic")
+	assertAttrExists(t, rec, "stack")
+}
+
+func TestHandleCancelMessage_PanicRecovery(t *testing.T) {
+	ch := &captureHandler{}
+	c := &Client{
+		logger:        slog.New(ch),
+		cancelHandler: func(_ context.Context, _ []byte) error { panic("cancel boom") },
+	}
+
+	msg := &fakeMsg{
+		data:    buildTestCE("evt-panic-cancel", cloudevent.TypeRequestCancel),
+		subject: "agent-test.cancel",
+	}
+
+	c.handleCancelMessage(msg)
+
+	if msg.termCount != 1 {
+		t.Errorf("expected 1 Term after panic (cancel has no MaxDeliver), got %d", msg.termCount)
+	}
+	if msg.nakCount != 0 {
+		t.Errorf("expected 0 naks after cancel panic, got %d", msg.nakCount)
+	}
+	if msg.ackCount != 0 {
+		t.Errorf("expected 0 acks after cancel panic, got %d", msg.ackCount)
+	}
+	rec := ch.lastRecord()
+	if rec.Message != "panic in cancel message handler" {
+		t.Errorf("unexpected log message: %s", rec.Message)
+	}
+	assertAttrExists(t, rec, "panic")
+	assertAttrExists(t, rec, "stack")
 }
