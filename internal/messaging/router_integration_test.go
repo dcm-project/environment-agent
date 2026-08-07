@@ -147,12 +147,22 @@ var _ = Describe("Main-Topic Delivery Safety Net", Label("integration"), func() 
 		// Handler should not be called more than MaxDeliver times
 		Expect(int(attempts.Load())).To(BeNumerically("<=", maxDeliver))
 
-		// Message must be terminated — no pending/ack-pending left
+		// Message must be terminated — no pending/ack-pending left. Eventually,
+		// not immediate: Term() (called right after the error CE publish
+		// above, which we've already observed) is itself an async NATS
+		// operation — the consumer's server-side NumPending/NumAckPending
+		// state can lag slightly behind the client-side call returning,
+		// independent of the CE having already arrived via a separate
+		// pub/sub subscription (IT-RCM-080).
 		cons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
 		Expect(err).NotTo(HaveOccurred())
-		info, err := cons.Info(ctx)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(info.NumPending + uint64(info.NumAckPending)).To(Equal(uint64(0)))
+		Eventually(func() uint64 {
+			info, infoErr := cons.Info(ctx)
+			if infoErr != nil {
+				return 1
+			}
+			return info.NumPending + uint64(info.NumAckPending)
+		}, 5*time.Second).Should(Equal(uint64(0)))
 	})
 
 	It("creates main and retry consumers with configured MaxDeliver limit (IT-RCM-090)", func() {

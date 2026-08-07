@@ -50,7 +50,17 @@ func (c *Client) handleMainMessage(msg jetstream.Msg) {
 		}
 		if meta.NumDelivered >= uint64(c.cfg.MaxDeliver) {
 			c.publishMaxDeliverError(msg)
-			_ = msg.Term()
+			// If Term fails (e.g. a transient connection drop, IT-RCM-080),
+			// JetStream will redeliver this message and this MaxDeliver
+			// guard fires again on the next attempt, publishing a duplicate
+			// terminal error CE with a distinct id/Nats-Msg-Id (PublishCE
+			// mints a fresh CE each call, so dedup does not apply across
+			// separate publishMaxDeliverError calls). Not worth retrying
+			// Term itself — it would race the same connection issue — but
+			// worth logging so operators can see it happened.
+			if err := msg.Term(); err != nil {
+				c.logMessageResolutionFailure("failed to terminate max-delivery message, may be redelivered", msg, err)
+			}
 			return
 		}
 	}
