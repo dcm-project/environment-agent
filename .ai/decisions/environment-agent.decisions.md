@@ -275,3 +275,20 @@ in-line SP retries. This is a static stopgap; Topic 9 will introduce
 context deadlines, and CE event ID forwarding as `Idempotency-Key` to enable
 proper SP-side event-level dedup. SP idempotency for create/delete by resourceId
 is a MUST requirement (not merely an assumption).
+
+### DD-200: CloudEvent source uses agentName (v1alpha1)
+
+**Decision:** CloudEvent source is `dcm/agents/{agentName}`, not
+`dcm/agents/{agentId}`, in v1alpha1.
+
+**Rationale:** The DCM-assigned `agentId` is only available after successful
+registration (`POST /api/v1/agents` → 201). CloudEvents are published before
+registration completes (e.g., health degraded CEs during startup health checks,
+error CEs for unsupported service types). Using `agentName` — which is a required
+config value available from startup — provides a stable, always-available source
+identifier. Switching to `agentId` post-registration would create a split-brain
+where CEs from the same agent session carry different source values, complicating
+control plane correlation. A future version may introduce a dynamic source that
+switches to `agentId` after registration, but v1alpha1 accepts this trade-off.
+
+**Related requirements:** REQ-XC-CE-030

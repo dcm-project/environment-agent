@@ -1441,6 +1441,98 @@ Unless overridden, tests use:
 
 ---
 
+### IT-RCM-080: MaxDeliver exceeded — terminal error and message terminated
+
+- **Validates AC:** AC-RCM-070
+- **Test Infrastructure:** JetStream; main consumer with `AGENT_MESSAGING_MAX_DELIVER=3`; SP mock that always errors retryably
+- **Given** a create for `resourceId="res-md1"` is published to the main topic
+- **And** the SP for its service type returns a retryable error on every call
+- **When** the message has been delivered and NAK'd/redelivered 3 times (delivery count reaches the configured MaxDeliver)
+- **Then** `dcm.agents.responses` MUST receive a `dcm.agent.error` CloudEvent with `error: "MAX_DELIVERY_EXCEEDED"`
+- **And** the CE data MUST include `resourceId`, `agentName`, and `topicName`
+- **And** the message MUST be terminated (ack'd/terminated, not redelivered a 4th time)
+- **And** SP MUST NOT receive a 4th call for `res-md1`
+
+---
+
+### IT-RCM-090: MaxDeliver configurable — consumers created with configured limit
+
+- **Validates AC:** AC-RCM-080
+- **Test Infrastructure:** Fresh JetStream; `AGENT_MESSAGING_MAX_DELIVER=7`
+- **Given** no durable consumers exist for the main or retry topics
+- **When** the agent starts
+- **Then** JetStream MUST report the main topic consumer's `MaxDeliver` config as `7`
+- **And** JetStream MUST report the retry topic consumer's `MaxDeliver` config as `7`
+
+---
+
+### IT-RCM-100: Handler deadline aborts hung SP call — retryable error, no ack
+
+- **Validates AC:** AC-RCM-090
+- **Test Infrastructure:** JetStream; `AGENT_ROUTING_HANDLER_TIMEOUT=1s`; SP mock that blocks (never responds)
+- **Given** a create for `resourceId="res-hd1"` is consumed from the main topic
+- **And** the SP call for `res-hd1` never returns
+- **When** the handler deadline elapses
+- **Then** the in-flight SP call's context MUST be cancelled
+- **And** the message MUST NOT be acked
+- **And** the failure MUST be treated as a retryable error (message eligible for redelivery, not terminated)
+
+---
+
+### IT-RCM-110: Handler deadline configurable — context carries deadline
+
+- **Validates AC:** AC-RCM-100
+- **Test Infrastructure:** SP mock (embedded) that inspects `ctx.Deadline()`; `AGENT_ROUTING_HANDLER_TIMEOUT=2500ms`
+- **Given** a create for `resourceId="res-hd2"` is consumed from the main topic
+- **When** the SP handler is invoked
+- **Then** the context passed to the SP call MUST have a deadline approximately 2500ms from invocation start
+- **And** changing `AGENT_ROUTING_HANDLER_TIMEOUT` to a different value MUST change the observed deadline on the next invocation
+
+---
+
+### IT-RCM-120: Idempotency-Key forwarded to external SP as HTTP header
+
+- **Validates AC:** AC-RCM-110
+- **Test Infrastructure:** Real HTTP server acting as external SP, recording request headers; NATS
+- **Given** a create CloudEvent with `id="ce-idem-1"` and `resourceId="res-ext1"` is published to the main topic
+- **When** the agent forwards the creation request to the external SP
+- **Then** the recorded HTTP request MUST include header `Idempotency-Key: ce-idem-1`
+
+---
+
+### IT-RCM-130: Idempotency-Key stable across in-line retry attempts
+
+- **Validates AC:** AC-RCM-120
+- **Test Infrastructure:** Real HTTP server acting as external SP, recording all request headers per attempt; SP returns 503 twice then 200
+- **Given** a create CloudEvent with `id="ce-idem-2"` is published to the main topic
+- **And** the SP responds with a retryable 503 on the first two attempts and 200 on the third
+- **When** the agent performs in-line retries per `routing.retryMaxAttempts`
+- **Then** all three recorded requests MUST carry `Idempotency-Key: ce-idem-2`
+
+---
+
+### IT-RCM-140: Idempotency-Key stable across retry-topic reprocessing and JetStream redelivery
+
+- **Validates AC:** AC-RCM-120
+- **Test Infrastructure:** Real HTTP server acting as external SP, recording headers; SP Unhealthy then Ready; forced redelivery via short AckWait
+- **Given** a create CloudEvent with `id="ce-idem-3"` for `resourceId="res-ext3"` is queued to the retry topic while SP is Unhealthy
+- **And** a separate redelivery of the same original message is also triggered (e.g., ack not sent before AckWait elapses on a prior main-topic attempt)
+- **When** the SP transitions to Ready and the request is eventually forwarded to the SP (via retry-topic reprocessing and via JetStream redelivery)
+- **Then** every recorded HTTP request for `res-ext3` MUST carry the identical header `Idempotency-Key: ce-idem-3`
+
+---
+
+### IT-RCM-150: Idempotency-Key available to embedded SPs via context
+
+- **Validates AC:** AC-RCM-130
+- **Test Infrastructure:** Embedded SP mock that reads the idempotency key from the call context/typed field
+- **Given** a create CloudEvent with `id="ce-idem-4"` is published to the main topic for a service type handled by an embedded SP
+- **When** the embedded SP's Create method is invoked
+- **Then** the embedded SP MUST be able to read `"ce-idem-4"` as the idempotency key from the context/typed field it receives
+- **And** the value MUST equal the CloudEvent `id`
+
+---
+
 ## Cross-Cutting: Error Handling
 
 ### IT-XC-ERR-010: RFC 7807 compliance across error conditions
@@ -1705,6 +1797,13 @@ Unless overridden, tests use:
 | AC-RCM-045 | IT-RCM-050 |
 | AC-RCM-050 | IT-RCM-060 |
 | AC-RCM-060 | IT-RCM-070 |
+| AC-RCM-070 | IT-RCM-080 |
+| AC-RCM-080 | IT-RCM-090 |
+| AC-RCM-090 | IT-RCM-100 |
+| AC-RCM-100 | IT-RCM-110 |
+| AC-RCM-110 | IT-RCM-120 |
+| AC-RCM-120 | IT-RCM-130, IT-RCM-140 |
+| AC-RCM-130 | IT-RCM-150 |
 | AC-XC-ERR-010 | IT-XC-ERR-010 |
 | AC-XC-ERR-020 | IT-XC-ERR-020 |
 | AC-XC-ERR-030 | IT-XC-ERR-030 |

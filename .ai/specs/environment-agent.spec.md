@@ -1470,6 +1470,9 @@ or by agent restart — not periodic). The cancel topic provides a mechanism for
 DCM to signal that a request has been re-routed.
 
 Out of scope: Message TTL/expiry (handled by messaging system configuration).
+`MaxDeliver` (REQ-RCM-150) is a distinct mechanism from the out-of-scope
+TTL/expiry item above: it bounds the number of delivery *attempts* for a
+message, not elapsed time.
 
 #### Requirements — Retry Topic
 
@@ -1499,6 +1502,37 @@ Out of scope: Message TTL/expiry (handled by messaging system configuration).
 | REQ-RCM-120 | See REQ-MSG-070. The cancel topic MUST have an active JetStream consumer subscription | MUST | |
 | REQ-RCM-130 | See REQ-MSG-090. The cancel topic MUST be drained on startup (until no pending messages or drain timeout elapses) before main/retry processing | MUST | |
 | REQ-RCM-140 | Cancel CloudEvents MUST contain `resourceId` and `serviceType` in their data payload | MUST | |
+
+#### Requirements — Delivery Safety Net (Poison Messages)
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-RCM-150 | JetStream consumers for the main and retry topics MUST configure a `MaxDeliver` limit, bounding the number of delivery attempts for a message before it is treated as a poison message | MUST | `MaxDeliver` counts delivery attempts, not elapsed time — distinct from the out-of-scope TTL/expiry mechanism |
+| REQ-RCM-160 | When a message's delivery attempts reach the configured `MaxDeliver` without the routing outcome being finalized (per REQ-MSG-115), the agent MUST publish a `dcm.agent.error` CloudEvent to `dcm.agents.responses` with `error: "MAX_DELIVERY_EXCEEDED"`, then acknowledge/terminate the message so it is not redelivered again | MUST | Poison-message safety net; without it, a message that always fails to process would redeliver indefinitely and starve later messages for the same service type (REQ-RCM-060) |
+| REQ-RCM-170 | The `MaxDeliver` limit MUST be configurable | MUST | |
+
+#### Requirements — Handler Processing Deadline
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-RCM-180 | The agent MUST bound the processing time of each consumed message (main and retry topics) with a configurable per-message handler deadline, covering forwarding to the SP and awaiting its response | MUST | Prevents a hung SP call (no response, or a deadlocked embedded call) from blocking the consumer indefinitely for that service type |
+| REQ-RCM-190 | If the handler deadline elapses before the routing outcome is finalized, the agent MUST cancel the in-flight SP call, treat the outcome as a retryable error (per REQ-RTE-110), and MUST NOT acknowledge the message | MUST | Falls back to existing retry/backoff (REQ-RTE-110/130) and, if repeatedly exhausted, to the MaxDeliver safety net (REQ-RCM-150–170) |
+| REQ-RCM-200 | The handler deadline MUST be configurable | MUST | |
+
+#### Requirements — SP-Side Idempotency (Event ID Forwarding)
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-RCM-210 | When forwarding a creation or deletion request to an external SP (per REQ-RTE-040, REQ-RTE-050), the agent MUST set an `Idempotency-Key` HTTP header on the request equal to the inbound CloudEvent's `id` attribute | MUST | Enables SP-side event-level dedup; per DD-190, SPs remain responsible for enforcing idempotency — the agent's obligation is limited to forwarding the key |
+| REQ-RCM-220 | The `Idempotency-Key` value forwarded for a given inbound CloudEvent MUST be identical across every delivery attempt of that event — in-line retries (REQ-RTE-110), retry-topic reprocessing (REQ-RCM-030), and JetStream redelivery (REQ-MSG-116) | MUST | Without a stable key, an SP cannot distinguish "same event, retried" from "new event", defeating the purpose of event-level dedup |
+| REQ-RCM-230 | For embedded SPs, the agent MUST make the inbound CloudEvent's `id` available to the in-process call (e.g., via request context or a typed request field) | MUST | Keeps idempotency semantics consistent between embedded and external SPs; embedded SPs are not exempt from REQ-RCM-220 |
+
+#### Configuration — Topic 9
+
+| Config Key | Env Var | Default | Min | Max | Unit | Description |
+|------------|---------|---------|-----|-----|------|-------------|
+| messaging.maxDeliver | AGENT_MESSAGING_MAX_DELIVER | 10 | 1 | 100 | integer | Maximum JetStream delivery attempts for a message before terminal error CE and termination (REQ-RCM-150) |
+| routing.handlerTimeout | AGENT_ROUTING_HANDLER_TIMEOUT | 60s | 1s | 10m | duration | Maximum time allowed to process a single consumed message, including the SP call (REQ-RCM-180) |
 
 #### Acceptance Criteria
 
@@ -1559,6 +1593,60 @@ Out of scope: Message TTL/expiry (handled by messaging system configuration).
 - **Given** the retry topic contains messages from a prior session
 - **When** the agent restarts and re-reads the retry topic
 - **Then** messages for still-Unhealthy SPs MUST be re-published without triggering additional `request-queued` CloudEvents
+
+##### AC-RCM-070: MaxDeliver exceeded — terminal error CE and termination
+
+- **Validates:** REQ-RCM-150, REQ-RCM-160
+- **Given** `AGENT_MESSAGING_MAX_DELIVER=5` and a creation request for `resourceId="res-999"` that repeatedly fails to reach a finalized routing outcome (e.g. the handler crashes before acking)
+- **When** the message has been delivered 5 times without acknowledgment
+- **Then** the agent MUST publish a `dcm.agent.error` CloudEvent for `resourceId="res-999"` with `error: "MAX_DELIVERY_EXCEEDED"`
+- **And** the message MUST be acknowledged/terminated so a 6th delivery does not occur
+
+##### AC-RCM-080: MaxDeliver is configurable
+
+- **Validates:** REQ-RCM-170
+- **Given** `AGENT_MESSAGING_MAX_DELIVER=10`
+- **When** the agent creates the main and retry topic durable consumers at startup
+- **Then** both consumers MUST be configured with a maximum of 10 delivery attempts
+
+##### AC-RCM-090: Handler deadline aborts a hung SP call
+
+- **Validates:** REQ-RCM-180, REQ-RCM-190
+- **Given** `AGENT_ROUTING_HANDLER_TIMEOUT=30s`
+- **And** an external SP accepts the connection but never responds to a forwarded creation request
+- **When** 30s elapses without a response
+- **Then** the agent MUST cancel the in-flight call
+- **And** MUST treat the outcome as a retryable error per REQ-RTE-110
+- **And** MUST NOT acknowledge the message
+
+##### AC-RCM-100: Handler deadline is configurable
+
+- **Validates:** REQ-RCM-200
+- **Given** `AGENT_ROUTING_HANDLER_TIMEOUT=45s`
+- **When** the agent begins processing a message consumed from the main topic
+- **Then** the context passed to the SP call MUST carry a deadline no later than 45s from consumption
+
+##### AC-RCM-110: Idempotency-Key forwarded to external SP
+
+- **Validates:** REQ-RCM-210
+- **Given** an inbound `dcm.request.create` CloudEvent with `id="evt-abc-123"` and `resourceId="res-1"`
+- **When** the agent forwards the request via `POST {endpoint}`
+- **Then** the HTTP request MUST include the header `Idempotency-Key: evt-abc-123`
+
+##### AC-RCM-120: Idempotency-Key stable across redelivery and retries
+
+- **Validates:** REQ-RCM-220
+- **Given** an inbound CloudEvent with `id="evt-abc-123"` initially triggers a retryable SP error
+- **When** the agent retries the forward in-line per REQ-RTE-110, and separately when the same message is later redelivered by JetStream or reprocessed from the retry topic
+- **Then** every attempt MUST forward the same `Idempotency-Key: evt-abc-123` header
+
+##### AC-RCM-130: Idempotency-Key available to embedded SPs
+
+- **Validates:** REQ-RCM-230
+- **Given** an embedded SP is registered and Ready for service type "container"
+- **And** an inbound CloudEvent with `id="evt-xyz-789"` requests creation of a "container" resource
+- **When** the agent forwards the request via in-process call
+- **Then** the embedded SP call MUST receive `"evt-xyz-789"` as the CE id
 
 #### Dependencies
 
