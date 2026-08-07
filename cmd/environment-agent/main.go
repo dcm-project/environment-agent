@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -10,21 +11,43 @@ import (
 	"os/signal"
 	"syscall"
 
+	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 	oapigen "github.com/dcm-project/environment-agent/internal/api/server"
 	"github.com/dcm-project/environment-agent/internal/apiserver"
 	"github.com/dcm-project/environment-agent/internal/config"
+	"github.com/dcm-project/environment-agent/internal/dcm"
 	"github.com/dcm-project/environment-agent/internal/handler"
 	"github.com/dcm-project/environment-agent/internal/health"
+	"github.com/dcm-project/environment-agent/internal/health/monitor"
 	"github.com/dcm-project/environment-agent/internal/httperror"
+	"github.com/dcm-project/environment-agent/internal/messaging"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/service"
 	"github.com/dcm-project/environment-agent/internal/provider/store"
+	"github.com/dcm-project/environment-agent/internal/routing"
+	"github.com/dcm-project/environment-agent/internal/routing/retry"
 )
 
-// TODO: replace with real MessagingStatus from the NATS/messaging subsystem.
-type messagingStatus struct{}
+// serviceTypeLister adapts ProviderService to dcm.ServiceTypeLister.
+type serviceTypeLister struct {
+	providerSvc *service.ProviderService
+	logger      *slog.Logger
+}
 
-func (messagingStatus) IsConnected() bool { return true }
+func (s *serviceTypeLister) AdvertisableServiceTypes() []string {
+	providers, err := s.providerSvc.List(context.Background())
+	if err != nil {
+		s.logger.Error("failed to list providers for advertisable service types", "error", err)
+		return nil
+	}
+	var types []string
+	for _, p := range providers {
+		if p.Status != nil && *p.Status != v1alpha1.Unavailable {
+			types = append(types, p.ServiceType)
+		}
+	}
+	return types
+}
 
 func main() {
 	code := mainRun()
@@ -50,6 +73,10 @@ func run(ctx context.Context) int {
 		logger.Error("invalid configuration", "error", err)
 		return 1
 	}
+	if err := cfg.ValidateHandlerAckWaitInvariant(); err != nil {
+		logger.Error("invalid configuration", "error", err)
+		return 1
+	}
 
 	ln, err := net.Listen("tcp", cfg.Server.Address)
 	if err != nil {
@@ -69,7 +96,8 @@ func run(ctx context.Context) int {
 	}
 	registry := provider.NewRegistry()
 	healthTracker := provider.NewInMemoryHealthTracker()
-	providerSvc := service.New(fileStore, registry, healthTracker, logger)
+	healthMonitor := monitor.New(healthTracker, cfg.Health, logger)
+	providerSvc := service.New(fileStore, registry, healthTracker, healthMonitor, logger)
 
 	if err := providerSvc.LoadPersisted(); err != nil {
 		logger.Error("failed to load persisted providers", "error", err)
@@ -77,7 +105,115 @@ func run(ctx context.Context) int {
 	}
 	providerSvc.RegisterEmbedded(cfg.Provider.EmbeddedSPs)
 
-	healthSvc := health.NewService(messagingStatus{})
+	// Messaging client — must start before registrar (provides ConsumerLagProvider)
+	msgClient, topics, err := setupMessaging(cfg, logger)
+	if err != nil {
+		logger.Error("invalid topic name", "error", err)
+		return 1
+	}
+
+	// Wire routing before starting messaging so handlers are set
+	denyList := routing.NewResourceSet(cfg.Routing.DenyListMaxSize)
+	forwarder := routing.NewForwarder(routing.ForwarderConfig{Logger: logger})
+	router := routing.NewRouter(routing.RouterDeps{
+		Registry:      registry,
+		HealthTracker: healthTracker,
+		Store:         fileStore,
+		Forwarder:     forwarder,
+		Publisher:     msgClient,
+		DenyList:      denyList,
+		Config:        cfg.Routing,
+		Logger:        logger,
+		AgentName:     cfg.Agent.Name,
+		TopicName:     topics.Main,
+		RetryTopic:    topics.Retry,
+	})
+	msgClient.SetMainHandler(router.HandleRequest)
+	msgClient.SetCancelHandler(router.HandleCancel)
+
+	if err := msgClient.Start(ctx); err != nil {
+		logger.Error("failed to start messaging client", "error", err)
+		return 1
+	}
+	defer msgClient.Stop()
+
+	// Retry processor — wired after messaging client starts (JS context ready)
+	retryProcessor := retry.NewProcessor(retry.ProcessorDeps{
+		Registry:            registry,
+		HealthTracker:       healthTracker,
+		Store:               fileStore,
+		Forwarder:           forwarder,
+		Publisher:           msgClient,
+		JSProvider:          msgClient.JS,
+		DenyList:            denyList,
+		ClaimedResourcesSet: router.ClaimedResourcesSet(),
+		Config: retry.ProcessorConfig{
+			HandlerTimeout: cfg.Routing.HandlerTimeout,
+			NakDelay:       cfg.Routing.NakDelay,
+		},
+		Logger:    logger,
+		AgentName: cfg.Agent.Name,
+		Topics:    topics,
+	})
+	router.SetRetryConsumer(retryProcessor)
+	defer retryProcessor.Stop()
+
+	// DCM Registrar — created before monitor starts so callbacks can be wired
+	// before any health transitions fire. Deferred after monitor so LIFO shuts
+	// registrar down first.
+	registrar, err := dcm.NewRegistrar(
+		dcm.RegistrarConfig{
+			AgentName:                 cfg.Agent.Name,
+			Environment:               cfg.Agent.Environment,
+			Cost:                      cfg.Agent.Cost,
+			TopicName:                 topics.Main,
+			RegistrationURL:           cfg.DCM.RegistrationURL,
+			InitialBackoff:            cfg.DCM.InitialBackoff,
+			MaxBackoff:                cfg.DCM.MaxBackoff,
+			HeartbeatInterval:         cfg.Heartbeat.Interval,
+			PrerequisiteRetryInterval: cfg.DCM.PrerequisiteRetryInterval,
+		},
+		&serviceTypeLister{providerSvc: providerSvc, logger: logger},
+		msgClient,
+		nil,
+		logger,
+	)
+	if err != nil {
+		logger.Error("failed to create DCM registrar", "error", err)
+		return 1
+	}
+
+	// Wire service-type change notifications before starting the periodic
+	// monitor loop. Note: embedded initialCheck transitions (from RegisterEmbedded
+	// above) may fire before this wiring, but the one-time kick below compensates
+	// by forcing a state re-evaluation.
+	healthCEPub := health.NewCEPublisher(fileStore, msgClient, logger, cfg.Agent.Name, topics.Main)
+	healthMonitor.SetOnTransition(func(providerID string, from, to v1alpha1.ProviderStatus) {
+		if from == v1alpha1.Unavailable || to == v1alpha1.Unavailable {
+			registrar.NotifyServiceTypeChange()
+		}
+		retryProcessor.RunTransition(ctx, providerID, from, to)
+		healthCEPub.OnTransition(ctx, providerID, from, to)
+	})
+	providerSvc.SetOnChange(registrar.NotifyServiceTypeChange)
+
+	if err := retryProcessor.ProcessOnRestart(ctx); err != nil {
+		logger.Error("failed to process retry on restart", "error", err)
+	}
+
+	healthMonitor.Start(ctx)
+	defer healthMonitor.Stop()
+
+	registrar.NotifyServiceTypeChange()
+
+	regCtx, regCancel := context.WithCancel(context.Background())
+	registrar.Start(regCtx)
+	defer func() {
+		regCancel()
+		<-registrar.Done()
+	}()
+
+	healthSvc := health.NewService(msgClient)
 	strictHandler := handler.New(healthSvc, providerSvc)
 	h := oapigen.NewStrictHandlerWithOptions(strictHandler, nil, oapigen.StrictHTTPServerOptions{
 		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -94,4 +230,25 @@ func run(ctx context.Context) int {
 	}
 	logger.Info("Environment Agent stopped")
 	return 0
+}
+
+func setupMessaging(cfg *config.Config, logger *slog.Logger) (*messaging.Client, messaging.TopicNames, error) {
+	topics := messaging.DeriveTopicNames(cfg.Agent.Name, cfg.Messaging.TopicName)
+	if err := messaging.ValidateTopicName(topics.Base); err != nil {
+		return nil, messaging.TopicNames{}, fmt.Errorf("invalid topic name: %w", err)
+	}
+	// TopicName is the raw override (or empty), not the derived/prefixed Main
+	// subject — messaging.NewClient calls DeriveTopicNames itself, so passing
+	// the already-prefixed value here would double-prefix it.
+	client := messaging.NewClient(messaging.ClientConfig{
+		URL:            cfg.Messaging.URL,
+		TopicName:      cfg.Messaging.TopicName,
+		AgentName:      cfg.Agent.Name,
+		AckWait:        cfg.Messaging.AckWait,
+		CancelAckWait:  cfg.Messaging.CancelAckWait,
+		MaxDeliver:     cfg.Messaging.MaxDeliver,
+		HandlerTimeout: cfg.Routing.HandlerTimeout,
+		NakDelay:       cfg.Routing.NakDelay,
+	}, logger)
+	return client, topics, nil
 }

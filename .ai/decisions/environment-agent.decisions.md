@@ -201,11 +201,9 @@ happen when real handlers are implemented.
 
 **Related requirements:** REQ-HTTP-020
 
-**Transition Gate (added 2026-07-21, ref: SF-T2-03):**
-When DD-150 is resolved (strict handler wiring), the following MUST be verified:
-- REQ-HLT-010 is covered through the production handler path (not just test stub)
-- REQ-HLT-060 is covered through the production handler path (strict handler sets Content-Type automatically)
-- IT-HLT-010 and IT-HLT-030 assertions against Content-Type validate production behavior, not test infrastructure
+**Resolved (2026-08-07):** Strict handler wired in production and in
+`internal/health/health_integration_test.go` (IT-HLT-010/020/030/040 now run
+through the real handler chain, not a stub). Gate satisfied.
 
 ### DD-160: Constructor lifecycle alignment to peer pattern
 
@@ -234,3 +232,130 @@ stub/placeholder and the risk is theoretical. The per-request timeout AC
 (AC-HTTP-095) is satisfied for context-aware handlers.
 
 **Related requirements:** REQ-HTTP-110
+
+### DD-180: Health state keyed by StoredProvider.ID
+
+**Decision:** The HealthTracker interface is keyed by `StoredProvider.ID` (UUID),
+not by provider name. The routing subsystem uses `sp.ID` from the store record
+when querying health state.
+
+**Rationale:** Provider names are human-readable registration identifiers; IDs
+are system-generated UUIDs that survive re-registration. The health monitor and
+provider service both use `sp.ID` as the authoritative key when calling
+`SetState`. The router must use the same key for lookups. The trust boundary is:
+after `store.GetByName()` returns a `StoredProvider`, its `.ID` field matches
+the key used by the health subsystem (guaranteed by the single-writer
+registration path in `provider.Service`).
+
+**Related requirements:** REQ-HMN-050, REQ-RTE-030
+
+### DD-190: SP-side idempotency for JetStream redelivery protection
+
+**Decision:** The router does NOT implement message-level deduplication for
+JetStream redeliveries. Protection against duplicate side effects is the
+service provider's responsibility (idempotent create/delete operations).
+
+**Rationale:** The `dispatchedSet` is a cancel-rejection ledger that persists
+across the resource lifecycle (create → delete). It cannot double as a
+message-level dedup mechanism without distinguishing operation type. A naive
+`AddIfAbsent` short-circuit would block legitimate delete-after-create
+operations. Proper message dedup would require CE event ID tracking or a
+TTL-based idempotency key store, which is deferred to Topic 9 (retry/lifecycle
+redesign). The ack-error logging in messaging handlers provides operational
+visibility into redelivery occurrences.
+
+**Related requirements:** REQ-RTE-180, REQ-MSG-116
+
+**Amendment (Topic 8 hardening):** The agent sets explicit JetStream `AckWait`
+(default 120s for main, 10s for cancel) to prevent spurious redelivery during
+in-line SP retries. This is a static stopgap; Topic 9 will introduce
+`InProgress()` heartbeats, `MaxDeliver` with terminal error CE emission, handler
+context deadlines, and CE event ID forwarding as `Idempotency-Key` to enable
+proper SP-side event-level dedup. SP idempotency for create/delete by resourceId
+is a MUST requirement (not merely an assumption).
+
+### DD-200: CloudEvent source uses agentName (v1alpha1)
+
+**Decision:** CloudEvent source is `dcm/agents/{agentName}`, not
+`dcm/agents/{agent_id}`, in v1alpha1.
+
+**Rationale:** The DCM-assigned `agent_id` is only available after successful
+registration (`POST /api/v1alpha1/agents` → 201). CloudEvents are published before
+registration completes (e.g., health degraded CEs during startup health checks,
+error CEs for unsupported service types). Using `agentName` — which is a required
+config value available from startup — provides a stable, always-available source
+identifier. Switching to `agent_id` post-registration would create a split-brain
+where CEs from the same agent session carry different source values, complicating
+control plane correlation. A future version may introduce a dynamic source that
+switches to `agent_id` after registration, but v1alpha1 accepts this trade-off.
+
+**Related requirements:** REQ-XC-CE-030
+
+### DD-210: CloudEvent data payload snake_case (AEP convention)
+
+**Decision:** All CloudEvent `data` JSON field names exchanged with the control
+plane use snake_case (`resource_id`, `service_type`, `agent_name`, `topic_name`,
+etc.), matching the control-plane's AEP-style structs.
+
+**Rationale:** Go's `encoding/json` does not fold underscores — camelCase tags
+cannot bind to snake_case wire payloads. The control-plane review (2026-08-07, F1)
+identified silent message drops in both directions when casing diverged. Internal
+Go identifiers and config env vars (e.g. `AGENT_TOPIC_NAME`, struct field
+`TopicName`) remain unchanged; only marshaled JSON field names follow snake_case.
+
+**Related requirements:** REQ-MSG-130, REQ-RCM-140, REQ-XC-CE-010
+
+### DD-220: Control-plane topic prefix (`dcm.agent.`)
+
+**Decision:** Control-plane-facing request subjects are prefixed with
+`dcm.agent.`. The agent derives subjects from an unprefixed **base name**
+(`AGENT_TOPIC_NAME` or `AGENT_NAME`):
+
+- Main: `dcm.agent.{base}` (advertised to DCM as `topic_name`)
+- Cancel: `dcm.agent.{base}.cancel`
+- Retry (agent-internal): `{base}.retry` — **no prefix**
+
+**Rationale:** The control-plane owns a wildcard JetStream stream
+(`dcm-agent-requests`, subject `dcm.agent.>`). Registration requires
+`topic_name` to match `^dcm\.agent\..+`. The retry subject is never published to
+by the control plane, so it stays unprefixed and agent-owned.
+
+**Related requirements:** REQ-MSG-010, REQ-MSG-030, REQ-MSG-050
+
+### DD-230: JetStream stream ownership split (CP vs agent)
+
+**Decision:** The control plane owns JetStream streams for CP-facing subjects.
+The agent MUST NOT create streams on those subjects. Specifically:
+
+| Stream | Owner | Subject binding | Agent action |
+|--------|-------|-----------------|--------------|
+| `dcm-agent-requests` | Control plane | `dcm.agent.>` | Create durable consumers filtered to its main and cancel subjects |
+| `dcm-agent-responses` | Control plane | `dcm.agents.responses` | Publish directly (no stream creation) |
+| `{base}-retry` | Agent | `{base}.retry` | CreateOrUpdateStream |
+| `dcm-health` | Agent | `dcm.agents.health` | CreateOrUpdateStream |
+
+On startup, if `dcm-agent-requests` does not exist yet, the agent retries
+durable consumer creation every 2s for up to 30s (phase 1, synchronous with
+startup). If it's still missing after that, the agent does NOT give up — it
+retries the full setup again every 30s in the background, indefinitely
+(phase 2), until it succeeds or the agent shuts down. A hard give-up would
+leave the agent silently consuming nothing if the CP takes longer than 30s to
+start (e.g. a rolling restart), with no further chance to recover short of a
+manual agent restart.
+
+**Rationale:** NATS rejects overlapping stream subject bindings (error 10065).
+Startup order between control plane and agent is not guaranteed. The agent only
+administers resources it owns; CP-facing traffic uses CP-provisioned streams.
+
+**Related requirements:** REQ-MSG-048, REQ-MSG-049, REQ-MSG-051, REQ-MSG-140
+
+### DD-240: JetStream publish dedup via CloudEvent id (Nats-Msg-Id)
+
+**Decision:** All agent-originated response and health CloudEvents are published
+to JetStream with the `Nats-Msg-Id` header set to the CloudEvent's own `id`.
+
+**Rationale:** Enables server-side deduplication if publish retry logic is added
+later (control-plane review F34). Without a stable message ID, a retried publish
+could duplicate delivery to the control-plane's response consumer.
+
+**Related requirements:** REQ-MSG-135, REQ-XC-CE-050

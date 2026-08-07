@@ -40,6 +40,16 @@ var _ = Describe("InMemoryHealthTracker", Label("unit"), func() {
 		Expect(state.LastCheckTime).To(Equal(t2))
 	})
 
+	It("SetState with empty ID is a no-op", func() {
+		tracker := provider.NewInMemoryHealthTracker()
+		now := time.Now().UTC()
+
+		tracker.SetState("", v1alpha1.Ready, now)
+
+		_, ok := tracker.GetState("")
+		Expect(ok).To(BeFalse())
+	})
+
 	It("removes state and is idempotent for missing IDs", func() {
 		tracker := provider.NewInMemoryHealthTracker()
 		now := time.Now().UTC()
