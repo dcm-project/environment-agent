@@ -18,6 +18,9 @@ profile.cov
 # Dependency directories
 vendor/
 
+# Locally downloaded dev tools
+.bin/
+
 # Go workspace file
 go.work
 go.work.sum
