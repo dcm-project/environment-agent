@@ -2,6 +2,7 @@
 package config
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -11,6 +12,15 @@ import (
 type Config struct {
 	Server   ServerConfig   `envPrefix:"AGENT_SERVER_"`
 	Provider ProviderConfig `envPrefix:"AGENT_"`
+	Health   HealthConfig   `envPrefix:"AGENT_"`
+}
+
+// HealthConfig holds SP health monitoring configuration.
+type HealthConfig struct {
+	CheckInterval        time.Duration `env:"HEALTH_CHECK_INTERVAL" envDefault:"10s"`
+	CheckTimeout         time.Duration `env:"HEALTH_CHECK_TIMEOUT" envDefault:"5s"`
+	FailureThreshold     int           `env:"HEALTH_FAILURE_THRESHOLD" envDefault:"3"`
+	PodConditionsEnabled string        `env:"POD_CONDITIONS_ENABLED" envDefault:"auto"`
 }
 
 // ProviderConfig holds SP registration configuration.
@@ -42,6 +52,15 @@ func (c *Config) Validate() error {
 	}
 	if err := validateDurationRange("AGENT_SERVER_SHUTDOWN_TIMEOUT", c.Server.ShutdownTimeout, time.Second, 5*time.Minute, "[1s, 5m]"); err != nil {
 		return err
+	}
+	if err := validateDurationRange("AGENT_HEALTH_CHECK_INTERVAL", c.Health.CheckInterval, time.Second, 5*time.Minute, "[1s, 5m]"); err != nil {
+		return err
+	}
+	if err := validateDurationRange("AGENT_HEALTH_CHECK_TIMEOUT", c.Health.CheckTimeout, 500*time.Millisecond, c.Health.CheckInterval, fmt.Sprintf("[500ms, %s]", c.Health.CheckInterval)); err != nil {
+		return err
+	}
+	if c.Health.FailureThreshold < 1 || c.Health.FailureThreshold > 100 {
+		return fmt.Errorf("AGENT_HEALTH_FAILURE_THRESHOLD: value %d is outside valid range [1, 100]", c.Health.FailureThreshold)
 	}
 	return nil
 }

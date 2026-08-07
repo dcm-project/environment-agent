@@ -50,6 +50,22 @@ var _ = Describe("Server Configuration", func() {
 		})
 	})
 
+	Describe("Health Config", func() {
+		It("parses health check config from env (UT-HMN-070)", func() {
+			GinkgoT().Setenv("AGENT_HEALTH_CHECK_INTERVAL", "20s")
+			GinkgoT().Setenv("AGENT_HEALTH_CHECK_TIMEOUT", "2s")
+			GinkgoT().Setenv("AGENT_HEALTH_FAILURE_THRESHOLD", "5")
+			GinkgoT().Setenv("AGENT_POD_CONDITIONS_ENABLED", "true")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Health.CheckInterval).To(Equal(20 * time.Second))
+			Expect(cfg.Health.CheckTimeout).To(Equal(2 * time.Second))
+			Expect(cfg.Health.FailureThreshold).To(Equal(5))
+			Expect(cfg.Health.PodConditionsEnabled).To(Equal("true"))
+		})
+	})
+
 	Describe("Validate", func() {
 		It("rejects request timeout below minimum with value and range in error (UT-HTTP-020)", func() {
 			cfg := &config.Config{
