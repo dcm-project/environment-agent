@@ -315,7 +315,7 @@ func (s *ProviderService) registerEmbeddedType(st string) {
 			s.registry.Release(st)
 			return
 		}
-		// existing != nil: fall through to register health/monitor for the re-upserted SP
+		// existing != nil: previous record still in store, register health/monitor for it
 	}
 	checker := monitor.NewEmbeddedChecker(monitor.DefaultEmbeddedCheckFn(st))
 	if s.mon != nil {
