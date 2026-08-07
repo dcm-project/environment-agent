@@ -32,6 +32,8 @@ go.work.sum
 .idea/
 # .vscode/
 
-.ai/reviews/
-.ai/plans/
-.ai/checkpoints/
+.ai/
+
+!.ai/specifications/
+!.ai/decisions/
+!.ai/tests/
