@@ -45,13 +45,13 @@ type mockDCM struct {
 func newMockDCM() *mockDCM {
 	m := &mockDCM{
 		regStatus: http.StatusCreated,
-		regBody:   `{"agentId":"agent-123"}`,
+		regBody:   `{"agent_id":"agent-123"}`,
 		hbStatus:  http.StatusOK,
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v1/agents", m.handleRegistration)
-	mux.HandleFunc("PUT /api/v1/agents/{agentId}/heartbeat", m.handleHeartbeat)
+	mux.HandleFunc("POST /api/v1alpha1/agents", m.handleRegistration)
+	mux.HandleFunc("PUT /api/v1alpha1/agents/{agentId}/heartbeat", m.handleHeartbeat)
 	m.server = httptest.NewServer(mux)
 	return m
 }
@@ -236,10 +236,10 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 		regs := mock.getRegistrations()
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(regs[0].Body, &payload)).To(Succeed())
-		Expect(payload).To(HaveKey("serviceTypes"))
+		Expect(payload).To(HaveKey("service_types"))
 	})
 
-	It("has no agentId before registration (IT-DCM-015)", func() {
+	It("has no agent_id before registration (IT-DCM-015)", func() {
 		lister := &stubServiceTypeLister{types: []string{"container"}}
 		r, err := dcm.NewRegistrar(
 			defaultRegistrarConfig(mock.server.URL),
@@ -254,7 +254,7 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 
 		r.Start(ctx)
 
-		// Companion: Eventually agentId becomes non-empty — fails on stub → RED
+		// Companion: Eventually agent_id becomes non-empty — fails on stub → RED
 		Eventually(func() bool {
 			_, registered := r.AgentID()
 			return registered
@@ -343,17 +343,20 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 		regs := mock.getRegistrations()
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(regs[0].Body, &payload)).To(Succeed())
-		types, ok := payload["serviceTypes"].([]interface{})
+		types, ok := payload["service_types"].([]interface{})
 		Expect(ok).To(BeTrue())
 		Expect(types).To(HaveLen(2))
 	})
 
 	It("sends correct registration payload (IT-DCM-050)", func() {
 		cfg := dcm.RegistrarConfig{
-			AgentName:         "agent-prod-1",
-			Environment:       "production",
-			Cost:              "medium",
-			TopicName:         "agent-prod-1",
+			AgentName:   "agent-prod-1",
+			Environment: "production",
+			Cost:        "medium",
+			// Realistic value: production always passes the CP-prefixed
+			// subject (messaging.TopicNames.Main), never the bare base name
+			// — see cmd/environment-agent/main.go wiring.
+			TopicName:         "dcm.agent.agent-prod-1",
 			RegistrationURL:   mock.server.URL,
 			InitialBackoff:    10 * time.Millisecond,
 			MaxBackoff:        200 * time.Millisecond,
@@ -374,11 +377,11 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 		Expect(payload["name"]).To(Equal("agent-prod-1"))
 		Expect(payload["environment"]).To(Equal("production"))
 		Expect(payload["cost"]).To(Equal("medium"))
-		Expect(payload["topicName"]).To(Equal("agent-prod-1"))
-		Expect(payload).To(HaveKey("serviceTypes"))
+		Expect(payload["topic_name"]).To(Equal("dcm.agent.agent-prod-1"))
+		Expect(payload).To(HaveKey("service_types"))
 	})
 
-	It("includes resourcesAvailable when available (IT-DCM-060)", func() {
+	It("includes resources_available when available (IT-DCM-060)", func() {
 		cpu := "16"
 		mem := "64GB"
 		resources := &stubResourceCapacityProvider{
@@ -402,7 +405,7 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(mock.getRegistrations()[0].Body, &payload)).To(Succeed())
-		Expect(payload).To(HaveKey("resourcesAvailable"))
+		Expect(payload).To(HaveKey("resources_available"))
 	})
 
 	It("re-registration is idempotent (IT-DCM-070)", func() {
@@ -559,11 +562,11 @@ var _ = Describe("DCM Heartbeat", Label("integration"), func() {
 		}, 2*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 2))
 
 		for _, hb := range mock.getHeartbeats() {
-			Expect(hb.Path).To(Equal("/api/v1/agents/agent-123/heartbeat"))
+			Expect(hb.Path).To(Equal("/api/v1alpha1/agents/agent-123/heartbeat"))
 			var payload map[string]interface{}
 			Expect(json.Unmarshal(hb.Body, &payload)).To(Succeed())
 			Expect(payload).To(HaveKey("timestamp"))
-			Expect(payload).To(HaveKey("consumerLag"))
+			Expect(payload).To(HaveKey("consumer_lag"))
 		}
 	})
 
@@ -589,6 +592,40 @@ var _ = Describe("DCM Heartbeat", Label("integration"), func() {
 		Expect(len(gaps)).To(BeNumerically(">=", 2))
 	})
 
+	It("sends strictly increasing heartbeat payload timestamps (IT-DCM-135)", func() {
+		// Unlike IT-DCM-130 (which checks server-observed receipt time), this
+		// asserts on the `timestamp` field *inside* the heartbeat body the
+		// agent actually sends — the field the control-plane rejects
+		// heartbeats on if it isn't strictly greater than the last one it
+		// recorded (action item #8).
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		r, err := dcm.NewRegistrar(
+			defaultRegistrarConfig(mock.server.URL),
+			lister, &stubConsumerLagProvider{}, nil, discardLogger,
+		)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() int {
+			return len(mock.getHeartbeats())
+		}, 2*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 3))
+
+		hbs := mock.getHeartbeats()
+		payloadTimestamps := make([]time.Time, 0, len(hbs))
+		for _, hb := range hbs {
+			var payload struct {
+				Timestamp time.Time `json:"timestamp"`
+			}
+			Expect(json.Unmarshal(hb.Body, &payload)).To(Succeed())
+			payloadTimestamps = append(payloadTimestamps, payload.Timestamp)
+		}
+		for i := 1; i < len(payloadTimestamps); i++ {
+			Expect(payloadTimestamps[i]).To(BeTemporally(">", payloadTimestamps[i-1]),
+				"heartbeat payload timestamps must be strictly increasing (CP rejects timestamp <= last recorded)")
+		}
+	})
+
 	It("includes consumer lag in heartbeat (IT-DCM-140)", func() {
 		lister := &stubServiceTypeLister{types: []string{"container"}}
 		lag := &stubConsumerLagProvider{lag: 5}
@@ -606,7 +643,7 @@ var _ = Describe("DCM Heartbeat", Label("integration"), func() {
 
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(mock.getHeartbeats()[0].Body, &payload)).To(Succeed())
-		Expect(payload["consumerLag"]).To(BeNumerically("==", 5))
+		Expect(payload["consumer_lag"]).To(BeNumerically("==", 5))
 	})
 
 	It("retries on heartbeat failure (IT-DCM-150)", func() {
@@ -667,12 +704,12 @@ var _ = Describe("Service Type Updates", Label("integration"), func() {
 		regs := mock.getRegistrations()
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(regs[len(regs)-1].Body, &payload)).To(Succeed())
-		types, ok := payload["serviceTypes"].([]interface{})
+		types, ok := payload["service_types"].([]interface{})
 		Expect(ok).To(BeTrue())
 		Expect(types).To(HaveLen(2))
 	})
 
-	It("sends empty serviceTypes when all SPs unavailable (IT-DCM-160)", func() {
+	It("sends empty service_types when all SPs unavailable (IT-DCM-160)", func() {
 		lister := &stubServiceTypeLister{types: []string{"container"}}
 		r, err := dcm.NewRegistrar(
 			defaultRegistrarConfig(mock.server.URL),
@@ -696,12 +733,12 @@ var _ = Describe("Service Type Updates", Label("integration"), func() {
 		regs := mock.getRegistrations()
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(regs[len(regs)-1].Body, &payload)).To(Succeed())
-		types, ok := payload["serviceTypes"].([]interface{})
+		types, ok := payload["service_types"].([]interface{})
 		Expect(ok).To(BeTrue())
 		Expect(types).To(BeEmpty())
 	})
 
-	It("excludes Unavailable SPs from serviceTypes (IT-DCM-170)", func() {
+	It("excludes Unavailable SPs from service_types (IT-DCM-170)", func() {
 		lister := &stubServiceTypeLister{types: []string{"container", "database"}}
 		r, err := dcm.NewRegistrar(
 			defaultRegistrarConfig(mock.server.URL),
@@ -718,7 +755,7 @@ var _ = Describe("Service Type Updates", Label("integration"), func() {
 		regs := mock.getRegistrations()
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(regs[0].Body, &payload)).To(Succeed())
-		types, ok := payload["serviceTypes"].([]interface{})
+		types, ok := payload["service_types"].([]interface{})
 		Expect(ok).To(BeTrue())
 		Expect(types).To(ContainElement("container"))
 		Expect(types).To(ContainElement("database"))

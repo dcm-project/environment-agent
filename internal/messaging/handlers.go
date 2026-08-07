@@ -84,8 +84,18 @@ func (c *Client) nakDelay() time.Duration {
 
 func (c *Client) publishMaxDeliverError(msg jetstream.Msg) {
 	resourceID, ceType := extractCEFields(msg.Data())
-	c.logger.Warn("max delivery exceeded, terminating message",
-		"resource_id", resourceID, "ce_type", ceType, "subject", msg.Subject())
+	ceID, _ := extractCEIdentity(msg.Data())
+	// When resourceID is empty/unknown (malformed inbound message), the CP
+	// silently drops the response error CE we're about to publish below
+	// (it requires a non-empty resource_id to correlate). Log the CE id and
+	// stream/consumer sequence here so an operator can still correlate the
+	// incident from agent-side logs against NATS stream state, even though
+	// nothing reaches the CP for it.
+	attrs := []any{"resource_id", resourceID, "ce_id", ceID, "ce_type", ceType, "subject", msg.Subject()}
+	if meta, metaErr := msg.Metadata(); metaErr == nil {
+		attrs = append(attrs, "stream_seq", meta.Sequence.Stream, "consumer_seq", meta.Sequence.Consumer)
+	}
+	c.logger.Warn("max delivery exceeded, terminating message", attrs...)
 
 	errData := routing.ErrorData{
 		ResponseContext: routing.ResponseContext{
@@ -96,7 +106,7 @@ func (c *Client) publishMaxDeliverError(msg jetstream.Msg) {
 		Error:   routing.ErrorMaxDeliveryExceeded,
 		Details: "max delivery attempts exceeded",
 	}
-	if err := cloudevent.PublishCE(context.Background(), c.Publish, cloudevent.SubjectResponses, c.cfg.AgentName, cloudevent.TypeError, errData); err != nil {
+	if err := cloudevent.PublishCE(context.Background(), c.PublishWithMsgID, cloudevent.SubjectResponses, c.cfg.AgentName, cloudevent.TypeError, errData); err != nil {
 		c.logger.Warn("failed to publish max-deliver error CE", "error", err, "resource_id", resourceID)
 	}
 }
@@ -140,7 +150,7 @@ func extractCEFields(data []byte) (resourceID, ceType string) {
 		return "unknown", "unknown"
 	}
 	var payload struct {
-		ResourceID string `json:"resourceId"`
+		ResourceID string `json:"resource_id"`
 	}
 	if json.Unmarshal(envelope.Data, &payload) != nil {
 		return "unknown", envelope.Type

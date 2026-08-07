@@ -14,6 +14,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
+	"github.com/dcm-project/environment-agent/internal/messaging"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/routing"
 	"github.com/dcm-project/environment-agent/internal/routing/retry"
@@ -28,6 +29,7 @@ var _ = Describe("Retry/Cancel Startup", Label("integration"), func() {
 		testJS        jetstream.JetStream
 		responseSub   *nats.Subscription
 		topicName     string
+		topics        messaging.TopicNames
 		processor     *retry.Processor
 		registry      *provider.Registry
 		healthTracker *provider.InMemoryHealthTracker
@@ -40,6 +42,7 @@ var _ = Describe("Retry/Cancel Startup", Label("integration"), func() {
 
 	BeforeEach(func() {
 		topicName = fmt.Sprintf("startup-test-%s", uuid.New().String()[:8])
+		topics = messaging.DeriveTopicNames("agent-prod-1", topicName)
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second) //nolint:fatcontext
 
 		var err error
@@ -48,33 +51,24 @@ var _ = Describe("Retry/Cancel Startup", Label("integration"), func() {
 		testJS, err = jetstream.New(testConn)
 		Expect(err).NotTo(HaveOccurred())
 
-		// Retry stream
+		// Retry stream — agent-owned.
 		_, err = testJS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-			Name: topicName + "-retry", Subjects: []string{topicName + ".retry"},
+			Name: topics.RetryStream(), Subjects: []string{topics.Retry},
 		})
 		Expect(err).NotTo(HaveOccurred())
-		_, err = testJS.CreateOrUpdateConsumer(ctx, topicName+"-retry", jetstream.ConsumerConfig{
-			Durable: topicName + "-retry-consumer", AckPolicy: jetstream.AckExplicitPolicy,
+		_, err = testJS.CreateOrUpdateConsumer(ctx, topics.RetryStream(), jetstream.ConsumerConfig{
+			Durable: topics.RetryConsumer(), AckPolicy: jetstream.AckExplicitPolicy,
 		})
 		Expect(err).NotTo(HaveOccurred())
 
-		// Cancel stream (needed for IT-RCM-070)
-		_, err = testJS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-			Name: topicName + "-cancel", Subjects: []string{topicName + ".cancel"},
+		// Main + cancel consumers on the (shared, CP-owned in production; created
+		// once in suite BeforeSuite here) dcm-agent-requests stream (needed for IT-RCM-070).
+		_, err = testJS.CreateOrUpdateConsumer(ctx, messaging.RequestStreamName, jetstream.ConsumerConfig{
+			Durable: topics.CancelConsumer(), FilterSubject: topics.Cancel, AckPolicy: jetstream.AckExplicitPolicy,
 		})
 		Expect(err).NotTo(HaveOccurred())
-		_, err = testJS.CreateOrUpdateConsumer(ctx, topicName+"-cancel", jetstream.ConsumerConfig{
-			Durable: topicName + "-cancel-consumer", AckPolicy: jetstream.AckExplicitPolicy,
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		// Main stream + consumer (needed for IT-RCM-070)
-		_, err = testJS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-			Name: topicName, Subjects: []string{topicName},
-		})
-		Expect(err).NotTo(HaveOccurred())
-		_, err = testJS.CreateOrUpdateConsumer(ctx, topicName, jetstream.ConsumerConfig{
-			Durable: topicName + "-consumer", AckPolicy: jetstream.AckExplicitPolicy,
+		_, err = testJS.CreateOrUpdateConsumer(ctx, messaging.RequestStreamName, jetstream.ConsumerConfig{
+			Durable: topics.MainConsumer(), FilterSubject: topics.Main, AckPolicy: jetstream.AckExplicitPolicy,
 		})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -107,7 +101,7 @@ var _ = Describe("Retry/Cancel Startup", Label("integration"), func() {
 			Config:        retry.ProcessorConfig{},
 			Logger:        slog.New(slog.NewTextHandler(logBuf, nil)),
 			AgentName:     "agent-prod-1",
-			TopicName:     topicName,
+			Topics:        topics,
 		})
 	})
 
@@ -116,9 +110,9 @@ var _ = Describe("Retry/Cancel Startup", Label("integration"), func() {
 		if responseSub != nil {
 			_ = responseSub.Unsubscribe()
 		}
-		_ = testJS.DeleteStream(context.Background(), topicName+"-retry")
-		_ = testJS.DeleteStream(context.Background(), topicName+"-cancel")
-		_ = testJS.DeleteStream(context.Background(), topicName)
+		_ = testJS.DeleteConsumer(context.Background(), messaging.RequestStreamName, topics.MainConsumer())
+		_ = testJS.DeleteConsumer(context.Background(), messaging.RequestStreamName, topics.CancelConsumer())
+		_ = testJS.DeleteStream(context.Background(), topics.RetryStream())
 		_ = testJS.DeleteStream(context.Background(), "dcm-responses")
 		testConn.Close()
 	})
@@ -127,9 +121,9 @@ var _ = Describe("Retry/Cancel Startup", Label("integration"), func() {
 		routingtest.RegisterSP(ctx, registry, healthTracker, st, "db-provider", "database", v1alpha1.Unhealthy)
 
 		// Seed retry topic with messages from "prior session"
-		_, err := testJS.Publish(ctx, topicName+".retry", routingtest.BuildCreateCE("res-prior-1", "database"))
+		_, err := testJS.Publish(ctx, topics.Retry, routingtest.BuildCreateCE("res-prior-1", "database"))
 		Expect(err).NotTo(HaveOccurred())
-		_, err = testJS.Publish(ctx, topicName+".retry", routingtest.BuildCreateCE("res-prior-2", "database"))
+		_, err = testJS.Publish(ctx, topics.Retry, routingtest.BuildCreateCE("res-prior-2", "database"))
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(processor.ProcessOnRestart(ctx)).To(Succeed())
@@ -138,7 +132,7 @@ var _ = Describe("Retry/Cancel Startup", Label("integration"), func() {
 		routingtest.ExpectNoResponseCE(responseSub, 2*time.Second)
 
 		// Messages must remain held (pending on durable consumer)
-		cons, err := testJS.Consumer(ctx, topicName+"-retry", topicName+"-retry-consumer")
+		cons, err := testJS.Consumer(ctx, topics.RetryStream(), topics.RetryConsumer())
 		Expect(err).NotTo(HaveOccurred())
 		info, err := cons.Info(ctx)
 		Expect(err).NotTo(HaveOccurred())
@@ -149,23 +143,23 @@ var _ = Describe("Retry/Cancel Startup", Label("integration"), func() {
 		routingtest.RegisterSP(ctx, registry, healthTracker, st, "db-provider", "database", v1alpha1.Ready)
 
 		// Seed cancel topic
-		_, err := testJS.Publish(ctx, topicName+".cancel", routingtest.BuildCancelCE("res-456", "database"))
+		_, err := testJS.Publish(ctx, topics.Cancel, routingtest.BuildCancelCE("res-456", "database"))
 		Expect(err).NotTo(HaveOccurred())
-		_, err = testJS.Publish(ctx, topicName+".cancel", routingtest.BuildCancelCE("res-789", "database"))
+		_, err = testJS.Publish(ctx, topics.Cancel, routingtest.BuildCancelCE("res-789", "database"))
 		Expect(err).NotTo(HaveOccurred())
 
 		// Seed main topic: cancelled resources + one non-cancelled positive control
-		_, err = testJS.Publish(ctx, topicName, routingtest.BuildCreateCE("res-456", "database"))
+		_, err = testJS.Publish(ctx, topics.Main, routingtest.BuildCreateCE("res-456", "database"))
 		Expect(err).NotTo(HaveOccurred())
-		_, err = testJS.Publish(ctx, topicName, routingtest.BuildCreateCE("res-allowed", "database"))
+		_, err = testJS.Publish(ctx, topics.Main, routingtest.BuildCreateCE("res-allowed", "database"))
 		Expect(err).NotTo(HaveOccurred())
-		_, err = testJS.Publish(ctx, topicName, routingtest.BuildCreateCE("res-789", "database"))
+		_, err = testJS.Publish(ctx, topics.Main, routingtest.BuildCreateCE("res-789", "database"))
 		Expect(err).NotTo(HaveOccurred())
 
 		// Seed retry topic with creates for cancelled resources
-		_, err = testJS.Publish(ctx, topicName+".retry", routingtest.BuildCreateCE("res-456", "database"))
+		_, err = testJS.Publish(ctx, topics.Retry, routingtest.BuildCreateCE("res-456", "database"))
 		Expect(err).NotTo(HaveOccurred())
-		_, err = testJS.Publish(ctx, topicName+".retry", routingtest.BuildCreateCE("res-789", "database"))
+		_, err = testJS.Publish(ctx, topics.Retry, routingtest.BuildCreateCE("res-789", "database"))
 		Expect(err).NotTo(HaveOccurred())
 
 		// Trigger full startup sequence (cancel drain → main → retry)

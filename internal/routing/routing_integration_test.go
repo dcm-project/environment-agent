@@ -15,6 +15,7 @@ import (
 
 	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 	"github.com/dcm-project/environment-agent/internal/config"
+	"github.com/dcm-project/environment-agent/internal/messaging"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/store"
 	"github.com/dcm-project/environment-agent/internal/routing"
@@ -37,12 +38,19 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		denyList      *routing.ResourceSet
 		router        *routing.Router
 		topicName     string
+		topics        messaging.TopicNames
 		routingCfg    config.RoutingConfig
 	)
 
 	BeforeEach(func() {
 		var err error
 		topicName = fmt.Sprintf("agent-test-%s", uuid.New().String()[:8])
+		// Router.TopicName/RetryTopic below use topics.Main/topics.Retry (the
+		// dcm.agent.-prefixed subjects), matching how cmd/environment-agent/
+		// main.go wires the router in production — not the bare topicName —
+		// so a regression accidentally passing the unprefixed base would fail
+		// here too, not just in the messaging package's own tests.
+		topics = messaging.DeriveTopicNames(topicName, "")
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second) //nolint:fatcontext
 
 		testConn, err = nats.Connect(testNATSServer.ClientURL())
@@ -101,7 +109,8 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 			Config:        routingCfg,
 			Logger:        slog.Default(),
 			AgentName:     "agent-prod-1",
-			TopicName:     topicName,
+			TopicName:     topics.Main,
+			RetryTopic:    topics.Retry,
 		})
 	}
 
@@ -135,7 +144,7 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-embed-001"))
 		Expect(data.AgentName).To(Equal("agent-prod-1"))
-		Expect(data.TopicName).To(Equal(topicName))
+		Expect(data.TopicName).To(Equal(topics.Main))
 		Expect(data.Status).To(Equal("PROVISIONING"))
 	})
 
@@ -153,7 +162,7 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-embed-del"))
 		Expect(data.AgentName).To(Equal("agent-prod-1"))
-		Expect(data.TopicName).To(Equal(topicName))
+		Expect(data.TopicName).To(Equal(topics.Main))
 		Expect(data.Status).To(Equal("DELETING"))
 	})
 
@@ -171,7 +180,7 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-ext-001"))
 		Expect(data.AgentName).To(Equal("agent-prod-1"))
-		Expect(data.TopicName).To(Equal(topicName))
+		Expect(data.TopicName).To(Equal(topics.Main))
 		Expect(data.Status).To(Equal("PROVISIONING"))
 	})
 
@@ -189,7 +198,7 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-123"))
 		Expect(data.AgentName).To(Equal("agent-prod-1"))
-		Expect(data.TopicName).To(Equal(topicName))
+		Expect(data.TopicName).To(Equal(topics.Main))
 		Expect(data.Status).To(Equal("DELETING"))
 	})
 
@@ -369,7 +378,8 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 			Config:        routingCfg,
 			Logger:        slog.Default(),
 			AgentName:     "agent-prod-1",
-			TopicName:     topicName,
+			TopicName:     topics.Main,
+			RetryTopic:    topics.Retry,
 		})
 
 		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-oldest", "container"))
@@ -587,7 +597,8 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 			Config:        routingCfg,
 			Logger:        slog.Default(),
 			AgentName:     "agent-prod-1",
-			TopicName:     topicName,
+			TopicName:     topics.Main,
+			RetryTopic:    topics.Retry,
 		})
 
 		err := router.HandleCancel(ctx, routingtest.BuildCancelCE("res-startup-cancel", "container"))

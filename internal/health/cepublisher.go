@@ -75,7 +75,7 @@ func (p *CEPublisher) OnTransition(ctx context.Context, providerID string, _, to
 		Reason:           reason,
 		AffectedProvider: sp.Name,
 	}
-	if err := cloudevent.PublishCE(ctx, p.publisher.Publish, cloudevent.SubjectHealth, p.agentName, ceType, data); err != nil {
+	if err := cloudevent.PublishCE(ctx, p.publisher.PublishWithMsgID, cloudevent.SubjectHealth, p.agentName, ceType, data); err != nil {
 		p.logger.Warn("failed to publish health CE", "type", ceType, "providerID", providerID, "error", err)
 	}
 }

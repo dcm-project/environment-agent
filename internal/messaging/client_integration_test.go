@@ -27,12 +27,16 @@ func setNoopHandlers(c *messaging.Client) {
 	c.SetCancelHandler(func(_ context.Context, _ []byte) error { return nil })
 }
 
-func deleteStreams(js jetstream.JetStream, topicName string) {
+// deleteTestArtifacts removes the per-test durable consumers created on the
+// shared (simulated CP-owned) request stream, plus the agent-owned retry
+// stream. It does NOT delete messaging.RequestStreamName or the shared
+// response stream — those are suite-scoped and shared across tests.
+func deleteTestArtifacts(js jetstream.JetStream, topics messaging.TopicNames) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	for _, suffix := range []string{"", "-retry", "-cancel"} {
-		_ = js.DeleteStream(ctx, topicName+suffix)
-	}
+	_ = js.DeleteConsumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
+	_ = js.DeleteConsumer(ctx, messaging.RequestStreamName, topics.CancelConsumer())
+	_ = js.DeleteStream(ctx, topics.RetryStream())
 }
 
 func publishCE(ctx context.Context, js jetstream.JetStream, subject, ceType, source string, payload any) {
@@ -55,12 +59,14 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 		testConn  *nats.Conn
 		testJS    jetstream.JetStream
 		topicName string
+		topics    messaging.TopicNames
 		logger    *slog.Logger
 	)
 
 	BeforeEach(func() {
 		var err error
 		topicName = fmt.Sprintf("test-%s", uuid.New().String()[:8])
+		topics = messaging.DeriveTopicNames("test-agent", topicName)
 		logger = slog.Default()
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second) //nolint:fatcontext // Ginkgo BeforeEach pattern
 
@@ -72,11 +78,11 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 
 	AfterEach(func() {
 		cancel()
-		deleteStreams(testJS, topicName)
+		deleteTestArtifacts(testJS, topics)
 		testConn.Close()
 	})
 
-	It("creates three JetStream subjects at startup (IT-MSG-010)", func() {
+	It("creates agent-owned retry stream and CP-facing durable consumers at startup (IT-MSG-010)", func() {
 		client := messaging.NewClient(messaging.ClientConfig{
 			URL:       testNATSServer.ClientURL(),
 			TopicName: topicName,
@@ -86,17 +92,24 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
-		mainStream, err := testJS.Stream(ctx, topicName)
+		// Retry stream is agent-owned.
+		retryStream, err := testJS.Stream(ctx, topics.RetryStream())
 		Expect(err).NotTo(HaveOccurred())
-		Expect(mainStream.CachedInfo().Config.Subjects).To(ContainElement(topicName))
+		Expect(retryStream.CachedInfo().Config.Subjects).To(ContainElement(topics.Retry))
 
-		retryStream, err := testJS.Stream(ctx, topicName+"-retry")
+		// Main/Cancel are durable consumers on the control-plane-owned
+		// RequestStreamName (F2) — the agent must NOT create streams for them.
+		mainCons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
 		Expect(err).NotTo(HaveOccurred())
-		Expect(retryStream.CachedInfo().Config.Subjects).To(ContainElement(topicName + ".retry"))
+		mainInfo, err := mainCons.Info(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(mainInfo.Config.FilterSubject).To(Equal(topics.Main))
 
-		cancelStream, err := testJS.Stream(ctx, topicName+"-cancel")
+		cancelCons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.CancelConsumer())
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cancelStream.CachedInfo().Config.Subjects).To(ContainElement(topicName + ".cancel"))
+		cancelInfo, err := cancelCons.Info(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cancelInfo.Config.FilterSubject).To(Equal(topics.Cancel))
 	})
 
 	It("creates deterministic durable consumer names derived from topic (IT-MSG-020)", func() {
@@ -109,20 +122,12 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
-		stream, err := testJS.Stream(ctx, topicName)
+		_, err := testJS.Consumer(ctx, messaging.RequestStreamName, topicName+"-consumer")
 		Expect(err).NotTo(HaveOccurred())
-
-		// Verify consumer names are deterministic (derived from topic name)
-		consNames := []string{}
-		lister := stream.ListConsumers(ctx)
-		for info := range lister.Info() {
-			consNames = append(consNames, info.Name)
-		}
-		Expect(consNames).NotTo(BeEmpty())
-		// Consumer names must contain the topic name for determinism
-		for _, name := range consNames {
-			Expect(name).To(ContainSubstring(topicName))
-		}
+		_, err = testJS.Consumer(ctx, messaging.RequestStreamName, topicName+"-cancel-consumer")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = testJS.Consumer(ctx, topics.RetryStream(), topicName+"-retry-consumer")
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	It("reuses existing topics on restart without error (IT-MSG-050)", func() {
@@ -154,9 +159,10 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 		setNoopHandlers(client1)
 		Expect(client1.Start(ctx)).To(Succeed())
 
-		stream, err := testJS.Stream(ctx, topicName)
+		mainCons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
 		Expect(err).NotTo(HaveOccurred())
-		initialConsumers := stream.CachedInfo().State.Consumers
+		initialInfo, err := mainCons.Info(ctx)
+		Expect(err).NotTo(HaveOccurred())
 		client1.Stop()
 
 		client2 := messaging.NewClient(cfg, logger)
@@ -164,9 +170,13 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 		Expect(client2.Start(ctx)).To(Succeed())
 		defer client2.Stop()
 
-		stream, err = testJS.Stream(ctx, topicName)
+		mainCons, err = testJS.Consumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
 		Expect(err).NotTo(HaveOccurred())
-		Expect(stream.CachedInfo().State.Consumers).To(Equal(initialConsumers))
+		reusedInfo, err := mainCons.Info(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		// Same Created timestamp proves CreateOrUpdateConsumer reused the
+		// existing durable consumer rather than creating a duplicate.
+		Expect(reusedInfo.Created).To(Equal(initialInfo.Created))
 	})
 })
 
@@ -177,12 +187,14 @@ var _ = Describe("Message Durability", Label("integration"), func() {
 		testConn  *nats.Conn
 		testJS    jetstream.JetStream
 		topicName string
+		topics    messaging.TopicNames
 		logger    *slog.Logger
 	)
 
 	BeforeEach(func() {
 		var err error
 		topicName = fmt.Sprintf("test-%s", uuid.New().String()[:8])
+		topics = messaging.DeriveTopicNames("test-agent", topicName)
 		logger = slog.Default()
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second) //nolint:fatcontext // Ginkgo BeforeEach pattern
 
@@ -194,7 +206,7 @@ var _ = Describe("Message Durability", Label("integration"), func() {
 
 	AfterEach(func() {
 		cancel()
-		deleteStreams(testJS, topicName)
+		deleteTestArtifacts(testJS, topics)
 		testConn.Close()
 	})
 
@@ -203,6 +215,14 @@ var _ = Describe("Message Durability", Label("integration"), func() {
 			URL:       testNATSServer.ClientURL(),
 			TopicName: topicName,
 			AgentName: "test-agent",
+			// Explicit short AckWait as a safety net: client1.Stop() below is
+			// called concurrently with (racing) the handler's async
+			// NakWithDelay call, which can lose that race and never reach the
+			// server before the connection closes. Without this, the pending
+			// message would only become redeliverable after the server
+			// default AckWait (30s) — well past this test's 5s window — so
+			// the test would flake whenever that race is lost.
+			AckWait: 2 * time.Second,
 		}
 
 		received := make(chan []byte, 1)
@@ -214,7 +234,7 @@ var _ = Describe("Message Durability", Label("integration"), func() {
 		})
 		Expect(client1.Start(ctx)).To(Succeed())
 
-		publishCE(ctx, testJS, topicName, cloudevent.TypeRequestCreate, "dcm/test", map[string]string{"key": "value"})
+		publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/test", map[string]string{"key": "value"})
 
 		Eventually(received, 5*time.Second).Should(Receive())
 		client1.Stop()
@@ -240,12 +260,14 @@ var _ = Describe("Topic Advertising", Label("integration"), func() {
 		testConn  *nats.Conn
 		testJS    jetstream.JetStream
 		topicName string
+		topics    messaging.TopicNames
 		logger    *slog.Logger
 	)
 
 	BeforeEach(func() {
 		var err error
 		topicName = fmt.Sprintf("test-%s", uuid.New().String()[:8])
+		topics = messaging.DeriveTopicNames("test-agent", topicName)
 		logger = slog.Default()
 		ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second) //nolint:fatcontext // Ginkgo BeforeEach pattern
 
@@ -257,11 +279,11 @@ var _ = Describe("Topic Advertising", Label("integration"), func() {
 
 	AfterEach(func() {
 		cancel()
-		deleteStreams(testJS, topicName)
+		deleteTestArtifacts(testJS, topics)
 		testConn.Close()
 	})
 
-	It("returns only main topic name — not retry or cancel (IT-MSG-060)", func() {
+	It("returns the dcm.agent.-prefixed main subject — not retry or cancel (IT-MSG-060)", func() {
 		client := messaging.NewClient(messaging.ClientConfig{
 			URL:       testNATSServer.ClientURL(),
 			TopicName: topicName,
@@ -271,7 +293,8 @@ var _ = Describe("Topic Advertising", Label("integration"), func() {
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
-		Expect(client.TopicName()).To(Equal(topicName))
+		Expect(client.TopicName()).To(Equal(topics.Main))
+		Expect(client.TopicName()).To(Equal("dcm.agent." + topicName))
 	})
 })
 
@@ -282,12 +305,14 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 		testConn  *nats.Conn
 		testJS    jetstream.JetStream
 		topicName string
+		topics    messaging.TopicNames
 		logger    *slog.Logger
 	)
 
 	BeforeEach(func() {
 		var err error
 		topicName = fmt.Sprintf("test-%s", uuid.New().String()[:8])
+		topics = messaging.DeriveTopicNames("test-agent", topicName)
 		logger = slog.Default()
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second) //nolint:fatcontext // Ginkgo BeforeEach pattern
 
@@ -299,7 +324,7 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 
 	AfterEach(func() {
 		cancel()
-		deleteStreams(testJS, topicName)
+		deleteTestArtifacts(testJS, topics)
 		testConn.Close()
 	})
 
@@ -325,22 +350,22 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 			respEvent.SetType("dcm.agent.creation-acknowledged")
 			respEvent.SetTime(time.Now())
 			_ = respEvent.SetData(cloudevents.ApplicationJSON, map[string]any{
-				"agentName":  "test-agent",
-				"topicName":  topicName,
-				"resourceId": p["resourceId"],
-				"status":     "PROVISIONING",
+				"agent_name":  "test-agent",
+				"topic_name":  topics.Main,
+				"resource_id": p["resource_id"],
+				"status":      "PROVISIONING",
 			})
 			data, _ := json.Marshal(respEvent)
-			return testConn.Publish("dcm.agents.responses", data)
+			return testConn.Publish(cloudevent.SubjectResponses, data)
 		})
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
-		responseSub, err := testConn.SubscribeSync("dcm.agents.responses")
+		responseSub, err := testConn.SubscribeSync(cloudevent.SubjectResponses)
 		Expect(err).NotTo(HaveOccurred())
 
-		publishCE(ctx, testJS, topicName, cloudevent.TypeRequestCreate, "dcm/control-plane",
-			map[string]string{"resourceId": "res-001"})
+		publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/control-plane",
+			map[string]string{"resource_id": "res-001"})
 
 		Eventually(handlerCalled, 5*time.Second).Should(Receive())
 
@@ -352,7 +377,7 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 		Expect(respEvent.Type()).To(Equal("dcm.agent.creation-acknowledged"))
 	})
 
-	It("cancel message updates deny list — blocks subsequent create for same resourceId (IT-MSG-080)", func() {
+	It("cancel message updates deny list — blocks subsequent create for same resource_id (IT-MSG-080)", func() {
 		cfg := messaging.ClientConfig{
 			URL:       testNATSServer.ClientURL(),
 			TopicName: topicName,
@@ -369,8 +394,8 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 			_ = json.Unmarshal(msg, &event)
 			var payload map[string]string
 			_ = json.Unmarshal(event.Data(), &payload)
-			denied.Store(payload["resourceId"], struct{}{})
-			cancelReceived <- payload["resourceId"]
+			denied.Store(payload["resource_id"], struct{}{})
+			cancelReceived <- payload["resource_id"]
 			return nil
 		})
 		client.SetMainHandler(func(_ context.Context, msg []byte) error {
@@ -378,28 +403,28 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 			_ = json.Unmarshal(msg, &event)
 			var payload map[string]string
 			_ = json.Unmarshal(event.Data(), &payload)
-			if _, found := denied.Load(payload["resourceId"]); found {
+			if _, found := denied.Load(payload["resource_id"]); found {
 				return nil
 			}
-			mainReceived <- payload["resourceId"]
+			mainReceived <- payload["resource_id"]
 			return nil
 		})
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
 		// Cancel res-001
-		publishCE(ctx, testJS, topicName+".cancel", cloudevent.TypeRequestCancel, "dcm/control-plane",
-			map[string]string{"resourceId": "res-001"})
+		publishCE(ctx, testJS, topics.Cancel, cloudevent.TypeRequestCancel, "dcm/control-plane",
+			map[string]string{"resource_id": "res-001"})
 
 		Eventually(cancelReceived, 5*time.Second).Should(Receive(Equal("res-001")))
 
-		// Create for same resourceId — should be filtered by deny list
-		publishCE(ctx, testJS, topicName, cloudevent.TypeRequestCreate, "dcm/control-plane",
-			map[string]string{"resourceId": "res-001"})
+		// Create for same resource_id — should be filtered by deny list
+		publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/control-plane",
+			map[string]string{"resource_id": "res-001"})
 
-		// Create for different resourceId — should go through (positive control)
-		publishCE(ctx, testJS, topicName, cloudevent.TypeRequestCreate, "dcm/control-plane",
-			map[string]string{"resourceId": "res-002"})
+		// Create for different resource_id — should go through (positive control)
+		publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/control-plane",
+			map[string]string{"resource_id": "res-002"})
 
 		// res-002 should arrive but res-001 should be filtered
 		Eventually(mainReceived, 5*time.Second).Should(Receive(Equal("res-002")))
@@ -413,23 +438,14 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 			AgentName: "test-agent",
 		}
 
-		// Pre-populate streams manually
-		_, err := testJS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-			Name:     topicName + "-cancel",
-			Subjects: []string{topicName + ".cancel"},
-		})
-		Expect(err).NotTo(HaveOccurred())
-		_, err = testJS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-			Name:     topicName,
-			Subjects: []string{topicName},
-		})
-		Expect(err).NotTo(HaveOccurred())
-
 		// Publish cancel for "res-cancel-1" and main for "res-main-1" (different IDs to avoid deny-list)
-		publishCE(ctx, testJS, topicName+".cancel", cloudevent.TypeRequestCancel, "dcm/control-plane",
-			map[string]string{"resourceId": "res-cancel-1"})
-		publishCE(ctx, testJS, topicName, cloudevent.TypeRequestCreate, "dcm/control-plane",
-			map[string]string{"resourceId": "res-main-1"})
+		// before the client (and thus its durable consumers) exists — the CP
+		// requests stream already exists (suite-level), so these messages sit
+		// pending until a consumer with a matching FilterSubject is created.
+		publishCE(ctx, testJS, topics.Cancel, cloudevent.TypeRequestCancel, "dcm/control-plane",
+			map[string]string{"resource_id": "res-cancel-1"})
+		publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/control-plane",
+			map[string]string{"resource_id": "res-main-1"})
 
 		// Start client — cancel must be processed before main
 		order := make(chan string, 10)
@@ -460,26 +476,15 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 			AgentName: "test-agent",
 		}
 
-		_, err := testJS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-			Name:     topicName + "-cancel",
-			Subjects: []string{topicName + ".cancel"},
-		})
-		Expect(err).NotTo(HaveOccurred())
-		_, err = testJS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-			Name:     topicName,
-			Subjects: []string{topicName},
-		})
-		Expect(err).NotTo(HaveOccurred())
-
 		// Pre-populate cancel messages
 		for i := 0; i < 5; i++ {
-			publishCE(ctx, testJS, topicName+".cancel", cloudevent.TypeRequestCancel, "dcm/control-plane",
-				map[string]string{"resourceId": fmt.Sprintf("res-drain-%d", i)})
+			publishCE(ctx, testJS, topics.Cancel, cloudevent.TypeRequestCancel, "dcm/control-plane",
+				map[string]string{"resource_id": fmt.Sprintf("res-drain-%d", i)})
 		}
 
-		// Publish a main message with distinct resourceId (won't be in deny list)
-		publishCE(ctx, testJS, topicName, cloudevent.TypeRequestCreate, "dcm/control-plane",
-			map[string]string{"resourceId": "res-main-not-cancelled"})
+		// Publish a main message with distinct resource_id (won't be in deny list)
+		publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/control-plane",
+			map[string]string{"resource_id": "res-main-not-cancelled"})
 
 		mainProcessed := make(chan struct{}, 1)
 		client := messaging.NewClient(cfg, logger)
@@ -500,7 +505,7 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 		Expect(time.Since(startTime)).To(BeNumerically("<=", 7*time.Second))
 	})
 
-	It("extracts resourceId from nested CE payload — struct ignores extra fields (IT-MSG-071)", func() {
+	It("extracts resource_id from nested CE payload — struct ignores extra fields (IT-MSG-071)", func() {
 		cfg := messaging.ClientConfig{
 			URL:       testNATSServer.ClientURL(),
 			TopicName: topicName,
@@ -516,7 +521,7 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 			_ = json.Unmarshal(msg, &event)
 			var p map[string]any
 			_ = json.Unmarshal(event.Data(), &p)
-			if id, ok := p["resourceId"].(string); ok {
+			if id, ok := p["resource_id"].(string); ok {
 				denied.Store(id, struct{}{})
 			}
 			cancelProcessed <- struct{}{}
@@ -527,7 +532,7 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 			_ = json.Unmarshal(msg, &event)
 			var p map[string]any
 			_ = json.Unmarshal(event.Data(), &p)
-			id, _ := p["resourceId"].(string)
+			id, _ := p["resource_id"].(string)
 			if _, found := denied.Load(id); found {
 				return nil
 			}
@@ -538,55 +543,55 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 			respEvent.SetType("dcm.agent.creation-acknowledged")
 			respEvent.SetTime(time.Now())
 			_ = respEvent.SetData(cloudevents.ApplicationJSON, map[string]any{
-				"agentName":  "test-agent",
-				"topicName":  topicName,
-				"resourceId": id,
-				"status":     "PROVISIONING",
+				"agent_name":  "test-agent",
+				"topic_name":  topics.Main,
+				"resource_id": id,
+				"status":      "PROVISIONING",
 			})
 			data, _ := json.Marshal(respEvent)
-			return testConn.Publish("dcm.agents.responses", data)
+			return testConn.Publish(cloudevent.SubjectResponses, data)
 		})
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
-		responseSub, err := testConn.SubscribeSync("dcm.agents.responses")
+		responseSub, err := testConn.SubscribeSync(cloudevent.SubjectResponses)
 		Expect(err).NotTo(HaveOccurred())
 
-		// Nested payload — resourceId at top level, extra nested object
+		// Nested payload — resource_id at top level, extra nested object
 		nestedPayload := map[string]any{
-			"resourceId": "res-nested",
-			"spec":       map[string]any{"replicas": 3, "image": "nginx:latest"},
+			"resource_id": "res-nested",
+			"spec":        map[string]any{"replicas": 3, "image": "nginx:latest"},
 		}
-		publishCE(ctx, testJS, topicName, cloudevent.TypeRequestCreate, "dcm/control-plane", nestedPayload)
+		publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/control-plane", nestedPayload)
 
 		Eventually(handlerCalled, 5*time.Second).Should(Receive())
 
-		// Verify response CE contains the extracted resourceId
+		// Verify response CE contains the extracted resource_id
 		msg, err := responseSub.NextMsg(5 * time.Second)
 		Expect(err).NotTo(HaveOccurred())
 		var respEvent cloudevents.Event
 		Expect(json.Unmarshal(msg.Data, &respEvent)).To(Succeed())
 		var respPayload map[string]any
 		Expect(json.Unmarshal(respEvent.Data(), &respPayload)).To(Succeed())
-		Expect(respPayload["resourceId"]).To(Equal("res-nested"))
+		Expect(respPayload["resource_id"]).To(Equal("res-nested"))
 
 		// Also verify nested cancel populates deny list
 		cancelPayload := map[string]any{
-			"resourceId": "res-nested-cancel",
-			"metadata":   map[string]any{"reason": "user-requested"},
+			"resource_id": "res-nested-cancel",
+			"metadata":    map[string]any{"reason": "user-requested"},
 		}
-		publishCE(ctx, testJS, topicName+".cancel", cloudevent.TypeRequestCancel, "dcm/control-plane", cancelPayload)
+		publishCE(ctx, testJS, topics.Cancel, cloudevent.TypeRequestCancel, "dcm/control-plane", cancelPayload)
 
 		// Wait for cancel handler to confirm processing (no sleep)
 		Eventually(cancelProcessed, 5*time.Second).Should(Receive())
 
-		// Main message for cancelled resourceId should be filtered
-		publishCE(ctx, testJS, topicName, cloudevent.TypeRequestCreate, "dcm/control-plane",
-			map[string]string{"resourceId": "res-nested-cancel"})
+		// Main message for cancelled resource_id should be filtered
+		publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/control-plane",
+			map[string]string{"resource_id": "res-nested-cancel"})
 
-		// Positive control — different resourceId goes through
-		publishCE(ctx, testJS, topicName, cloudevent.TypeRequestCreate, "dcm/control-plane",
-			map[string]string{"resourceId": "res-not-cancelled"})
+		// Positive control — different resource_id goes through
+		publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/control-plane",
+			map[string]string{"resource_id": "res-not-cancelled"})
 
 		Eventually(handlerCalled, 5*time.Second).Should(Receive())
 		Consistently(func() int { return len(handlerCalled) }, 1*time.Second).Should(Equal(0))
@@ -643,6 +648,10 @@ var _ = Describe("Connection Resilience", Label("integration"), func() {
 		reconnectServer := natstest.RunServer(&opts)
 		defer reconnectServer.Shutdown()
 
+		// Pre-create the CP-owned request stream so the client's async
+		// consumer-creation backoff (F2) isn't the bottleneck for this test.
+		createRequestStream(reconnectURL)
+
 		// IsConnected should transition to true after reconnection
 		Eventually(func() bool { return client.IsConnected() }, 10*time.Second, 100*time.Millisecond).Should(BeTrue())
 
@@ -653,6 +662,7 @@ var _ = Describe("Connection Resilience", Label("integration"), func() {
 		const reconnectPort = 14222
 		reconnectURL := fmt.Sprintf("nats://127.0.0.1:%d", reconnectPort)
 
+		topics := messaging.DeriveTopicNames("test-agent", topicName)
 		mainReceived := make(chan string, 5)
 		client := messaging.NewClient(messaging.ClientConfig{
 			URL:       reconnectURL,
@@ -664,7 +674,7 @@ var _ = Describe("Connection Resilience", Label("integration"), func() {
 			_ = json.Unmarshal(msg, &event)
 			var p map[string]any
 			_ = json.Unmarshal(event.Data(), &p)
-			if id, ok := p["resourceId"].(string); ok {
+			if id, ok := p["resource_id"].(string); ok {
 				mainReceived <- id
 			}
 			return nil
@@ -687,6 +697,9 @@ var _ = Describe("Connection Resilience", Label("integration"), func() {
 		reconnectServer := natstest.RunServer(&opts)
 		defer reconnectServer.Shutdown()
 
+		// Pre-create the CP-owned request stream (see IT-MSG-100 comment).
+		createRequestStream(reconnectURL)
+
 		Eventually(func() bool { return client.IsConnected() }, 10*time.Second, 100*time.Millisecond).Should(BeTrue())
 
 		// Connect a separate client to publish a test message
@@ -696,12 +709,109 @@ var _ = Describe("Connection Resilience", Label("integration"), func() {
 		pubJS, err := jetstream.New(pubConn)
 		Expect(err).NotTo(HaveOccurred())
 
-		publishCE(ctx, pubJS, topicName, cloudevent.TypeRequestCreate, "dcm/control-plane",
-			map[string]string{"resourceId": "res-setup-recovery"})
+		publishCE(ctx, pubJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/control-plane",
+			map[string]string{"resource_id": "res-setup-recovery"})
 
 		Eventually(mainReceived, 10*time.Second).Should(Receive(Equal("res-setup-recovery")))
 	})
+
+	It("creates consumers once the CP request stream appears mid-retry (IT-MSG-107)", func() {
+		// Unlike IT-MSG-100/105, NATS is already up when the client starts —
+		// only messaging.RequestStreamName (the CP-owned stream) is missing.
+		// This exercises createRequestConsumer's inner retry loop directly
+		// (F2 startup-order race), rather than relying on NATS
+		// disconnect/reconnect to give doSetup another chance.
+		//
+		// Uses a dynamically-assigned port (unlike IT-MSG-100/105, which need
+		// a pre-known port because their server doesn't exist yet when the
+		// client first tries to connect) to avoid any port-reuse race with
+		// those two tests, which share a hardcoded port.
+		opts := natstest.DefaultTestOptions
+		opts.Port = -1
+		opts.JetStream = true
+		tmpDir, err := os.MkdirTemp("", "nats-stream-race-*")
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { _ = os.RemoveAll(tmpDir) }()
+		opts.StoreDir = tmpDir
+		server := natstest.RunServer(&opts)
+		defer server.Shutdown()
+		reconnectURL := server.ClientURL()
+
+		topics := messaging.DeriveTopicNames("test-agent", topicName)
+		mainReceived := make(chan string, 5)
+		client := messaging.NewClient(messaging.ClientConfig{
+			URL:       reconnectURL,
+			TopicName: topicName,
+			AgentName: "test-agent",
+		}, logger)
+		client.SetMainHandler(func(_ context.Context, msg []byte) error {
+			var event cloudevents.Event
+			_ = json.Unmarshal(msg, &event)
+			var p map[string]any
+			_ = json.Unmarshal(event.Data(), &p)
+			if id, ok := p["resource_id"].(string); ok {
+				mainReceived <- id
+			}
+			return nil
+		})
+		client.SetCancelHandler(func(_ context.Context, _ []byte) error { return nil })
+
+		// Start's first setup attempt blocks synchronously on
+		// createRequestConsumer's inner retry (up to requestStreamRetryTimeout)
+		// since the CP stream doesn't exist yet — run it on a goroutine so this
+		// test can create the stream *while* that attempt is still retrying,
+		// rather than only after Start returns.
+		startDone := make(chan error, 1)
+		go func() { startDone <- client.Start(ctx) }()
+		defer client.Stop()
+
+		// Give the retry loop a couple of iterations to actually run against
+		// the missing stream before it appears, so this genuinely exercises
+		// the retry path rather than winning a race against a fast first
+		// attempt.
+		time.Sleep(3 * time.Second)
+
+		createRequestStream(reconnectURL)
+
+		// Start's synchronous first attempt should now succeed (within
+		// requestStreamRetryInterval of the stream appearing), well before
+		// its requestStreamRetryTimeout bound.
+		Eventually(startDone, 30*time.Second).Should(Receive(Not(HaveOccurred())))
+
+		pubConn, err := nats.Connect(reconnectURL)
+		Expect(err).NotTo(HaveOccurred())
+		defer pubConn.Close()
+		pubJS, err := jetstream.New(pubConn)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Publishing only needs the stream to exist (already true) — it
+		// doesn't need to wait for the agent's consumer, which is still
+		// catching up in the background (bounded by
+		// requestStreamRetryInterval). The message just sits in the stream
+		// until the consumer is created and starts pulling.
+		publishCE(ctx, pubJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/control-plane",
+			map[string]string{"resource_id": "res-stream-race"})
+
+		Eventually(mainReceived, 15*time.Second).Should(Receive(Equal("res-stream-race")))
+	})
 })
+
+// createRequestStream connects to the given NATS URL and creates the
+// (simulated CP-owned) dcm-agent-requests stream, matching the shared
+// suite-level setup used against testNATSServer.
+func createRequestStream(url string) {
+	conn, err := nats.Connect(url)
+	Expect(err).NotTo(HaveOccurred())
+	defer conn.Close()
+	js, err := jetstream.New(conn)
+	Expect(err).NotTo(HaveOccurred())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name: messaging.RequestStreamName, Subjects: []string{"dcm.agent.>"},
+	})
+	Expect(err).NotTo(HaveOccurred())
+}
 
 var _ = Describe("Acknowledgment", Label("integration"), func() {
 	var (
@@ -710,12 +820,14 @@ var _ = Describe("Acknowledgment", Label("integration"), func() {
 		testConn  *nats.Conn
 		testJS    jetstream.JetStream
 		topicName string
+		topics    messaging.TopicNames
 		logger    *slog.Logger
 	)
 
 	BeforeEach(func() {
 		var err error
 		topicName = fmt.Sprintf("test-%s", uuid.New().String()[:8])
+		topics = messaging.DeriveTopicNames("test-agent", topicName)
 		logger = slog.Default()
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second) //nolint:fatcontext // Ginkgo BeforeEach pattern
 
@@ -727,7 +839,7 @@ var _ = Describe("Acknowledgment", Label("integration"), func() {
 
 	AfterEach(func() {
 		cancel()
-		deleteStreams(testJS, topicName)
+		deleteTestArtifacts(testJS, topics)
 		testConn.Close()
 	})
 
@@ -755,7 +867,7 @@ var _ = Describe("Acknowledgment", Label("integration"), func() {
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
-		publishCE(ctx, testJS, topicName, "dcm.test.ack", "dcm/test",
+		publishCE(ctx, testJS, topics.Main, "dcm.test.ack", "dcm/test",
 			map[string]string{"key": "ack-test"})
 
 		// First delivery — handler is blocked (message in-flight, unacknowledged)
@@ -776,12 +888,14 @@ var _ = Describe("CloudEvent Correlation", Label("integration"), func() {
 		testConn  *nats.Conn
 		testJS    jetstream.JetStream
 		topicName string
+		topics    messaging.TopicNames
 		logger    *slog.Logger
 	)
 
 	BeforeEach(func() {
 		var err error
 		topicName = fmt.Sprintf("test-%s", uuid.New().String()[:8])
+		topics = messaging.DeriveTopicNames("test-agent", topicName)
 		logger = slog.Default()
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second) //nolint:fatcontext // Ginkgo BeforeEach pattern
 
@@ -793,11 +907,11 @@ var _ = Describe("CloudEvent Correlation", Label("integration"), func() {
 
 	AfterEach(func() {
 		cancel()
-		deleteStreams(testJS, topicName)
+		deleteTestArtifacts(testJS, topics)
 		testConn.Close()
 	})
 
-	It("response CE conforms to CloudEvents v1.0 with agentName and topicName in data (IT-MSG-120)", func() {
+	It("response CE conforms to CloudEvents v1.0 with agent_name and topic_name in data (IT-MSG-120)", func() {
 		cfg := messaging.ClientConfig{
 			URL:       testNATSServer.ClientURL(),
 			TopicName: topicName,
@@ -817,22 +931,22 @@ var _ = Describe("CloudEvent Correlation", Label("integration"), func() {
 			respEvent.SetType("dcm.agent.creation-acknowledged")
 			respEvent.SetTime(time.Now())
 			_ = respEvent.SetData(cloudevents.ApplicationJSON, map[string]any{
-				"agentName":  "test-agent",
-				"topicName":  topicName,
-				"resourceId": p["resourceId"],
-				"status":     "PROVISIONING",
+				"agent_name":  "test-agent",
+				"topic_name":  topics.Main,
+				"resource_id": p["resource_id"],
+				"status":      "PROVISIONING",
 			})
 			data, _ := json.Marshal(respEvent)
-			return testConn.Publish("dcm.agents.responses", data)
+			return testConn.Publish(cloudevent.SubjectResponses, data)
 		})
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
-		responseSub, err := testConn.SubscribeSync("dcm.agents.responses")
+		responseSub, err := testConn.SubscribeSync(cloudevent.SubjectResponses)
 		Expect(err).NotTo(HaveOccurred())
 
-		publishCE(ctx, testJS, topicName, cloudevent.TypeRequestCreate, "dcm/control-plane",
-			map[string]string{"resourceId": "res-corr"})
+		publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/control-plane",
+			map[string]string{"resource_id": "res-corr"})
 
 		msg, err := responseSub.NextMsg(5 * time.Second)
 		Expect(err).NotTo(HaveOccurred())
@@ -850,10 +964,10 @@ var _ = Describe("CloudEvent Correlation", Label("integration"), func() {
 		// Correlation fields in data
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(respEvent.Data(), &payload)).To(Succeed())
-		Expect(payload).To(HaveKey("agentName"))
-		Expect(payload).To(HaveKey("topicName"))
-		Expect(payload["agentName"]).To(Equal("test-agent"))
-		Expect(payload["topicName"]).To(Equal(topicName))
+		Expect(payload).To(HaveKey("agent_name"))
+		Expect(payload).To(HaveKey("topic_name"))
+		Expect(payload["agent_name"]).To(Equal("test-agent"))
+		Expect(payload["topic_name"]).To(Equal(topics.Main))
 	})
 
 	It("delete request produces deletion-acknowledged response with DELETING status (IT-MSG-072)", func() {
@@ -876,22 +990,22 @@ var _ = Describe("CloudEvent Correlation", Label("integration"), func() {
 			respEvent.SetType("dcm.agent.deletion-acknowledged")
 			respEvent.SetTime(time.Now())
 			_ = respEvent.SetData(cloudevents.ApplicationJSON, map[string]any{
-				"agentName":  "test-agent",
-				"topicName":  topicName,
-				"resourceId": p["resourceId"],
-				"status":     "DELETING",
+				"agent_name":  "test-agent",
+				"topic_name":  topics.Main,
+				"resource_id": p["resource_id"],
+				"status":      "DELETING",
 			})
 			data, _ := json.Marshal(respEvent)
-			return testConn.Publish("dcm.agents.responses", data)
+			return testConn.Publish(cloudevent.SubjectResponses, data)
 		})
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
-		responseSub, err := testConn.SubscribeSync("dcm.agents.responses")
+		responseSub, err := testConn.SubscribeSync(cloudevent.SubjectResponses)
 		Expect(err).NotTo(HaveOccurred())
 
-		publishCE(ctx, testJS, topicName, cloudevent.TypeRequestDelete, "dcm/control-plane",
-			map[string]string{"resourceId": "res-del-001"})
+		publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestDelete, "dcm/control-plane",
+			map[string]string{"resource_id": "res-del-001"})
 
 		msg, err := responseSub.NextMsg(5 * time.Second)
 		Expect(err).NotTo(HaveOccurred())
@@ -903,9 +1017,9 @@ var _ = Describe("CloudEvent Correlation", Label("integration"), func() {
 		var respPayload map[string]interface{}
 		Expect(json.Unmarshal(respEvent.Data(), &respPayload)).To(Succeed())
 		Expect(respPayload["status"]).To(Equal("DELETING"))
-		Expect(respPayload["resourceId"]).To(Equal("res-del-001"))
-		Expect(respPayload["agentName"]).To(Equal("test-agent"))
-		Expect(respPayload["topicName"]).To(Equal(topicName))
+		Expect(respPayload["resource_id"]).To(Equal("res-del-001"))
+		Expect(respPayload["agent_name"]).To(Equal("test-agent"))
+		Expect(respPayload["topic_name"]).To(Equal(topics.Main))
 	})
 
 	It("handler failure causes nak and redelivery (IT-MSG-073)", func() {
@@ -928,8 +1042,8 @@ var _ = Describe("CloudEvent Correlation", Label("integration"), func() {
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
-		publishCE(ctx, testJS, topicName, cloudevent.TypeRequestCreate, "dcm/control-plane",
-			map[string]string{"resourceId": "res-nak-001"})
+		publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/control-plane",
+			map[string]string{"resource_id": "res-nak-001"})
 
 		// Message should be redelivered because handler returns error
 		Eventually(deliveryCount.Load, 10*time.Second, 100*time.Millisecond).

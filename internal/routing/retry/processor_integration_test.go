@@ -15,6 +15,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
+	"github.com/dcm-project/environment-agent/internal/messaging"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/routing"
 	"github.com/dcm-project/environment-agent/internal/routing/retry"
@@ -29,6 +30,7 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 		testJS        jetstream.JetStream
 		responseSub   *nats.Subscription
 		topicName     string
+		topics        messaging.TopicNames
 		processor     *retry.Processor
 		registry      *provider.Registry
 		healthTracker *provider.InMemoryHealthTracker
@@ -41,6 +43,7 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 
 	BeforeEach(func() {
 		topicName = fmt.Sprintf("retry-test-%s", uuid.New().String()[:8])
+		topics = messaging.DeriveTopicNames("agent-prod-1", topicName)
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second) //nolint:fatcontext
 
 		var err error
@@ -85,7 +88,7 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 			Config:        retry.ProcessorConfig{},
 			Logger:        slog.New(slog.NewTextHandler(logBuf, nil)),
 			AgentName:     "agent-prod-1",
-			TopicName:     topicName,
+			Topics:        topics,
 		})
 	})
 
@@ -123,7 +126,7 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 			Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 			Expect(data.ResourceID).To(Equal(resID))
 			Expect(data.AgentName).To(Equal("agent-prod-1"))
-			Expect(data.TopicName).To(Equal(topicName))
+			Expect(data.TopicName).To(Equal(topics.Main))
 			Expect(data.Status).To(Equal("PROVISIONING"))
 		}
 

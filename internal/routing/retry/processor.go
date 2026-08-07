@@ -13,6 +13,7 @@ import (
 
 	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 	"github.com/dcm-project/environment-agent/internal/cloudevent"
+	"github.com/dcm-project/environment-agent/internal/messaging"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/store"
 	"github.com/dcm-project/environment-agent/internal/routing"
@@ -25,8 +26,12 @@ const (
 )
 
 // ProcessorConfig holds retry processor tuning knobs.
+//
+// MaxDeliver-exceeded handling lives solely in messaging.Client
+// (handleMainMessage) now — the main-topic consume loop that used to
+// duplicate that logic here (Processor.Start/handleMessage) was dead code
+// (never wired from main.go) and has been removed.
 type ProcessorConfig struct {
-	MaxDeliver     int
 	HandlerTimeout time.Duration
 	NakDelay       time.Duration // zero falls back to routing.DefaultNakDelay
 }
@@ -48,7 +53,11 @@ type ProcessorDeps struct {
 	Config              ProcessorConfig
 	Logger              *slog.Logger
 	AgentName           string
-	TopicName           string
+	// Topics carries the derived subjects/consumer names shared with
+	// messaging.Client, so both packages agree on where requests/cancels
+	// live (CP-owned messaging.RequestStreamName) and where retries live
+	// (agent-owned RetryStream). See messaging.DeriveTopicNames.
+	Topics messaging.TopicNames
 }
 
 // Processor handles retry-topic consumption triggered by SP health transitions and restarts.
@@ -56,11 +65,9 @@ type Processor struct {
 	deps    ProcessorDeps
 	retryMu sync.Mutex // protects ONLY JetStream Fetch calls
 
-	mu         sync.Mutex // lifecycle: stopped, consumeCtx, wg.Add serialization
-	stopped    bool
-	consumeCtx jetstream.ConsumeContext
-	wg         sync.WaitGroup
-	stopOnce   sync.Once
+	mu      sync.Mutex // lifecycle: stopped, wg.Add serialization
+	stopped bool
+	wg      sync.WaitGroup
 }
 
 // NewProcessor creates a retry processor. Panics on nil required deps.
@@ -86,69 +93,13 @@ func NewProcessor(deps ProcessorDeps) *Processor {
 	return &Processor{deps: deps}
 }
 
-// EnsureConsumers creates or updates main and retry consumers with configured MaxDeliver.
-func (p *Processor) EnsureConsumers(ctx context.Context) error {
-	js := p.js()
-	if js == nil {
-		return nil
-	}
-	cfg := jetstream.ConsumerConfig{
-		Durable:    p.deps.TopicName + "-consumer",
-		AckPolicy:  jetstream.AckExplicitPolicy,
-		MaxDeliver: p.deps.Config.MaxDeliver,
-	}
-	if _, err := js.CreateOrUpdateConsumer(ctx, p.deps.TopicName, cfg); err != nil {
-		return err
-	}
-	cfg.Durable = p.deps.TopicName + "-retry-consumer"
-	if _, err := js.CreateOrUpdateConsumer(ctx, p.deps.TopicName+"-retry", cfg); err != nil {
-		return err
-	}
-	return nil
-}
-
-// Start begins consuming from the main topic. Non-blocking — uses JetStream push-based Consume.
-func (p *Processor) Start(ctx context.Context) error {
-	p.mu.Lock()
-	if p.stopped {
-		p.mu.Unlock()
-		return fmt.Errorf("processor already stopped")
-	}
-	p.mu.Unlock()
-
-	js := p.js()
-	if js == nil {
-		return nil
-	}
-	cons, err := js.Consumer(ctx, p.deps.TopicName, p.deps.TopicName+"-consumer")
-	if err != nil {
-		return err
-	}
-	cc, err := cons.Consume(func(msg jetstream.Msg) {
-		p.handleMessage(ctx, msg)
-	})
-	if err != nil {
-		return err
-	}
-
-	p.mu.Lock()
-	p.consumeCtx = cc
-	p.mu.Unlock()
-	return nil
-}
-
-// Stop halts the background consumer subscription and waits for in-flight transitions.
+// Stop marks the processor stopped and waits for in-flight transition
+// goroutines (spawned by RunTransition) to finish. Idempotent.
 func (p *Processor) Stop() {
 	p.mu.Lock()
 	p.stopped = true
-	cc := p.consumeCtx
 	p.mu.Unlock()
 
-	p.stopOnce.Do(func() {
-		if cc != nil {
-			cc.Stop()
-		}
-	})
 	p.wg.Wait()
 }
 
@@ -194,7 +145,7 @@ func (p *Processor) ProcessOnTransition(ctx context.Context, providerID string, 
 	}
 
 	p.retryMu.Lock()
-	msgs, err := p.fetchAllFromConsumer(ctx, p.deps.TopicName+"-retry", p.deps.TopicName+"-retry-consumer")
+	msgs, err := p.fetchAllFromConsumer(ctx, p.deps.Topics.RetryStream(), p.deps.Topics.RetryConsumer())
 	p.retryMu.Unlock()
 	if err != nil {
 		return err
@@ -245,7 +196,7 @@ func (p *Processor) processTransitionItems(ctx context.Context, sp *store.Stored
 		}
 		_ = item.msg.InProgress()
 		if !p.forwardRequest(ctx, sp, item.ceResult) {
-			if err := p.deps.Publisher.Publish(ctx, p.deps.TopicName+".retry", item.msg.Data()); err == nil {
+			if err := p.deps.Publisher.Publish(ctx, p.deps.Topics.Retry, item.msg.Data()); err == nil {
 				_ = item.msg.Ack()
 			}
 			continue
@@ -271,7 +222,7 @@ func (p *Processor) ProcessOnRestart(ctx context.Context) error {
 }
 
 func (p *Processor) drainCancelsToDenyList(ctx context.Context) error {
-	cancelMsgs, err := p.fetchAllFromConsumer(ctx, p.deps.TopicName+"-cancel", p.deps.TopicName+"-cancel-consumer")
+	cancelMsgs, err := p.fetchAllFromConsumer(ctx, messaging.RequestStreamName, p.deps.Topics.CancelConsumer())
 	if err != nil {
 		return err
 	}
@@ -288,7 +239,7 @@ func (p *Processor) drainCancelsToDenyList(ctx context.Context) error {
 }
 
 func (p *Processor) drainMainTopic(ctx context.Context) error {
-	mainMsgs, err := p.fetchAllFromConsumer(ctx, p.deps.TopicName, p.deps.TopicName+"-consumer")
+	mainMsgs, err := p.fetchAllFromConsumer(ctx, messaging.RequestStreamName, p.deps.Topics.MainConsumer())
 	if err != nil {
 		return err
 	}
@@ -312,7 +263,7 @@ func (p *Processor) drainMainTopic(ctx context.Context) error {
 // drainRetryTopicWithDedup drains the retry topic with create+delete dedup (REQ-RCM-090).
 func (p *Processor) drainRetryTopicWithDedup(ctx context.Context) error {
 	p.retryMu.Lock()
-	retryMsgs, err := p.fetchAllFromConsumer(ctx, p.deps.TopicName+"-retry", p.deps.TopicName+"-retry-consumer")
+	retryMsgs, err := p.fetchAllFromConsumer(ctx, p.deps.Topics.RetryStream(), p.deps.Topics.RetryConsumer())
 	p.retryMu.Unlock()
 	if err != nil {
 		return err
@@ -330,111 +281,6 @@ func (p *Processor) drainRetryTopicWithDedup(ctx context.Context) error {
 		p.routeMessage(ctx, item.msg, item.ceResult)
 	}
 	return nil
-}
-
-// handleMessage processes a single message in the Start() consume loop.
-func (p *Processor) handleMessage(ctx context.Context, msg jetstream.Msg) {
-	res, ok := p.parseCE(msg.Data())
-	if !ok {
-		_ = msg.Term()
-		return
-	}
-
-	if p.terminateIfMaxDeliver(ctx, msg, res) {
-		return
-	}
-
-	sp, _, ok, storeErr := p.resolveProviderForServiceType(ctx, res.serviceType)
-	if storeErr != nil {
-		p.deps.Logger.Warn("transient store error during message handling", "error", storeErr, "resourceId", res.resourceID)
-		_ = msg.NakWithDelay(storeErrorRetryDelay)
-		return
-	}
-	if !ok {
-		p.publishCE(ctx, cloudevent.TypeError, routing.ErrorData{
-			ResponseContext: p.responseCtx(res.resourceID),
-			Error:           routing.ErrorUnsupportedServiceType, Details: "provider not found for service type: " + res.serviceType,
-		})
-		_ = msg.Ack()
-		return
-	}
-
-	if p.deps.Forwarder == nil {
-		p.publishCE(ctx, cloudevent.TypeError, routing.ErrorData{
-			ResponseContext: p.responseCtx(res.resourceID),
-			Error:           routing.ErrorSPUnavailable, Details: "forwarder not configured",
-		})
-		_ = msg.Ack()
-		return
-	}
-
-	p.forwardAndAck(ctx, msg, sp, res)
-}
-
-// terminateIfMaxDeliver checks whether the message has exceeded the configured
-// delivery limit. If so, publishes an error CE and terminates the message.
-// Returns true if the message was handled (caller should return).
-func (p *Processor) terminateIfMaxDeliver(ctx context.Context, msg jetstream.Msg, res ceResult) bool {
-	if p.deps.Config.MaxDeliver <= 0 {
-		return false
-	}
-	meta, err := msg.Metadata()
-	if err != nil {
-		p.deps.Logger.Warn("failed to get message metadata", "error", err)
-		_ = msg.Nak()
-		return true
-	}
-	if meta.NumDelivered >= uint64(p.deps.Config.MaxDeliver) {
-		p.publishCE(ctx, cloudevent.TypeError, routing.ErrorData{
-			ResponseContext: p.responseCtx(res.resourceID),
-			Error:           routing.ErrorMaxDeliveryExceeded, Details: "max delivery attempts exceeded",
-		})
-		_ = msg.Term()
-		return true
-	}
-	return false
-}
-
-// forwardAndAck forwards a message to the SP and handles ack/nak based on outcome.
-func (p *Processor) forwardAndAck(ctx context.Context, msg jetstream.Msg, sp *store.StoredProvider, res ceResult) {
-	var handlerCtx context.Context
-	var handlerCancel context.CancelFunc
-	if p.deps.Config.HandlerTimeout > 0 {
-		handlerCtx, handlerCancel = context.WithTimeout(ctx, p.deps.Config.HandlerTimeout)
-	} else {
-		handlerCtx, handlerCancel = context.WithCancel(ctx)
-	}
-	defer handlerCancel()
-
-	fwdErr := routing.ForwardToSP(handlerCtx, p.deps.Forwarder, sp, routing.ForwardParams{
-		ResourceID: res.resourceID, ServiceType: res.serviceType,
-		Spec: res.spec, EventID: res.eventID, IsCreate: res.ceType != cloudevent.TypeRequestDelete,
-	})
-	if fwdErr == nil {
-		p.publishAckCE(ctx, res)
-		_ = msg.Ack()
-		return
-	}
-
-	// Deadline/cancel — do NOT ack/nak so JetStream redelivers.
-	if handlerCtx.Err() != nil {
-		return
-	}
-
-	if routing.IsRetryable(fwdErr) {
-		delay := p.deps.Config.NakDelay
-		if delay == 0 {
-			delay = routing.DefaultNakDelay
-		}
-		_ = msg.NakWithDelay(delay)
-		return
-	}
-
-	p.publishCE(ctx, cloudevent.TypeError, routing.ErrorData{
-		ResponseContext: p.responseCtx(res.resourceID),
-		Error:           routing.ErrorNonRetryable, Details: fwdErr.Error(),
-	})
-	_ = msg.Ack()
 }
 
 // publishAckCE emits the appropriate creation-acked or deletion-acked CE.
@@ -459,7 +305,7 @@ func (p *Processor) FetchRetryMessages(ctx context.Context) ([]routing.RetryMess
 	defer cancel()
 
 	p.retryMu.Lock()
-	msgs, err := p.fetchAllFromConsumer(fetchCtx, p.deps.TopicName+"-retry", p.deps.TopicName+"-retry-consumer")
+	msgs, err := p.fetchAllFromConsumer(fetchCtx, p.deps.Topics.RetryStream(), p.deps.Topics.RetryConsumer())
 	p.retryMu.Unlock()
 
 	if err != nil {
@@ -486,7 +332,7 @@ func (p *Processor) FetchRetryMessages(ctx context.Context) ([]routing.RetryMess
 
 // RepublishToRetry implements routing.RetryTopicConsumer.
 func (p *Processor) RepublishToRetry(ctx context.Context, data []byte) error {
-	return p.deps.Publisher.Publish(ctx, p.deps.TopicName+".retry", data)
+	return p.deps.Publisher.Publish(ctx, p.deps.Topics.Retry, data)
 }
 
 type ceResult struct {
@@ -588,8 +434,8 @@ func (p *Processor) parseCE(data []byte) (ceResult, bool) {
 		return ceResult{}, false
 	}
 	var payload struct {
-		ResourceID  string          `json:"resourceId"`
-		ServiceType string          `json:"serviceType"`
+		ResourceID  string          `json:"resource_id"`
+		ServiceType string          `json:"service_type"`
 		Spec        json.RawMessage `json:"spec,omitempty"`
 	}
 	if err := json.Unmarshal(event.Data(), &payload); err != nil {
@@ -606,11 +452,11 @@ func (p *Processor) parseCE(data []byte) (ceResult, bool) {
 }
 
 func (p *Processor) responseCtx(resourceID string) routing.ResponseContext {
-	return routing.ResponseContext{ResourceID: resourceID, AgentName: p.deps.AgentName, TopicName: p.deps.TopicName}
+	return routing.ResponseContext{ResourceID: resourceID, AgentName: p.deps.AgentName, TopicName: p.deps.Topics.Main}
 }
 
 func (p *Processor) publishCE(ctx context.Context, ceType string, data any) {
-	if err := cloudevent.PublishCE(ctx, p.deps.Publisher.Publish, cloudevent.SubjectResponses, p.deps.AgentName, ceType, data); err != nil {
+	if err := cloudevent.PublishCE(ctx, p.deps.Publisher.PublishWithMsgID, cloudevent.SubjectResponses, p.deps.AgentName, ceType, data); err != nil {
 		p.deps.Logger.Warn("failed to publish CE", "type", ceType, "error", err)
 	}
 }
@@ -678,7 +524,7 @@ func (p *Processor) routeMessage(ctx context.Context, msg jetstream.Msg, res ceR
 		return
 	}
 	if !ok {
-		if err := p.deps.Publisher.Publish(ctx, p.deps.TopicName+".retry", msg.Data()); err == nil {
+		if err := p.deps.Publisher.Publish(ctx, p.deps.Topics.Retry, msg.Data()); err == nil {
 			_ = msg.Ack()
 		}
 		return
@@ -686,7 +532,7 @@ func (p *Processor) routeMessage(ctx context.Context, msg jetstream.Msg, res ceR
 	switch status {
 	case v1alpha1.Ready:
 		if !p.forwardRequest(ctx, sp, res) {
-			if err := p.deps.Publisher.Publish(ctx, p.deps.TopicName+".retry", msg.Data()); err == nil {
+			if err := p.deps.Publisher.Publish(ctx, p.deps.Topics.Retry, msg.Data()); err == nil {
 				_ = msg.Ack()
 			}
 			return
@@ -699,7 +545,7 @@ func (p *Processor) routeMessage(ctx context.Context, msg jetstream.Msg, res ceR
 		})
 		_ = msg.Ack()
 	default:
-		if err := p.deps.Publisher.Publish(ctx, p.deps.TopicName+".retry", msg.Data()); err == nil {
+		if err := p.deps.Publisher.Publish(ctx, p.deps.Topics.Retry, msg.Data()); err == nil {
 			_ = msg.Ack()
 		}
 	}

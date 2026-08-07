@@ -32,6 +32,11 @@ type SPForwarder interface {
 // Publisher abstracts NATS publish for response/retry CEs.
 type Publisher interface {
 	Publish(ctx context.Context, subject string, data []byte) error
+	// PublishWithMsgID publishes with a JetStream Nats-Msg-Id header for
+	// server-side dedup, using the CE's own id. Used for response CEs so that
+	// a future publish-retry mechanism can safely re-publish without risking
+	// duplicate delivery to the control-plane (F34).
+	PublishWithMsgID(ctx context.Context, subject, msgID string, data []byte) error
 }
 
 // RetryTopicConsumer abstracts retry topic operations for cancel handling.
@@ -85,10 +90,13 @@ func IsRetryable(err error) bool {
 }
 
 // ResponseContext holds the common fields shared by all response CE payloads.
+// Field names use snake_case (AEP convention) to match the control-plane's
+// CE data structs. Only ResourceID is consumed by the control-plane today —
+// AgentName/TopicName are informational/diagnostic.
 type ResponseContext struct {
-	ResourceID string `json:"resourceId"`
-	AgentName  string `json:"agentName"`
-	TopicName  string `json:"topicName"`
+	ResourceID string `json:"resource_id"`
+	AgentName  string `json:"agent_name"`
+	TopicName  string `json:"topic_name"`
 }
 
 // CreationAckData is the CE payload for creation-acknowledged events.
@@ -106,7 +114,7 @@ type DeletionAckData struct {
 // RequestQueuedData is the CE payload for request-queued events.
 type RequestQueuedData struct {
 	ResponseContext
-	ServiceType string `json:"serviceType"`
+	ServiceType string `json:"service_type"`
 	Status      string `json:"status"`
 }
 
@@ -120,7 +128,7 @@ type ErrorData struct {
 // CancelAckData is the CE payload for cancel-acknowledged events.
 type CancelAckData struct {
 	ResponseContext
-	ServiceType string `json:"serviceType"`
+	ServiceType string `json:"service_type"`
 }
 
 // CancelRejectedData is the CE payload for cancel-rejected events.
@@ -131,17 +139,20 @@ type CancelRejectedData struct {
 
 // HealthEventData is the CE payload for health degraded/unavailable events (REQ-HMN-120, REQ-HMN-145).
 type HealthEventData struct {
-	AgentID          string `json:"agentId"`
-	AgentName        string `json:"agentName"`
-	TopicName        string `json:"topicName"`
-	ServiceType      string `json:"serviceType"`
+	AgentID          string `json:"agent_id"`
+	AgentName        string `json:"agent_name"`
+	TopicName        string `json:"topic_name"`
+	ServiceType      string `json:"service_type"`
 	Reason           string `json:"reason"`
-	AffectedProvider string `json:"affectedProvider"`
+	AffectedProvider string `json:"affected_provider"`
 }
 
+// inboundPayload mirrors the control-plane's CreatePayload/DeletePayload/CancelPayload
+// (snake_case, AEP convention). Go's encoding/json does not fold underscores,
+// so these tags must match the control-plane's wire format exactly.
 type inboundPayload struct {
-	ResourceID  string          `json:"resourceId"`
-	ServiceType string          `json:"serviceType"`
+	ResourceID  string          `json:"resource_id"`
+	ServiceType string          `json:"service_type"`
 	Spec        json.RawMessage `json:"spec,omitempty"`
 	EventID     string
 }

@@ -42,6 +42,11 @@ func (f *fakePublisher) Publish(_ context.Context, subject string, data []byte) 
 	return nil
 }
 
+func (f *fakePublisher) PublishWithMsgID(_ context.Context, subject, _ string, data []byte) error {
+	f.published = append(f.published, publishedMsg{subject: subject, data: data})
+	return nil
+}
+
 var _ = Describe("CEPublisher", func() {
 	var (
 		logger *slog.Logger

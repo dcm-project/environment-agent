@@ -40,9 +40,9 @@ func BuildCreateCEWithID(ceID, resourceID, serviceType string) []byte {
 	event.SetType(cloudevent.TypeRequestCreate)
 	event.SetTime(time.Now())
 	_ = event.SetData(cloudevents.ApplicationJSON, map[string]any{
-		"resourceId":  resourceID,
-		"serviceType": serviceType,
-		"spec":        map[string]any{"size": "small"},
+		"resource_id":  resourceID,
+		"service_type": serviceType,
+		"spec":         map[string]any{"size": "small"},
 	})
 	data, err := json.Marshal(event)
 	if err != nil {
@@ -59,8 +59,8 @@ func BuildDeleteCE(resourceID, serviceType string) []byte {
 	event.SetType(cloudevent.TypeRequestDelete)
 	event.SetTime(time.Now())
 	_ = event.SetData(cloudevents.ApplicationJSON, map[string]any{
-		"resourceId":  resourceID,
-		"serviceType": serviceType,
+		"resource_id":  resourceID,
+		"service_type": serviceType,
 	})
 	data, err := json.Marshal(event)
 	if err != nil {
@@ -77,8 +77,8 @@ func BuildCancelCE(resourceID, serviceType string) []byte {
 	event.SetType(cloudevent.TypeRequestCancel)
 	event.SetTime(time.Now())
 	_ = event.SetData(cloudevents.ApplicationJSON, map[string]any{
-		"resourceId":  resourceID,
-		"serviceType": serviceType,
+		"resource_id":  resourceID,
+		"service_type": serviceType,
 	})
 	data, err := json.Marshal(event)
 	if err != nil {
@@ -167,6 +167,11 @@ type NATSPublisher struct {
 
 func (p *NATSPublisher) Publish(ctx context.Context, subject string, data []byte) error {
 	_, err := p.JS.Publish(ctx, subject, data)
+	return err
+}
+
+func (p *NATSPublisher) PublishWithMsgID(ctx context.Context, subject, msgID string, data []byte) error {
+	_, err := p.JS.Publish(ctx, subject, data, jetstream.WithMsgID(msgID))
 	return err
 }
 

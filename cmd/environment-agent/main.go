@@ -106,7 +106,7 @@ func run(ctx context.Context) int {
 	providerSvc.RegisterEmbedded(cfg.Provider.EmbeddedSPs)
 
 	// Messaging client — must start before registrar (provides ConsumerLagProvider)
-	msgClient, topicMain, err := setupMessaging(cfg, logger)
+	msgClient, topics, err := setupMessaging(cfg, logger)
 	if err != nil {
 		logger.Error("invalid topic name", "error", err)
 		return 1
@@ -125,7 +125,8 @@ func run(ctx context.Context) int {
 		Config:        cfg.Routing,
 		Logger:        logger,
 		AgentName:     cfg.Agent.Name,
-		TopicName:     topicMain,
+		TopicName:     topics.Main,
+		RetryTopic:    topics.Retry,
 	})
 	msgClient.SetMainHandler(router.HandleRequest)
 	msgClient.SetCancelHandler(router.HandleCancel)
@@ -147,13 +148,12 @@ func run(ctx context.Context) int {
 		DenyList:            denyList,
 		ClaimedResourcesSet: router.ClaimedResourcesSet(),
 		Config: retry.ProcessorConfig{
-			MaxDeliver:     cfg.Messaging.MaxDeliver,
 			HandlerTimeout: cfg.Routing.HandlerTimeout,
 			NakDelay:       cfg.Routing.NakDelay,
 		},
 		Logger:    logger,
 		AgentName: cfg.Agent.Name,
-		TopicName: topicMain,
+		Topics:    topics,
 	})
 	router.SetRetryConsumer(retryProcessor)
 	defer retryProcessor.Stop()
@@ -166,7 +166,7 @@ func run(ctx context.Context) int {
 			AgentName:                 cfg.Agent.Name,
 			Environment:               cfg.Agent.Environment,
 			Cost:                      cfg.Agent.Cost,
-			TopicName:                 topicMain,
+			TopicName:                 topics.Main,
 			RegistrationURL:           cfg.DCM.RegistrationURL,
 			InitialBackoff:            cfg.DCM.InitialBackoff,
 			MaxBackoff:                cfg.DCM.MaxBackoff,
@@ -187,7 +187,7 @@ func run(ctx context.Context) int {
 	// monitor loop. Note: embedded initialCheck transitions (from RegisterEmbedded
 	// above) may fire before this wiring, but the one-time kick below compensates
 	// by forcing a state re-evaluation.
-	healthCEPub := health.NewCEPublisher(fileStore, msgClient, logger, cfg.Agent.Name, topicMain)
+	healthCEPub := health.NewCEPublisher(fileStore, msgClient, logger, cfg.Agent.Name, topics.Main)
 	healthMonitor.SetOnTransition(func(providerID string, from, to v1alpha1.ProviderStatus) {
 		if from == v1alpha1.Unavailable || to == v1alpha1.Unavailable {
 			registrar.NotifyServiceTypeChange()
@@ -232,14 +232,17 @@ func run(ctx context.Context) int {
 	return 0
 }
 
-func setupMessaging(cfg *config.Config, logger *slog.Logger) (*messaging.Client, string, error) {
+func setupMessaging(cfg *config.Config, logger *slog.Logger) (*messaging.Client, messaging.TopicNames, error) {
 	topics := messaging.DeriveTopicNames(cfg.Agent.Name, cfg.Messaging.TopicName)
-	if err := messaging.ValidateTopicName(topics.Main); err != nil {
-		return nil, "", fmt.Errorf("invalid topic name: %w", err)
+	if err := messaging.ValidateTopicName(topics.Base); err != nil {
+		return nil, messaging.TopicNames{}, fmt.Errorf("invalid topic name: %w", err)
 	}
+	// TopicName is the raw override (or empty), not the derived/prefixed Main
+	// subject — messaging.NewClient calls DeriveTopicNames itself, so passing
+	// the already-prefixed value here would double-prefix it.
 	client := messaging.NewClient(messaging.ClientConfig{
 		URL:            cfg.Messaging.URL,
-		TopicName:      topics.Main,
+		TopicName:      cfg.Messaging.TopicName,
 		AgentName:      cfg.Agent.Name,
 		AckWait:        cfg.Messaging.AckWait,
 		CancelAckWait:  cfg.Messaging.CancelAckWait,
@@ -247,5 +250,5 @@ func setupMessaging(cfg *config.Config, logger *slog.Logger) (*messaging.Client,
 		HandlerTimeout: cfg.Routing.HandlerTimeout,
 		NakDelay:       cfg.Routing.NakDelay,
 	}, logger)
-	return client, topics.Main, nil
+	return client, topics, nil
 }

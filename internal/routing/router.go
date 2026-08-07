@@ -42,6 +42,7 @@ type Router struct {
 	logger              *slog.Logger
 	agentName           string
 	topicName           string
+	retryTopic          string
 }
 
 // RouterDeps holds all dependencies for the Router.
@@ -56,7 +57,13 @@ type RouterDeps struct {
 	Config        config.RoutingConfig
 	Logger        *slog.Logger
 	AgentName     string
-	TopicName     string
+	// TopicName is the CP-facing subject advertised on registration, used
+	// only for CE correlation (ResponseContext.TopicName).
+	TopicName string
+	// RetryTopic is the agent-internal subject used to hold requests while
+	// an SP is unhealthy (distinct from TopicName since the CP/agent
+	// alignment migration prefixes TopicName with "dcm.agent.").
+	RetryTopic string
 }
 
 // NewRouter creates a Router with the given dependencies.
@@ -94,6 +101,7 @@ func NewRouter(deps RouterDeps) *Router {
 		logger:              deps.Logger,
 		agentName:           deps.AgentName,
 		topicName:           deps.TopicName,
+		retryTopic:          deps.RetryTopic,
 	}
 }
 
@@ -102,7 +110,7 @@ func (r *Router) responseCtx(resourceID string) ResponseContext {
 }
 
 func (r *Router) publishCE(ctx context.Context, ceType string, data any) {
-	if err := cloudevent.PublishCE(ctx, r.publisher.Publish, cloudevent.SubjectResponses, r.agentName, ceType, data); err != nil {
+	if err := cloudevent.PublishCE(ctx, r.publisher.PublishWithMsgID, cloudevent.SubjectResponses, r.agentName, ceType, data); err != nil {
 		r.logger.Warn("failed to publish CE", "type", ceType, "error", err)
 	}
 }
@@ -159,7 +167,7 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 		return nil
 	}
 	if status == v1alpha1.Unhealthy {
-		if err := r.publisher.Publish(ctx, r.topicName+".retry", msg); err != nil {
+		if err := r.publisher.Publish(ctx, r.retryTopic, msg); err != nil {
 			return err
 		}
 		r.publishCE(ctx, cloudevent.TypeRequestQueued, RequestQueuedData{
