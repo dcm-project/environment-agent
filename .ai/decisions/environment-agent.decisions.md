@@ -201,11 +201,9 @@ happen when real handlers are implemented.
 
 **Related requirements:** REQ-HTTP-020
 
-**Transition Gate (added 2026-07-21, ref: SF-T2-03):**
-When DD-150 is resolved (strict handler wiring), the following MUST be verified:
-- REQ-HLT-010 is covered through the production handler path (not just test stub)
-- REQ-HLT-060 is covered through the production handler path (strict handler sets Content-Type automatically)
-- IT-HLT-010 and IT-HLT-030 assertions against Content-Type validate production behavior, not test infrastructure
+**Resolved (2026-08-07):** Strict handler wired in production and in
+`internal/health/health_integration_test.go` (IT-HLT-010/020/030/040 now run
+through the real handler chain, not a stub). Gate satisfied.
 
 ### DD-160: Constructor lifecycle alignment to peer pattern
 

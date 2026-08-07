@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -18,7 +19,12 @@ import (
 	"github.com/dcm-project/environment-agent/internal/api/server"
 	"github.com/dcm-project/environment-agent/internal/apiserver"
 	"github.com/dcm-project/environment-agent/internal/config"
+	"github.com/dcm-project/environment-agent/internal/handler"
 	"github.com/dcm-project/environment-agent/internal/health"
+	"github.com/dcm-project/environment-agent/internal/httperror"
+	"github.com/dcm-project/environment-agent/internal/provider"
+	"github.com/dcm-project/environment-agent/internal/provider/service"
+	"github.com/dcm-project/environment-agent/internal/provider/store"
 )
 
 type mockMessagingStatus struct {
@@ -28,50 +34,6 @@ type mockMessagingStatus struct {
 func (m *mockMessagingStatus) IsConnected() bool {
 	return m.connected
 }
-
-type stubHandler struct {
-	getHealthFunc      func(w http.ResponseWriter, r *http.Request)
-	listProvidersFunc  func(w http.ResponseWriter, r *http.Request, params v1alpha1.ListProvidersParams)
-	createProviderFunc func(w http.ResponseWriter, r *http.Request, params v1alpha1.CreateProviderParams)
-	getProviderFunc    func(w http.ResponseWriter, r *http.Request, providerId string)
-}
-
-func (h *stubHandler) GetHealth(w http.ResponseWriter, r *http.Request) {
-	// TODO(DD-150): Remove stubHandler when strict handler is wired.
-	// REQ-HLT-010 and REQ-HLT-060 must be verified through production path.
-	w.Header().Set("Content-Type", "application/json")
-	if h.getHealthFunc != nil {
-		h.getHealthFunc(w, r)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-}
-
-func (h *stubHandler) ListProviders(w http.ResponseWriter, r *http.Request, params v1alpha1.ListProvidersParams) {
-	if h.listProvidersFunc != nil {
-		h.listProvidersFunc(w, r, params)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-}
-
-func (h *stubHandler) CreateProvider(w http.ResponseWriter, r *http.Request, params v1alpha1.CreateProviderParams) {
-	if h.createProviderFunc != nil {
-		h.createProviderFunc(w, r, params)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-}
-
-func (h *stubHandler) GetProvider(w http.ResponseWriter, r *http.Request, providerId string) {
-	if h.getProviderFunc != nil {
-		h.getProviderFunc(w, r, providerId)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-}
-
-var _ server.ServerInterface = (*stubHandler)(nil)
 
 func defaultConfig() *config.Config {
 	return &config.Config{
@@ -114,8 +76,20 @@ var _ = Describe("Health Service Integration", Label("integration"), func() {
 		svc = health.NewService(msgStatus)
 	})
 
-	startServer := func(handler server.ServerInterface) {
-		srv := apiserver.New(cfg, logger, handler)
+	startServer := func() {
+		fileStore, err := store.NewFileStore(filepath.Join(GinkgoT().TempDir(), "registrations.json"))
+		Expect(err).NotTo(HaveOccurred())
+		providerSvc := service.New(fileStore, provider.NewRegistry(), provider.NewInMemoryHealthTracker(), nil, logger)
+
+		strictHandler := handler.New(svc, providerSvc)
+		h := server.NewStrictHandlerWithOptions(strictHandler, nil, server.StrictHTTPServerOptions{
+			ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
+				httperror.WriteResponse(w, logger, http.StatusInternalServerError,
+					"INTERNAL", "Internal Server Error", err.Error(), &r.RequestURI)
+			},
+		})
+
+		srv := apiserver.New(cfg, logger, h)
 		runErrCh := make(chan error, 1)
 		go func() { runErrCh <- srv.Run(ctx, ln) }()
 
@@ -148,11 +122,7 @@ var _ = Describe("Health Service Integration", Label("integration"), func() {
 
 	Describe("Healthy State", func() {
 		It("returns 200 OK with application/json Content-Type (IT-HLT-010)", func() {
-			handler := &stubHandler{getHealthFunc: func(w http.ResponseWriter, _ *http.Request) {
-				result := svc.Status()
-				_ = json.NewEncoder(w).Encode(result)
-			}}
-			startServer(handler)
+			startServer()
 
 			client := httpClient()
 			resp, err := client.Get(fmt.Sprintf("http://%s/api/v1alpha1/health", ln.Addr().String()))
@@ -164,11 +134,7 @@ var _ = Describe("Health Service Integration", Label("integration"), func() {
 		})
 
 		It("returns healthy status and path in response body (IT-HLT-020)", func() {
-			handler := &stubHandler{getHealthFunc: func(w http.ResponseWriter, _ *http.Request) {
-				result := svc.Status()
-				_ = json.NewEncoder(w).Encode(result)
-			}}
-			startServer(handler)
+			startServer()
 
 			client := httpClient()
 			resp, err := client.Get(fmt.Sprintf("http://%s/api/v1alpha1/health", ln.Addr().String()))
@@ -188,11 +154,7 @@ var _ = Describe("Health Service Integration", Label("integration"), func() {
 		})
 
 		It("returns unhealthy status when messaging disconnected (IT-HLT-030)", func() {
-			handler := &stubHandler{getHealthFunc: func(w http.ResponseWriter, _ *http.Request) {
-				result := svc.Status()
-				_ = json.NewEncoder(w).Encode(result)
-			}}
-			startServer(handler)
+			startServer()
 
 			client := httpClient()
 			resp, err := client.Get(fmt.Sprintf("http://%s/api/v1alpha1/health", ln.Addr().String()))
@@ -215,11 +177,7 @@ var _ = Describe("Health Service Integration", Label("integration"), func() {
 		})
 
 		It("responds within 150ms p99 from in-memory state (IT-HLT-040)", func() {
-			handler := &stubHandler{getHealthFunc: func(w http.ResponseWriter, _ *http.Request) {
-				result := svc.Status()
-				_ = json.NewEncoder(w).Encode(result)
-			}}
-			startServer(handler)
+			startServer()
 
 			client := httpClient()
 			baseURL := fmt.Sprintf("http://%s/api/v1alpha1/health", ln.Addr().String())
