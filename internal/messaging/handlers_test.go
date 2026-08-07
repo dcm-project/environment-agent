@@ -11,6 +11,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/dcm-project/environment-agent/internal/cloudevent"
 )
 
 // captureHandler records slog records for assertion.
@@ -103,9 +105,9 @@ func TestExtractCEIdentity(t *testing.T) {
 	}{
 		{
 			name:     "valid CE with id and type",
-			input:    buildTestCE("evt-123", "dcm.request.create"),
+			input:    buildTestCE("evt-123", cloudevent.TypeRequestCreate),
 			wantID:   "evt-123",
-			wantType: "dcm.request.create",
+			wantType: cloudevent.TypeRequestCreate,
 		},
 		{
 			name:     "id present, type missing",
@@ -115,7 +117,7 @@ func TestExtractCEIdentity(t *testing.T) {
 		},
 		{
 			name:     "id missing",
-			input:    []byte(`{"type":"dcm.request.create"}`),
+			input:    []byte(`{"type":cloudevent.TypeRequestCreate}`),
 			wantID:   "unknown",
 			wantType: "unknown",
 		},
@@ -139,7 +141,7 @@ func TestExtractCEIdentity(t *testing.T) {
 		},
 		{
 			name:     "empty id string",
-			input:    []byte(`{"id":"","type":"dcm.request.delete"}`),
+			input:    []byte(`{"id":"","type":cloudevent.TypeRequestDelete}`),
 			wantID:   "unknown",
 			wantType: "unknown",
 		},
@@ -168,7 +170,7 @@ func TestHandleMainMessage_AckFailure(t *testing.T) {
 	}
 
 	msg := &fakeMsg{
-		data:    buildTestCE("evt-main-001", "dcm.request.create"),
+		data:    buildTestCE("evt-main-001", cloudevent.TypeRequestCreate),
 		subject: "agent-test.main",
 		ackErr:  errors.New("ack timeout"),
 		meta: &jetstream.MsgMetadata{
@@ -190,7 +192,7 @@ func TestHandleMainMessage_AckFailure(t *testing.T) {
 		t.Errorf("unexpected message: %s", rec.Message)
 	}
 	assertAttr(t, rec, "ce_id", "evt-main-001")
-	assertAttr(t, rec, "ce_type", "dcm.request.create")
+	assertAttr(t, rec, "ce_type", cloudevent.TypeRequestCreate)
 	assertAttr(t, rec, "subject", "agent-test.main")
 	assertAttrUint64(t, rec, "stream_seq", 42)
 	assertAttrUint64(t, rec, "consumer_seq", 7)
@@ -207,7 +209,7 @@ func TestHandleMainMessage_NakFailure(t *testing.T) {
 	}
 
 	msg := &fakeMsg{
-		data:    buildTestCE("evt-nak-001", "dcm.request.delete"),
+		data:    buildTestCE("evt-nak-001", cloudevent.TypeRequestDelete),
 		subject: "agent-test.main",
 		nakErr:  errors.New("nak failed"),
 		meta: &jetstream.MsgMetadata{
@@ -232,7 +234,7 @@ func TestHandleMainMessage_NakFailure(t *testing.T) {
 		t.Errorf("unexpected message: %s", rec.Message)
 	}
 	assertAttr(t, rec, "ce_id", "evt-nak-001")
-	assertAttr(t, rec, "ce_type", "dcm.request.delete")
+	assertAttr(t, rec, "ce_type", cloudevent.TypeRequestDelete)
 }
 
 func TestHandleCancelMessage_AckFailure(t *testing.T) {
@@ -245,7 +247,7 @@ func TestHandleCancelMessage_AckFailure(t *testing.T) {
 	}
 
 	msg := &fakeMsg{
-		data:    buildTestCE("evt-cancel-001", "dcm.request.cancel"),
+		data:    buildTestCE("evt-cancel-001", cloudevent.TypeRequestCancel),
 		subject: "agent-test.cancel",
 		ackErr:  errors.New("ack timeout"),
 		meta: &jetstream.MsgMetadata{
@@ -267,7 +269,7 @@ func TestHandleCancelMessage_AckFailure(t *testing.T) {
 		t.Errorf("unexpected message: %s", rec.Message)
 	}
 	assertAttr(t, rec, "ce_id", "evt-cancel-001")
-	assertAttr(t, rec, "ce_type", "dcm.request.cancel")
+	assertAttr(t, rec, "ce_type", cloudevent.TypeRequestCancel)
 	assertAttr(t, rec, "subject", "agent-test.cancel")
 }
 
@@ -281,7 +283,7 @@ func TestHandleCancelMessage_NakFailure(t *testing.T) {
 	}
 
 	msg := &fakeMsg{
-		data:    buildTestCE("evt-cancel-nak", "dcm.request.cancel"),
+		data:    buildTestCE("evt-cancel-nak", cloudevent.TypeRequestCancel),
 		subject: "agent-test.cancel",
 		nakErr:  errors.New("nak failed"),
 		meta: &jetstream.MsgMetadata{
@@ -306,7 +308,7 @@ func TestHandleCancelMessage_NakFailure(t *testing.T) {
 		t.Errorf("unexpected message: %s", rec.Message)
 	}
 	assertAttr(t, rec, "ce_id", "evt-cancel-nak")
-	assertAttr(t, rec, "ce_type", "dcm.request.cancel")
+	assertAttr(t, rec, "ce_type", cloudevent.TypeRequestCancel)
 	assertAttrUint64(t, rec, "stream_seq", 8)
 	assertAttrUint64(t, rec, "num_delivered", 3)
 }
@@ -321,7 +323,7 @@ func TestHandleMainMessage_MetadataUnavailable(t *testing.T) {
 	}
 
 	msg := &fakeMsg{
-		data:    buildTestCE("evt-no-meta", "dcm.request.create"),
+		data:    buildTestCE("evt-no-meta", cloudevent.TypeRequestCreate),
 		subject: "agent-test.main",
 		ackErr:  errors.New("ack timeout"),
 		metaErr: errors.New("no metadata"),

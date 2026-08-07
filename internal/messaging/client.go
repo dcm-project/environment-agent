@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,9 +24,6 @@ var (
 )
 
 const (
-	// SentinelConsumerLag is a clearly impossible value used by the stub.
-	SentinelConsumerLag = math.MinInt64
-
 	drainTimeout   = 5 * time.Second
 	drainBatchWait = 200 * time.Millisecond
 	drainBatchSize = 100
@@ -40,11 +36,14 @@ type MessageHandler func(ctx context.Context, msg []byte) error
 // TopicName, if set, must be a pre-validated topic name (via ValidateTopicName).
 // If empty, the agent name is used as the base for topic derivation.
 type ClientConfig struct {
-	URL           string
-	TopicName     string
-	AgentName     string
-	AckWait       time.Duration
-	CancelAckWait time.Duration
+	URL            string
+	TopicName      string
+	AgentName      string
+	AckWait        time.Duration
+	CancelAckWait  time.Duration
+	MaxDeliver     int
+	HandlerTimeout time.Duration
+	NakDelay       time.Duration
 }
 
 // Client manages NATS/JetStream connectivity and topic consumption.
@@ -66,7 +65,8 @@ type Client struct {
 	mainHandler   MessageHandler
 	cancelHandler MessageHandler
 
-	setupOnce sync.Once
+	setupMu   sync.Mutex
+	setupDone bool
 	stopOnce  sync.Once
 }
 
@@ -103,6 +103,7 @@ func (c *Client) Start(_ context.Context) error {
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			c.connected.Store(true)
 			c.logger.Info("NATS reconnected", "url", nc.ConnectedUrl())
+			go c.doSetup(setupCtx, nc)
 		}),
 	)
 	if err != nil {
@@ -125,58 +126,66 @@ func (c *Client) doSetup(ctx context.Context, conn *nats.Conn) {
 	if c.stopped.Load() {
 		return
 	}
-	c.setupOnce.Do(func() {
-		c.setupStreamsAndConsume(ctx, conn)
-	})
+	c.setupMu.Lock()
+	defer c.setupMu.Unlock()
+	if c.setupDone {
+		return
+	}
+	if c.setupStreamsAndConsume(ctx, conn) {
+		c.setupDone = true
+	}
 }
 
-func (c *Client) setupStreamsAndConsume(ctx context.Context, conn *nats.Conn) {
+func (c *Client) setupStreamsAndConsume(ctx context.Context, conn *nats.Conn) bool {
 	js, err := jetstream.New(conn)
 	if err != nil {
 		c.logger.Error("failed to create JetStream context", "error", err)
-		return
+		return false
 	}
-
-	c.mu.Lock()
-	c.conn = conn
-	c.js = js
-	c.mu.Unlock()
 
 	mainS, retryS, cancelS, err := c.initStreams(ctx, js)
 	if err != nil {
 		c.logger.Error("failed to initialize streams", "error", err)
-		return
+		return false
 	}
 
 	mainCons, cancelCons, err := c.initConsumers(ctx, mainS, retryS, cancelS)
 	if err != nil {
 		c.logger.Error("failed to initialize consumers", "error", err)
-		return
+		return false
 	}
 
 	c.drainCancelTopic(ctx, cancelCons)
 
-	cc, err := cancelCons.Consume(func(msg jetstream.Msg) {
+	cancelCC, err := cancelCons.Consume(func(msg jetstream.Msg) {
 		c.handleCancelMessage(msg)
 	})
 	if err != nil {
 		c.logger.Error("failed to start cancel consumer", "error", err)
-		return
+		return false
 	}
-	c.mu.Lock()
-	c.consumers = append(c.consumers, cc)
-	c.mu.Unlock()
 
-	cc, err = mainCons.Consume(func(msg jetstream.Msg) {
+	mainCC, err := mainCons.Consume(func(msg jetstream.Msg) {
 		c.handleMainMessage(msg)
 	})
 	if err != nil {
+		cancelCC.Stop()
 		c.logger.Error("failed to start main consumer", "error", err)
-		return
+		return false
 	}
+
 	c.mu.Lock()
-	c.consumers = append(c.consumers, cc)
+	if c.stopped.Load() {
+		c.mu.Unlock()
+		cancelCC.Stop()
+		mainCC.Stop()
+		return false
+	}
+	c.conn = conn
+	c.js = js
+	c.consumers = append(c.consumers, cancelCC, mainCC)
 	c.mu.Unlock()
+	return true
 }
 
 func (c *Client) initStreams(ctx context.Context, js jetstream.JetStream) (jetstream.Stream, jetstream.Stream, jetstream.Stream, error) {
@@ -203,21 +212,26 @@ func (c *Client) initStreams(ctx context.Context, js jetstream.JetStream) (jetst
 	}); err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create responses stream: %w", err)
 	}
+	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name: "dcm-health", Subjects: []string{cloudevent.SubjectHealth},
+	}); err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to create health stream: %w", err)
+	}
 	return mainS, retryS, cancelS, nil
 }
 
 func (c *Client) initConsumers(ctx context.Context, mainS, retryS, cancelS jetstream.Stream) (jetstream.Consumer, jetstream.Consumer, error) {
 	mainCons, err := mainS.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 		Durable: c.topics.Main + "-consumer", AckPolicy: jetstream.AckExplicitPolicy,
-		AckWait: c.cfg.AckWait,
+		AckWait: c.cfg.AckWait, MaxDeliver: c.cfg.MaxDeliver,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create main consumer: %w", err)
 	}
-	// ponytail: retry consumer created for Topic 9; not consumed yet
+	// Retry consumer: used by retry.Processor via JetStream Consumer binding
 	if _, err := retryS.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 		Durable: c.topics.Main + "-retry-consumer", AckPolicy: jetstream.AckExplicitPolicy,
-		AckWait: c.cfg.AckWait,
+		AckWait: c.cfg.AckWait, MaxDeliver: c.cfg.MaxDeliver,
 	}); err != nil {
 		return nil, nil, fmt.Errorf("failed to create retry consumer: %w", err)
 	}
@@ -294,6 +308,13 @@ func (c *Client) ConsumerLag() int64 {
 
 // TopicName returns the main topic name advertised to DCM.
 func (c *Client) TopicName() string { return c.topics.Main }
+
+// JS returns the JetStream context for direct stream access by the retry processor.
+func (c *Client) JS() jetstream.JetStream {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.js
+}
 
 // Publish publishes raw bytes to the given NATS subject via JetStream.
 func (c *Client) Publish(ctx context.Context, subject string, data []byte) error {

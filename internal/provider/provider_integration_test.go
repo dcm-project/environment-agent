@@ -382,6 +382,58 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 			Expect(found).To(BeTrue(), "db-provider for database must survive restart")
 		})
 
+		It("embedded SP preserves identity across restart (IT-SPR-085)", func() {
+			tmpDir := GinkgoT().TempDir()
+			GinkgoT().Setenv("AGENT_SP_PERSISTENCE_PATH", filepath.Join(tmpDir, "registrations.json"))
+			GinkgoT().Setenv("AGENT_EMBEDDED_SPS", "test-embedded")
+
+			baseURL1, stop1 := startRealServer()
+			DeferCleanup(stop1)
+
+			client := &http.Client{Timeout: 2 * time.Second}
+			resp, err := client.Get(baseURL1 + "/api/v1alpha1/providers")
+			Expect(err).NotTo(HaveOccurred())
+			var list1 v1alpha1.ProviderList
+			Expect(json.NewDecoder(resp.Body).Decode(&list1)).To(Succeed())
+			_ = resp.Body.Close()
+			Expect(list1.Results).NotTo(BeNil())
+
+			var origID string
+			var origCreateTime time.Time
+			for _, p := range *list1.Results {
+				if p.ServiceType == "test-embedded" {
+					origID = *p.Id
+					origCreateTime = *p.CreateTime
+					break
+				}
+			}
+			Expect(origID).NotTo(BeEmpty(), "embedded SP must be listed")
+
+			stop1()
+
+			baseURL2, stop2 := startRealServer()
+			DeferCleanup(stop2)
+
+			resp, err = client.Get(baseURL2 + "/api/v1alpha1/providers")
+			Expect(err).NotTo(HaveOccurred())
+			var list2 v1alpha1.ProviderList
+			Expect(json.NewDecoder(resp.Body).Decode(&list2)).To(Succeed())
+			_ = resp.Body.Close()
+			Expect(list2.Results).NotTo(BeNil())
+
+			var newID string
+			var newCreateTime time.Time
+			for _, p := range *list2.Results {
+				if p.ServiceType == "test-embedded" {
+					newID = *p.Id
+					newCreateTime = *p.CreateTime
+					break
+				}
+			}
+			Expect(newID).To(Equal(origID), "embedded SP ID must survive restart")
+			Expect(newCreateTime).To(Equal(origCreateTime), "embedded SP create_time must survive restart")
+		})
+
 		It("fails fast on corrupted persistence (IT-SPR-170)", func() {
 			tmpDir := GinkgoT().TempDir()
 			corruptFile := filepath.Join(tmpDir, "registrations.json")

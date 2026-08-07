@@ -245,6 +245,50 @@ var _ = Describe("toAPI health fallback", Label("unit"), func() {
 	})
 })
 
+var _ = Describe("resolveEmbeddedIdentity", Label("unit"), func() {
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+
+	It("generates new ID and uses now when existing is nil (UT-SPR-100)", func() {
+		id, ct := resolveEmbeddedIdentity(nil, now)
+		Expect(id).NotTo(BeEmpty())
+		Expect(ct).To(Equal(now))
+	})
+
+	It("generates new ID and uses now when existing is external (UT-SPR-101)", func() {
+		existing := &store.StoredProvider{
+			ID:         "ext-id-123",
+			Type:       string(v1alpha1.External),
+			CreateTime: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		}
+		id, ct := resolveEmbeddedIdentity(existing, now)
+		Expect(id).NotTo(Equal("ext-id-123"))
+		Expect(id).NotTo(BeEmpty())
+		Expect(ct).To(Equal(now))
+	})
+
+	It("preserves ID and create_time from existing embedded record (UT-SPR-102)", func() {
+		orig := time.Date(2025, 6, 15, 9, 30, 0, 0, time.UTC)
+		existing := &store.StoredProvider{
+			ID:         "emb-stable-id",
+			Type:       string(v1alpha1.Embedded),
+			CreateTime: orig,
+		}
+		id, ct := resolveEmbeddedIdentity(existing, now)
+		Expect(id).To(Equal("emb-stable-id"))
+		Expect(ct).To(Equal(orig))
+	})
+
+	It("generates new ID and uses now when embedded record has empty fields (UT-SPR-103)", func() {
+		existing := &store.StoredProvider{
+			ID:   "",
+			Type: string(v1alpha1.Embedded),
+		}
+		id, ct := resolveEmbeddedIdentity(existing, now)
+		Expect(id).NotTo(BeEmpty())
+		Expect(ct).To(Equal(now))
+	})
+})
+
 var _ = Describe("RegisterEmbedded stale removal", Label("unit"), func() {
 	It("releases the registry slot when removing a stale embedded provider", func() {
 		tmpDir := GinkgoT().TempDir()

@@ -25,6 +25,7 @@ import (
 	"github.com/dcm-project/environment-agent/internal/provider/service"
 	"github.com/dcm-project/environment-agent/internal/provider/store"
 	"github.com/dcm-project/environment-agent/internal/routing"
+	"github.com/dcm-project/environment-agent/internal/routing/retry"
 )
 
 // serviceTypeLister adapts ProviderService to dcm.ServiceTypeLister.
@@ -72,6 +73,10 @@ func run(ctx context.Context) int {
 		logger.Error("invalid configuration", "error", err)
 		return 1
 	}
+	if err := cfg.ValidateHandlerAckWaitInvariant(); err != nil {
+		logger.Error("invalid configuration", "error", err)
+		return 1
+	}
 
 	ln, err := net.Listen("tcp", cfg.Server.Address)
 	if err != nil {
@@ -108,14 +113,20 @@ func run(ctx context.Context) int {
 	}
 
 	// Wire routing before starting messaging so handlers are set
-	denyList := routing.NewDenyList(cfg.Routing.DenyListMaxSize)
-	router := routing.NewRouter(
-		registry, healthTracker, fileStore,
-		nil, // SPForwarder — wired when forwarder implemented
-		msgClient,
-		nil, // RetryTopicConsumer — wired in Topic 9
-		denyList, cfg.Routing, logger, cfg.Agent.Name, topicMain,
-	)
+	denyList := routing.NewResourceSet(cfg.Routing.DenyListMaxSize)
+	forwarder := routing.NewForwarder(routing.ForwarderConfig{Logger: logger})
+	router := routing.NewRouter(routing.RouterDeps{
+		Registry:      registry,
+		HealthTracker: healthTracker,
+		Store:         fileStore,
+		Forwarder:     forwarder,
+		Publisher:     msgClient,
+		DenyList:      denyList,
+		Config:        cfg.Routing,
+		Logger:        logger,
+		AgentName:     cfg.Agent.Name,
+		TopicName:     topicMain,
+	})
 	msgClient.SetMainHandler(router.HandleRequest)
 	msgClient.SetCancelHandler(router.HandleCancel)
 
@@ -124,6 +135,28 @@ func run(ctx context.Context) int {
 		return 1
 	}
 	defer msgClient.Stop()
+
+	// Retry processor — wired after messaging client starts (JS context ready)
+	retryProcessor := retry.NewProcessor(retry.ProcessorDeps{
+		Registry:            registry,
+		HealthTracker:       healthTracker,
+		Store:               fileStore,
+		Forwarder:           forwarder,
+		Publisher:           msgClient,
+		JSProvider:          msgClient.JS,
+		DenyList:            denyList,
+		ClaimedResourcesSet: router.ClaimedResourcesSet(),
+		Config: retry.ProcessorConfig{
+			MaxDeliver:     cfg.Messaging.MaxDeliver,
+			HandlerTimeout: cfg.Routing.HandlerTimeout,
+			NakDelay:       cfg.Routing.NakDelay,
+		},
+		Logger:    logger,
+		AgentName: cfg.Agent.Name,
+		TopicName: topicMain,
+	})
+	router.SetRetryConsumer(retryProcessor)
+	defer retryProcessor.Stop()
 
 	// DCM Registrar — created before monitor starts so callbacks can be wired
 	// before any health transitions fire. Deferred after monitor so LIFO shuts
@@ -154,12 +187,19 @@ func run(ctx context.Context) int {
 	// monitor loop. Note: embedded initialCheck transitions (from RegisterEmbedded
 	// above) may fire before this wiring, but the one-time kick below compensates
 	// by forcing a state re-evaluation.
-	healthMonitor.SetOnTransition(func(_ string, from, to v1alpha1.ProviderStatus) {
+	healthCEPub := health.NewCEPublisher(fileStore, msgClient, logger, cfg.Agent.Name, topicMain)
+	healthMonitor.SetOnTransition(func(providerID string, from, to v1alpha1.ProviderStatus) {
 		if from == v1alpha1.Unavailable || to == v1alpha1.Unavailable {
 			registrar.NotifyServiceTypeChange()
 		}
+		retryProcessor.RunTransition(ctx, providerID, from, to)
+		healthCEPub.OnTransition(ctx, providerID, from, to)
 	})
 	providerSvc.SetOnChange(registrar.NotifyServiceTypeChange)
+
+	if err := retryProcessor.ProcessOnRestart(ctx); err != nil {
+		logger.Error("failed to process retry on restart", "error", err)
+	}
 
 	healthMonitor.Start(ctx)
 	defer healthMonitor.Stop()
@@ -198,11 +238,14 @@ func setupMessaging(cfg *config.Config, logger *slog.Logger) (*messaging.Client,
 		return nil, "", fmt.Errorf("invalid topic name: %w", err)
 	}
 	client := messaging.NewClient(messaging.ClientConfig{
-		URL:           cfg.Messaging.URL,
-		TopicName:     topics.Main,
-		AgentName:     cfg.Agent.Name,
-		AckWait:       cfg.Messaging.AckWait,
-		CancelAckWait: cfg.Messaging.CancelAckWait,
+		URL:            cfg.Messaging.URL,
+		TopicName:      topics.Main,
+		AgentName:      cfg.Agent.Name,
+		AckWait:        cfg.Messaging.AckWait,
+		CancelAckWait:  cfg.Messaging.CancelAckWait,
+		MaxDeliver:     cfg.Messaging.MaxDeliver,
+		HandlerTimeout: cfg.Routing.HandlerTimeout,
+		NakDelay:       cfg.Routing.NakDelay,
 	}, logger)
 	return client, topics.Main, nil
 }

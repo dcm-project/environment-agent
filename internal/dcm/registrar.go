@@ -13,10 +13,7 @@ import (
 	"github.com/dcm-project/environment-agent/internal/backoff"
 )
 
-var (
-	ErrNonRetryable  = errors.New("non-retryable DCM error")
-	ErrNotRegistered = errors.New("agent not registered with DCM")
-)
+var ErrNonRetryable = errors.New("non-retryable DCM error")
 
 // ServiceTypeLister returns the set of currently advertisable service types
 // (backed by SPs in Ready or Unhealthy state — NOT Unavailable).

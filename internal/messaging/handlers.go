@@ -6,13 +6,14 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
-)
 
-const nakDelay = 500 * time.Millisecond
+	"github.com/dcm-project/environment-agent/internal/cloudevent"
+	"github.com/dcm-project/environment-agent/internal/routing"
+)
 
 func (c *Client) handleCancelMessage(msg jetstream.Msg) {
 	if err := c.cancelHandler(context.Background(), msg.Data()); err != nil {
-		if nakErr := msg.NakWithDelay(nakDelay); nakErr != nil {
+		if nakErr := msg.NakWithDelay(c.nakDelay()); nakErr != nil {
 			c.logMessageResolutionFailure("failed to nak cancel message", msg, nakErr)
 		}
 		return
@@ -23,14 +24,63 @@ func (c *Client) handleCancelMessage(msg jetstream.Msg) {
 }
 
 func (c *Client) handleMainMessage(msg jetstream.Msg) {
-	if err := c.mainHandler(context.Background(), msg.Data()); err != nil {
-		if nakErr := msg.NakWithDelay(nakDelay); nakErr != nil {
+	if c.cfg.MaxDeliver > 0 {
+		meta, err := msg.Metadata()
+		if err != nil {
+			c.logger.Warn("failed to get message metadata for MaxDeliver guard", "error", err)
+			_ = msg.Nak()
+			return
+		}
+		if meta.NumDelivered >= uint64(c.cfg.MaxDeliver) {
+			c.publishMaxDeliverError(msg)
+			_ = msg.Term()
+			return
+		}
+	}
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if c.cfg.HandlerTimeout > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), c.cfg.HandlerTimeout)
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
+	defer cancel()
+
+	if err := c.mainHandler(ctx, msg.Data()); err != nil {
+		if nakErr := msg.NakWithDelay(c.nakDelay()); nakErr != nil {
 			c.logMessageResolutionFailure("failed to nak main message", msg, nakErr)
 		}
 		return
 	}
 	if err := msg.Ack(); err != nil {
 		c.logMessageResolutionFailure("failed to ack main message, may be redelivered", msg, err)
+	}
+}
+
+func (c *Client) nakDelay() time.Duration {
+	if c.cfg.NakDelay > 0 {
+		return c.cfg.NakDelay
+	}
+	return routing.DefaultNakDelay
+}
+
+func (c *Client) publishMaxDeliverError(msg jetstream.Msg) {
+	resourceID, ceType := extractCEFields(msg.Data())
+	c.logger.Warn("max delivery exceeded, terminating message",
+		"resource_id", resourceID, "ce_type", ceType, "subject", msg.Subject())
+
+	errData := routing.ErrorData{
+		ResponseContext: routing.ResponseContext{
+			ResourceID: resourceID,
+			AgentName:  c.cfg.AgentName,
+			TopicName:  c.topics.Main,
+		},
+		Error:   routing.ErrorMaxDeliveryExceeded,
+		Details: "max delivery attempts exceeded",
+	}
+	if err := cloudevent.PublishCE(context.Background(), c.Publish, cloudevent.SubjectResponses, c.cfg.AgentName, cloudevent.TypeError, errData); err != nil {
+		c.logger.Warn("failed to publish max-deliver error CE", "error", err, "resource_id", resourceID)
 	}
 }
 
@@ -62,4 +112,21 @@ func extractCEIdentity(data []byte) (id, ceType string) {
 		envelope.Type = "unknown"
 	}
 	return envelope.ID, envelope.Type
+}
+
+func extractCEFields(data []byte) (resourceID, ceType string) {
+	var envelope struct {
+		Type string          `json:"type"`
+		Data json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(data, &envelope) != nil {
+		return "unknown", "unknown"
+	}
+	var payload struct {
+		ResourceID string `json:"resourceId"`
+	}
+	if json.Unmarshal(envelope.Data, &payload) != nil {
+		return "unknown", envelope.Type
+	}
+	return payload.ResourceID, envelope.Type
 }

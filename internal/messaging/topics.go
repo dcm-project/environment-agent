@@ -1,4 +1,3 @@
-// Package messaging provides NATS/JetStream messaging client and topic management.
 package messaging
 
 import (

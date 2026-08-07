@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 )
 
-// ErrNotImplemented is returned by stubs during RED phase.
-var ErrNotImplemented = errors.New("not implemented")
+// DefaultNakDelay is the fallback NakWithDelay duration when no explicit
+// NakDelay is configured. Used by both the messaging client and retry processor.
+const DefaultNakDelay = 500 * time.Millisecond
 
 // CE error string constants for deterministic test assertions.
 const (
@@ -18,12 +20,13 @@ const (
 	ErrorRetryExhausted         = "RETRY_EXHAUSTED"
 	ErrorNonRetryable           = "NON_RETRYABLE_SP_ERROR"
 	ErrorInvalidPayload         = "INVALID_PAYLOAD"
+	ErrorMaxDeliveryExceeded    = "MAX_DELIVERY_EXCEEDED"
 )
 
 // SPForwarder abstracts SP dispatch with typed operation contracts.
 type SPForwarder interface {
 	CreateResource(ctx context.Context, endpoint string, embedded bool, req CreateResourceRequest) error
-	DeleteResource(ctx context.Context, endpoint string, embedded bool, resourceID string) error
+	DeleteResource(ctx context.Context, endpoint string, embedded bool, req DeleteResourceRequest) error
 }
 
 // Publisher abstracts NATS publish for response/retry CEs.
@@ -50,6 +53,14 @@ type CreateResourceRequest struct {
 	ResourceID  string
 	ServiceType string
 	Spec        json.RawMessage
+	EventID     string // CE id, forwarded as Idempotency-Key (REQ-RCM-210)
+}
+
+// DeleteResourceRequest is the typed payload for deletion forwarding.
+type DeleteResourceRequest struct {
+	ResourceID  string
+	ServiceType string
+	EventID     string // CE id, forwarded as Idempotency-Key (REQ-RCM-210)
 }
 
 // SPResponseError represents an error response from a service provider.
@@ -73,58 +84,64 @@ func IsRetryable(err error) bool {
 	return spErr.StatusCode >= 500 || spErr.StatusCode == http.StatusTooManyRequests
 }
 
-// CreationAckData is the CE payload for creation-acknowledged events.
-type CreationAckData struct {
+// ResponseContext holds the common fields shared by all response CE payloads.
+type ResponseContext struct {
 	ResourceID string `json:"resourceId"`
 	AgentName  string `json:"agentName"`
 	TopicName  string `json:"topicName"`
-	Status     string `json:"status"`
+}
+
+// CreationAckData is the CE payload for creation-acknowledged events.
+type CreationAckData struct {
+	ResponseContext
+	Status string `json:"status"`
 }
 
 // DeletionAckData is the CE payload for deletion-acknowledged events.
 type DeletionAckData struct {
-	ResourceID string `json:"resourceId"`
-	AgentName  string `json:"agentName"`
-	TopicName  string `json:"topicName"`
-	Status     string `json:"status"`
+	ResponseContext
+	Status string `json:"status"`
 }
 
 // RequestQueuedData is the CE payload for request-queued events.
 type RequestQueuedData struct {
-	ResourceID  string `json:"resourceId"`
-	AgentName   string `json:"agentName"`
-	TopicName   string `json:"topicName"`
+	ResponseContext
 	ServiceType string `json:"serviceType"`
 	Status      string `json:"status"`
 }
 
 // ErrorData is the CE payload for error events.
 type ErrorData struct {
-	ResourceID string `json:"resourceId"`
-	AgentName  string `json:"agentName"`
-	TopicName  string `json:"topicName"`
-	Error      string `json:"error"`
-	Details    string `json:"details"`
+	ResponseContext
+	Error   string `json:"error"`
+	Details string `json:"details"`
 }
 
 // CancelAckData is the CE payload for cancel-acknowledged events.
 type CancelAckData struct {
-	ResourceID  string `json:"resourceId"`
-	AgentName   string `json:"agentName"`
-	TopicName   string `json:"topicName"`
+	ResponseContext
 	ServiceType string `json:"serviceType"`
 }
 
 // CancelRejectedData is the CE payload for cancel-rejected events.
 type CancelRejectedData struct {
-	ResourceID string `json:"resourceId"`
-	AgentName  string `json:"agentName"`
-	TopicName  string `json:"topicName"`
-	Reason     string `json:"reason"`
+	ResponseContext
+	Reason string `json:"reason"`
+}
+
+// HealthEventData is the CE payload for health degraded/unavailable events (REQ-HMN-120, REQ-HMN-145).
+type HealthEventData struct {
+	AgentID          string `json:"agentId"`
+	AgentName        string `json:"agentName"`
+	TopicName        string `json:"topicName"`
+	ServiceType      string `json:"serviceType"`
+	Reason           string `json:"reason"`
+	AffectedProvider string `json:"affectedProvider"`
 }
 
 type inboundPayload struct {
 	ResourceID  string          `json:"resourceId"`
 	ServiceType string          `json:"serviceType"`
 	Spec        json.RawMessage `json:"spec,omitempty"`
+	EventID     string
 }
