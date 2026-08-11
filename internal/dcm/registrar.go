@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -13,10 +14,17 @@ import (
 	"github.com/dcm-project/environment-agent/internal/backoff"
 )
 
-var (
-	ErrNonRetryable  = errors.New("non-retryable DCM error")
-	ErrNotRegistered = errors.New("agent not registered with DCM")
-)
+var ErrNonRetryable = errors.New("non-retryable DCM error")
+
+// registrarPanicRestartDelay bounds how long the supervisor pauses before
+// restarting run() after a recovered panic — long enough to avoid a tight
+// crash loop if the panic is deterministic (e.g. a consistently-panicking
+// dependency), short enough that a one-off panic doesn't meaningfully delay
+// recovery. Deliberately a fixed constant, not derived from
+// InitialBackoff/MaxBackoff: those tune the DCM HTTP registration retry
+// cadence (an expected, normal failure mode), whereas this only fires on the
+// "should never happen" path of a panicking dependency.
+const registrarPanicRestartDelay = 1 * time.Second
 
 // ServiceTypeLister returns the set of currently advertisable service types
 // (backed by SPs in Ready or Unhealthy state — NOT Unavailable).
@@ -93,11 +101,56 @@ func NewRegistrar(
 // Start begins the async registration + heartbeat loop. Non-blocking, idempotent.
 func (r *Registrar) Start(ctx context.Context) {
 	r.startOnce.Do(func() {
-		go func() {
-			defer close(r.done)
-			r.run(ctx)
-		}()
+		go r.runSupervised(ctx)
 	})
+}
+
+// runSupervised wraps run() in a panic-recovering supervisor loop. An
+// unrecovered panic from run() (e.g. a panicking ServiceTypeLister
+// dependency) must not crash the whole agent process — DCM registration is a
+// background concern and must not be able to take down request routing / the
+// HTTP server with it. Recovering the panic but still
+// letting the goroutine return would only solve half the problem: DCM
+// registration/heartbeating would then be silently, permanently stalled for
+// the rest of the process lifetime with no user-visible symptom besides "DCM
+// never sees this agent again". So on panic, run() is restarted (after
+// registrarPanicRestartDelay) instead of letting the goroutine exit —
+// re-entering run() re-runs the prerequisite wait and re-registers from
+// scratch, which is safe: registration is idempotent per REQ-DCM-080 even if
+// the agent was already registered before the panic.
+func (r *Registrar) runSupervised(ctx context.Context) {
+	defer close(r.done)
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if r.runRecovering(ctx) {
+			// run() returned normally — only happens on ctx cancellation
+			// (see run()'s own control flow), so the supervisor is done too.
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(registrarPanicRestartDelay):
+		}
+	}
+}
+
+// runRecovering calls run() with panic recovery. Returns true if run()
+// returned normally (no panic), false if a panic was recovered — the caller
+// decides whether/when to restart based on the return value.
+func (r *Registrar) runRecovering(ctx context.Context) (completedNormally bool) {
+	completedNormally = true
+	defer func() {
+		if rec := recover(); rec != nil {
+			completedNormally = false
+			r.logger.Error("panic in DCM registrar goroutine, restarting",
+				"panic", rec, "stack", string(debug.Stack()))
+		}
+	}()
+	r.run(ctx)
+	return completedNormally
 }
 
 // Done returns a channel closed when the registrar goroutine exits.

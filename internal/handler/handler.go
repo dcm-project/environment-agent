@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 	oapigen "github.com/dcm-project/environment-agent/internal/api/server"
@@ -44,10 +45,18 @@ func (h *Handler) CreateProvider(ctx context.Context, request oapigen.CreateProv
 		}
 		providerID = request.Params.Id
 	}
-	if err := provider.ValidateName(body.Name); err != nil {
+	// Trimmed once, at the HTTP trust boundary, then used consistently for
+	// both validation and the natural-key/slot values passed downstream —
+	// untrimmed values would let "provider1 " register as a distinct
+	// provider (or service-type slot) from "provider1", silently bypassing
+	// the idempotency/collision checks that assume an exact-string key.
+	name := strings.TrimSpace(body.Name)
+	serviceType := strings.TrimSpace(body.ServiceType)
+
+	if err := provider.ValidateName(name); err != nil {
 		return validationError("name", err, instance), nil
 	}
-	if err := provider.ValidateServiceType(body.ServiceType); err != nil {
+	if err := provider.ValidateServiceType(serviceType); err != nil {
 		return validationError("service_type", err, instance), nil
 	}
 	if err := provider.ValidateSchemaVersion(body.SchemaVersion); err != nil {
@@ -67,9 +76,9 @@ func (h *Handler) CreateProvider(ctx context.Context, request oapigen.CreateProv
 	}
 
 	result, isNew, err := h.provider.Register(ctx, service.RegistrationInput{
-		Name:          body.Name,
+		Name:          name,
 		Endpoint:      body.Endpoint,
-		ServiceType:   body.ServiceType,
+		ServiceType:   serviceType,
 		SchemaVersion: body.SchemaVersion,
 		DisplayName:   body.DisplayName,
 		ProviderID:    providerID,

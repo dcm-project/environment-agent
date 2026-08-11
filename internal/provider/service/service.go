@@ -301,7 +301,18 @@ func (s *ProviderService) removeStaleEmbedded(enabled map[string]bool) {
 	}
 	for _, p := range all {
 		if p.Type == string(v1alpha1.Embedded) && !enabled[p.ServiceType] {
-			s.registry.Release(p.ServiceType)
+			// Only release the registry slot if this stale embedded provider
+			// is still its holder. Startup order (LoadPersisted before
+			// RegisterEmbedded) makes it reachable for the store to contain
+			// both this stale embedded record and a legitimate external
+			// provider that has since claimed the same service type; an
+			// unconditional Release would free that external provider's slot
+			// out from under it. Embedded provider Name always equals its
+			// ServiceType (registerEmbeddedType), so the holder identity
+			// check is a direct name comparison.
+			if holder, ok := s.registry.Lookup(p.ServiceType); ok && holder == p.Name {
+				s.registry.Release(p.ServiceType)
+			}
 			s.cleanupEmbeddedRecord(p)
 		}
 	}
@@ -343,17 +354,7 @@ func (s *ProviderService) registerEmbeddedType(st string) {
 	}
 
 	now := time.Now().UTC()
-	id := provider.GenerateProviderID()
-	createTime := now
-	if existing != nil && existing.Type == string(v1alpha1.Embedded) {
-		if existing.ID != "" {
-			id = existing.ID
-		}
-		if !existing.CreateTime.IsZero() {
-			createTime = existing.CreateTime
-		}
-	}
-
+	id, createTime := resolveEmbeddedIdentity(existing, now)
 	sp := store.StoredProvider{
 		ID:            id,
 		Name:          st,
@@ -370,14 +371,31 @@ func (s *ProviderService) registerEmbeddedType(st string) {
 			s.registry.Release(st)
 			return
 		}
-		// existing != nil: previous record still in store, register health/monitor for it
 	}
 	checker := monitor.NewEmbeddedChecker(monitor.DefaultEmbeddedCheckFn(st))
 	if s.mon != nil {
 		s.mon.RegisterProvider(sp.ID, checker, v1alpha1.Ready, true)
 	} else {
-		s.health.SetState(sp.ID, v1alpha1.Ready, now)
+		s.health.SetState(sp.ID, v1alpha1.Ready, sp.UpdateTime)
 	}
+}
+
+// resolveEmbeddedIdentity returns the provider ID and creation time for an
+// embedded registration. Reuses values from an existing embedded record when
+// available to preserve identity across restarts.
+func resolveEmbeddedIdentity(existing *store.StoredProvider, now time.Time) (string, time.Time) {
+	if existing == nil || existing.Type != string(v1alpha1.Embedded) {
+		return provider.GenerateProviderID(), now
+	}
+	id := existing.ID
+	if id == "" {
+		id = provider.GenerateProviderID()
+	}
+	createTime := existing.CreateTime
+	if createTime.IsZero() {
+		createTime = now
+	}
+	return id, createTime
 }
 
 func (s *ProviderService) toAPI(sp *store.StoredProvider) *v1alpha1.Provider {

@@ -13,6 +13,8 @@ import (
 	. "github.com/onsi/gomega"
 
 	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
+	"github.com/dcm-project/environment-agent/internal/config"
+	"github.com/dcm-project/environment-agent/internal/health/monitor"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/store"
 )
@@ -55,7 +57,7 @@ var _ = Describe("ensureIDConsistency", Label("unit"), func() {
 
 func newTestService() *ProviderService {
 	path := filepath.Join(GinkgoT().TempDir(), "registrations.json")
-	fs, err := store.NewFileStore(path)
+	fs, err := store.NewFileStore(path, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	Expect(err).NotTo(HaveOccurred())
 	return &ProviderService{
 		store:    fs,
@@ -245,10 +247,54 @@ var _ = Describe("toAPI health fallback", Label("unit"), func() {
 	})
 })
 
+var _ = Describe("resolveEmbeddedIdentity", Label("unit"), func() {
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+
+	It("generates new ID and uses now when existing is nil (UT-SPR-100)", func() {
+		id, ct := resolveEmbeddedIdentity(nil, now)
+		Expect(id).NotTo(BeEmpty())
+		Expect(ct).To(Equal(now))
+	})
+
+	It("generates new ID and uses now when existing is external (UT-SPR-101)", func() {
+		existing := &store.StoredProvider{
+			ID:         "ext-id-123",
+			Type:       string(v1alpha1.External),
+			CreateTime: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		}
+		id, ct := resolveEmbeddedIdentity(existing, now)
+		Expect(id).NotTo(Equal("ext-id-123"))
+		Expect(id).NotTo(BeEmpty())
+		Expect(ct).To(Equal(now))
+	})
+
+	It("preserves ID and create_time from existing embedded record (UT-SPR-102)", func() {
+		orig := time.Date(2025, 6, 15, 9, 30, 0, 0, time.UTC)
+		existing := &store.StoredProvider{
+			ID:         "emb-stable-id",
+			Type:       string(v1alpha1.Embedded),
+			CreateTime: orig,
+		}
+		id, ct := resolveEmbeddedIdentity(existing, now)
+		Expect(id).To(Equal("emb-stable-id"))
+		Expect(ct).To(Equal(orig))
+	})
+
+	It("generates new ID and uses now when embedded record has empty fields (UT-SPR-103)", func() {
+		existing := &store.StoredProvider{
+			ID:   "",
+			Type: string(v1alpha1.Embedded),
+		}
+		id, ct := resolveEmbeddedIdentity(existing, now)
+		Expect(id).NotTo(BeEmpty())
+		Expect(ct).To(Equal(now))
+	})
+})
+
 var _ = Describe("RegisterEmbedded stale removal", Label("unit"), func() {
 	It("releases the registry slot when removing a stale embedded provider", func() {
 		tmpDir := GinkgoT().TempDir()
-		fileStore, err := store.NewFileStore(filepath.Join(tmpDir, "providers.json"))
+		fileStore, err := store.NewFileStore(filepath.Join(tmpDir, "providers.json"), slog.New(slog.NewTextHandler(io.Discard, nil)))
 		Expect(err).NotTo(HaveOccurred())
 
 		registry := provider.NewRegistry()
@@ -269,5 +315,132 @@ var _ = Describe("RegisterEmbedded stale removal", Label("unit"), func() {
 
 		_, occupied := registry.Lookup("old-service")
 		Expect(occupied).To(BeFalse(), "stale embedded slot should be released")
+	})
+})
+
+var _ = Describe("removeStaleEmbedded slot-ownership check", Label("unit"), func() {
+	// removeStaleEmbedded previously called registry.Release(p.ServiceType)
+	// unconditionally for any disabled embedded record found in the store,
+	// without checking whether the registry slot for that service type is
+	// still held by that same embedded provider. Startup order (LoadPersisted
+	// runs before RegisterEmbedded) makes it reachable for the store to
+	// contain both a stale embedded record AND a legitimate external
+	// provider record for the same service type — e.g. an operator disabled
+	// an embedded SP and registered a real external SP for that type without
+	// the stale embedded record ever being cleaned up. In that case,
+	// unconditionally releasing the slot corrupts the registry: the external
+	// provider's slot is freed even though the store still shows it as
+	// occupied, violating the single-slot-per-service-type invariant
+	// (REQ-SPR-200) and opening the door for a second registration to steal
+	// the type out from under the legitimate external provider.
+	It("does not release a service-type slot now legitimately held by a different (external) provider", func() {
+		svc := newTestService()
+		ctx := context.Background()
+
+		Expect(svc.store.Save(ctx, store.StoredProvider{
+			ID: "embedded-container-id", Name: "container", Endpoint: "embedded://container",
+			ServiceType: "container", SchemaVersion: "v1alpha1", Type: string(v1alpha1.Embedded),
+			CreateTime: time.Now(), UpdateTime: time.Now(),
+		})).To(Succeed())
+		Expect(svc.store.Save(ctx, store.StoredProvider{
+			ID: "ext-id", Name: "external-container-sp", Endpoint: "https://example.com",
+			ServiceType: "container", SchemaVersion: "v1alpha1", Type: string(v1alpha1.External),
+			CreateTime: time.Now(), UpdateTime: time.Now(),
+		})).To(Succeed())
+		// Simulates LoadPersisted having already claimed the slot for the
+		// external provider before RegisterEmbedded runs.
+		Expect(svc.registry.Claim("external-container-sp", "container")).To(Succeed())
+
+		// "container" is not in the enabled list, so removeStaleEmbedded
+		// treats the embedded record as stale.
+		svc.RegisterEmbedded(nil)
+
+		holder, occupied := svc.registry.Lookup("container")
+		Expect(occupied).To(BeTrue(), "the external provider's slot must remain claimed")
+		Expect(holder).To(Equal("external-container-sp"))
+
+		stored, err := svc.store.GetByName(ctx, "container")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stored).To(BeNil(), "the stale embedded record itself must still be deleted from the store")
+	})
+
+	It("releases the slot when it is still held by the stale embedded provider itself", func() {
+		svc := newTestService()
+		ctx := context.Background()
+
+		Expect(svc.store.Save(ctx, store.StoredProvider{
+			ID: "embedded-container-id", Name: "container", Endpoint: "embedded://container",
+			ServiceType: "container", SchemaVersion: "v1alpha1", Type: string(v1alpha1.Embedded),
+			CreateTime: time.Now(), UpdateTime: time.Now(),
+		})).To(Succeed())
+		Expect(svc.registry.Claim("container", "container")).To(Succeed())
+
+		svc.RegisterEmbedded(nil)
+
+		_, occupied := svc.registry.Lookup("container")
+		Expect(occupied).To(BeFalse(), "the slot must be freed for reuse once the sole (embedded) holder is removed")
+	})
+})
+
+var _ = Describe("RegisterEmbedded initialCheck transition ordering", Label("unit"), func() {
+	// RegisterEmbedded -> registerEmbeddedType calls mon.RegisterProvider with
+	// initialCheck=true, which runs the health check synchronously and — if
+	// it yields a different status than the initial one — invokes the
+	// monitor's onTransition callback in-line, before RegisterProvider even
+	// returns. If the caller wires SetOnTransition AFTER calling
+	// RegisterEmbedded (main.go's original ordering), that synchronous
+	// transition is silently dropped: no callback fires, so nothing
+	// downstream (retry-topic processing, health CloudEvent publication,
+	// DCM re-registration) reacts to it.
+	It("delivers the synchronous transition when SetOnTransition is wired before RegisterEmbedded (UT-SPR-100)", func() {
+		GinkgoT().Setenv("AGENT_EMBEDDED_SP_WIDGET_HEALTH", "unhealthy")
+
+		tmpDir := GinkgoT().TempDir()
+		fileStore, err := store.NewFileStore(filepath.Join(tmpDir, "providers.json"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		Expect(err).NotTo(HaveOccurred())
+		registry := provider.NewRegistry()
+		tracker := provider.NewInMemoryHealthTracker()
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		// FailureThreshold=1 so a single failing check crosses Ready->Unhealthy
+		// immediately, matching the synchronous nature of initialCheck.
+		mon := monitor.New(tracker, config.HealthConfig{FailureThreshold: 1, CheckTimeout: time.Second}, logger)
+		svc := New(fileStore, registry, tracker, mon, logger)
+
+		var captured []string
+		mon.SetOnTransition(func(_ string, from, to v1alpha1.ProviderStatus) {
+			captured = append(captured, string(from)+"->"+string(to))
+		})
+
+		svc.RegisterEmbedded([]string{"widget"})
+
+		Expect(captured).To(Equal([]string{"Ready->Unhealthy"}),
+			"the Ready->Unhealthy transition fired synchronously during RegisterEmbedded's "+
+				"initialCheck must reach the callback — this only holds when SetOnTransition is "+
+				"wired before RegisterEmbedded is called")
+	})
+
+	It("silently drops the transition when SetOnTransition is wired after RegisterEmbedded (UT-SPR-101, documents the bug main.go must avoid)", func() {
+		GinkgoT().Setenv("AGENT_EMBEDDED_SP_WIDGET_HEALTH", "unhealthy")
+
+		tmpDir := GinkgoT().TempDir()
+		fileStore, err := store.NewFileStore(filepath.Join(tmpDir, "providers.json"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		Expect(err).NotTo(HaveOccurred())
+		registry := provider.NewRegistry()
+		tracker := provider.NewInMemoryHealthTracker()
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		mon := monitor.New(tracker, config.HealthConfig{FailureThreshold: 1, CheckTimeout: time.Second}, logger)
+		svc := New(fileStore, registry, tracker, mon, logger)
+
+		svc.RegisterEmbedded([]string{"widget"})
+
+		var captured []string
+		mon.SetOnTransition(func(_ string, from, to v1alpha1.ProviderStatus) {
+			captured = append(captured, string(from)+"->"+string(to))
+		})
+
+		Expect(captured).To(BeEmpty(),
+			"documents the ordering hazard this fix avoids: wiring SetOnTransition after "+
+				"RegisterEmbedded means the callback did not exist yet when the transition fired, "+
+				"so it is lost forever — this is exactly what main.go's construction order must avoid")
 	})
 })

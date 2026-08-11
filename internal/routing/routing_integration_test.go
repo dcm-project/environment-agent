@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
-	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -17,215 +15,12 @@ import (
 
 	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 	"github.com/dcm-project/environment-agent/internal/config"
+	"github.com/dcm-project/environment-agent/internal/messaging"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/store"
 	"github.com/dcm-project/environment-agent/internal/routing"
+	"github.com/dcm-project/environment-agent/internal/routing/routingtest"
 )
-
-// fakeSPForwarder records calls to CreateResource/DeleteResource.
-type fakeSPForwarder struct {
-	mu          sync.Mutex
-	createCalls []createCall
-	deleteCalls []deleteCall
-	createErr   error
-	deleteErr   error
-}
-
-type createCall struct {
-	Endpoint string
-	Embedded bool
-	Req      routing.CreateResourceRequest
-}
-
-type deleteCall struct {
-	Endpoint   string
-	Embedded   bool
-	ResourceID string
-}
-
-func (f *fakeSPForwarder) CreateResource(_ context.Context, endpoint string, embedded bool, req routing.CreateResourceRequest) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.createCalls = append(f.createCalls, createCall{Endpoint: endpoint, Embedded: embedded, Req: req})
-	return f.createErr
-}
-
-func (f *fakeSPForwarder) DeleteResource(_ context.Context, endpoint string, embedded bool, resourceID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.deleteCalls = append(f.deleteCalls, deleteCall{Endpoint: endpoint, Embedded: embedded, ResourceID: resourceID})
-	return f.deleteErr
-}
-
-func (f *fakeSPForwarder) CreateCallCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.createCalls)
-}
-
-func (f *fakeSPForwarder) DeleteCallCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.deleteCalls)
-}
-
-// fakeRetryConsumer records retry topic operations.
-type fakeRetryConsumer struct {
-	mu           sync.Mutex
-	messages     []routing.RetryMessage
-	acked        []routing.RetryMessage
-	republished  [][]byte
-	fetchErr     error
-	ackErr       error
-	republishErr error
-}
-
-func (f *fakeRetryConsumer) FetchRetryMessages(_ context.Context) ([]routing.RetryMessage, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.messages, f.fetchErr
-}
-
-func (f *fakeRetryConsumer) AckRetryMessage(_ context.Context, msg routing.RetryMessage) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.acked = append(f.acked, msg)
-	return f.ackErr
-}
-
-func (f *fakeRetryConsumer) RepublishToRetry(_ context.Context, data []byte) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.republished = append(f.republished, data)
-	return f.republishErr
-}
-
-// natsPublisher wraps a NATS JetStream connection as a routing.Publisher.
-type natsPublisher struct {
-	js jetstream.JetStream
-}
-
-func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte) error {
-	_, err := p.js.Publish(ctx, subject, data)
-	return err
-}
-
-// fakeStore implements store.Store for test purposes.
-type fakeStore struct {
-	providers map[string]*store.StoredProvider
-}
-
-func newFakeStore() *fakeStore {
-	return &fakeStore{providers: make(map[string]*store.StoredProvider)}
-}
-
-func (s *fakeStore) Save(_ context.Context, p store.StoredProvider) error {
-	s.providers[p.Name] = &p
-	return nil
-}
-
-func (s *fakeStore) Delete(_ context.Context, name string) error {
-	delete(s.providers, name)
-	return nil
-}
-
-func (s *fakeStore) List(_ context.Context) ([]store.StoredProvider, error) {
-	result := make([]store.StoredProvider, 0, len(s.providers))
-	for _, p := range s.providers {
-		result = append(result, *p)
-	}
-	return result, nil
-}
-
-func (s *fakeStore) GetByID(_ context.Context, id string) (*store.StoredProvider, error) {
-	for _, p := range s.providers {
-		if p.ID == id {
-			return p, nil
-		}
-	}
-	return nil, fmt.Errorf("not found")
-}
-
-func (s *fakeStore) GetByName(_ context.Context, name string) (*store.StoredProvider, error) {
-	p, ok := s.providers[name]
-	if !ok {
-		return nil, fmt.Errorf("not found")
-	}
-	return p, nil
-}
-
-// buildCreateCE constructs a creation request CloudEvent.
-func buildCreateCE(resourceID, serviceType string) []byte {
-	event := cloudevents.NewEvent()
-	event.SetID(uuid.New().String())
-	event.SetSource("//dcm/control-plane")
-	event.SetType("dcm.request.create")
-	event.SetTime(time.Now())
-	_ = event.SetData(cloudevents.ApplicationJSON, map[string]any{
-		"resourceId":  resourceID,
-		"serviceType": serviceType,
-		"spec":        map[string]any{"size": "small"},
-	})
-	data, err := json.Marshal(event)
-	if err != nil {
-		panic(err)
-	}
-	return data
-}
-
-// buildDeleteCE constructs a deletion request CloudEvent.
-func buildDeleteCE(resourceID, serviceType string) []byte {
-	event := cloudevents.NewEvent()
-	event.SetID(uuid.New().String())
-	event.SetSource("//dcm/control-plane")
-	event.SetType("dcm.request.delete")
-	event.SetTime(time.Now())
-	_ = event.SetData(cloudevents.ApplicationJSON, map[string]any{
-		"resourceId":  resourceID,
-		"serviceType": serviceType,
-	})
-	data, err := json.Marshal(event)
-	if err != nil {
-		panic(err)
-	}
-	return data
-}
-
-// buildCancelCE constructs a cancel request CloudEvent.
-func buildCancelCE(resourceID, serviceType string) []byte {
-	event := cloudevents.NewEvent()
-	event.SetID(uuid.New().String())
-	event.SetSource("//dcm/control-plane")
-	event.SetType("dcm.request.cancel")
-	event.SetTime(time.Now())
-	_ = event.SetData(cloudevents.ApplicationJSON, map[string]any{
-		"resourceId":  resourceID,
-		"serviceType": serviceType,
-	})
-	data, err := json.Marshal(event)
-	if err != nil {
-		panic(err)
-	}
-	return data
-}
-
-const ceWaitTimeout = 5 * time.Second
-
-// expectResponseCE reads one CE from the response subscription and returns it.
-func expectResponseCE(sub *nats.Subscription) cloudevents.Event {
-	msg, err := sub.NextMsg(ceWaitTimeout)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "expected a response CE on dcm.agents.responses")
-	var event cloudevents.Event
-	ExpectWithOffset(1, json.Unmarshal(msg.Data, &event)).To(Succeed())
-	return event
-}
-
-// expectNoResponseCE asserts that no CE is received within the timeout.
-func expectNoResponseCE(sub *nats.Subscription, timeout time.Duration) {
-	msg, err := sub.NextMsg(timeout)
-	ExpectWithOffset(1, err).To(MatchError(nats.ErrTimeout), "expected no response CE but got one")
-	ExpectWithOffset(1, msg).To(BeNil())
-}
 
 var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 	var (
@@ -236,19 +31,26 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		responseSub   *nats.Subscription
 		registry      *provider.Registry
 		healthTracker *provider.InMemoryHealthTracker
-		fakeForwarder *fakeSPForwarder
-		fakeRetry     *fakeRetryConsumer
-		st            *fakeStore
-		publisher     *natsPublisher
-		denyList      *routing.DenyList
+		fakeForwarder *routingtest.FakeSPForwarder
+		fakeRetry     *routingtest.FakeRetryConsumer
+		st            *routingtest.FakeStore
+		publisher     *routingtest.NATSPublisher
+		denyList      *routing.ResourceSet
 		router        *routing.Router
 		topicName     string
+		topics        messaging.TopicNames
 		routingCfg    config.RoutingConfig
 	)
 
 	BeforeEach(func() {
 		var err error
 		topicName = fmt.Sprintf("agent-test-%s", uuid.New().String()[:8])
+		// Router.TopicName/RetryTopic below use topics.Main/topics.Retry (the
+		// dcm.agent.-prefixed subjects), matching how cmd/environment-agent/
+		// main.go wires the router in production — not the bare topicName —
+		// so a regression accidentally passing the unprefixed base would fail
+		// here too, not just in the messaging package's own tests.
+		topics = messaging.DeriveTopicNames(topicName, "")
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second) //nolint:fatcontext
 
 		testConn, err = nats.Connect(testNATSServer.ClientURL())
@@ -271,11 +73,11 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 
 		registry = provider.NewRegistry()
 		healthTracker = provider.NewInMemoryHealthTracker()
-		fakeForwarder = &fakeSPForwarder{}
-		fakeRetry = &fakeRetryConsumer{}
-		st = newFakeStore()
-		publisher = &natsPublisher{js: testJS}
-		denyList = routing.NewDenyList(100)
+		fakeForwarder = &routingtest.FakeSPForwarder{}
+		fakeRetry = &routingtest.FakeRetryConsumer{}
+		st = routingtest.NewFakeStore()
+		publisher = &routingtest.NATSPublisher{JS: testJS}
+		denyList = routing.NewResourceSet(100)
 
 		routingCfg = config.RoutingConfig{
 			RetryMaxAttempts: 3,
@@ -296,7 +98,20 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 	})
 
 	setupDefaultRouter := func() {
-		router = routing.NewRouter(registry, healthTracker, st, fakeForwarder, publisher, fakeRetry, denyList, routingCfg, slog.Default(), "agent-prod-1", topicName)
+		router = routing.NewRouter(routing.RouterDeps{
+			Registry:      registry,
+			HealthTracker: healthTracker,
+			Store:         st,
+			Forwarder:     fakeForwarder,
+			Publisher:     publisher,
+			RetryConsumer: fakeRetry,
+			DenyList:      denyList,
+			Config:        routingCfg,
+			Logger:        slog.Default(),
+			AgentName:     "agent-prod-1",
+			TopicName:     topics.Main,
+			RetryTopic:    topics.Retry,
+		})
 	}
 
 	registerProvider := func(name, serviceType, endpoint, providerType string, status v1alpha1.ProviderStatus) {
@@ -319,17 +134,17 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		registerProvider("embedded-sp", "container", "", "embedded", v1alpha1.Ready)
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-embed-001", "container"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-embed-001", "container"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(1))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.creation-acknowledged"))
 		var data routing.CreationAckData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-embed-001"))
 		Expect(data.AgentName).To(Equal("agent-prod-1"))
-		Expect(data.TopicName).To(Equal(topicName))
+		Expect(data.TopicName).To(Equal(topics.Main))
 		Expect(data.Status).To(Equal("PROVISIONING"))
 	})
 
@@ -337,17 +152,17 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		registerProvider("embedded-sp", "container", "", "embedded", v1alpha1.Ready)
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildDeleteCE("res-embed-del", "container"))
+		err := router.HandleRequest(ctx, routingtest.BuildDeleteCE("res-embed-del", "container"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.DeleteCallCount()).To(Equal(1))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.deletion-acknowledged"))
 		var data routing.DeletionAckData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-embed-del"))
 		Expect(data.AgentName).To(Equal("agent-prod-1"))
-		Expect(data.TopicName).To(Equal(topicName))
+		Expect(data.TopicName).To(Equal(topics.Main))
 		Expect(data.Status).To(Equal("DELETING"))
 	})
 
@@ -355,17 +170,17 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		registerProvider("external-sp", "database", "http://mock:8080", "external", v1alpha1.Ready)
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-ext-001", "database"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-ext-001", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(1))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.creation-acknowledged"))
 		var data routing.CreationAckData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-ext-001"))
 		Expect(data.AgentName).To(Equal("agent-prod-1"))
-		Expect(data.TopicName).To(Equal(topicName))
+		Expect(data.TopicName).To(Equal(topics.Main))
 		Expect(data.Status).To(Equal("PROVISIONING"))
 	})
 
@@ -373,28 +188,28 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		registerProvider("external-sp", "database", "http://mock:8080", "external", v1alpha1.Ready)
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildDeleteCE("res-123", "database"))
+		err := router.HandleRequest(ctx, routingtest.BuildDeleteCE("res-123", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.DeleteCallCount()).To(Equal(1))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.deletion-acknowledged"))
 		var data routing.DeletionAckData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-123"))
 		Expect(data.AgentName).To(Equal("agent-prod-1"))
-		Expect(data.TopicName).To(Equal(topicName))
+		Expect(data.TopicName).To(Equal(topics.Main))
 		Expect(data.Status).To(Equal("DELETING"))
 	})
 
 	It("rejects unsupported service type with error CE (IT-RTE-040)", func() {
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-no-sp", "storage"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-no-sp", "storage"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.error"))
 		var data routing.ErrorData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -407,11 +222,11 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		registerProvider("unavailable-sp", "database", "http://mock:8080", "external", v1alpha1.Unavailable)
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-unavail", "database"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-unavail", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.error"))
 		var data routing.ErrorData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -423,11 +238,11 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		registerProvider("unhealthy-sp", "database", "http://mock:8080", "external", v1alpha1.Unhealthy)
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-unhealthy", "database"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-unhealthy", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.request-queued"))
 		var data routing.RequestQueuedData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -441,11 +256,11 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		registerProvider("unhealthy-sp", "database", "http://mock:8080", "external", v1alpha1.Unhealthy)
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildDeleteCE("res-del-001", "database"))
+		err := router.HandleRequest(ctx, routingtest.BuildDeleteCE("res-del-001", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.DeleteCallCount()).To(Equal(0))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.request-queued"))
 		var data routing.RequestQueuedData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -456,17 +271,17 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 
 	It("exhausts retries with configurable policy (IT-RTE-070)", func() {
 		registerProvider("retry-sp", "database", "http://mock:8080", "external", v1alpha1.Ready)
-		fakeForwarder.createErr = &routing.SPResponseError{StatusCode: 503, Message: "Service Unavailable"}
+		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "Service Unavailable"}
 		routingCfg.RetryMaxAttempts = 5
 		routingCfg.RetryBackoff = time.Millisecond
 		routingCfg.RetryMaxBackoff = time.Millisecond
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-retry", "database"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-retry", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(5))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.error"))
 		var data routing.ErrorData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -476,17 +291,17 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 
 	It("applies retry policy with minimal budget (IT-RTE-080)", func() {
 		registerProvider("retry-sp", "database", "http://mock:8080", "external", v1alpha1.Ready)
-		fakeForwarder.createErr = &routing.SPResponseError{StatusCode: 503, Message: "Service Unavailable"}
+		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "Service Unavailable"}
 		routingCfg.RetryMaxAttempts = 1
 		routingCfg.RetryBackoff = time.Millisecond
 		routingCfg.RetryMaxBackoff = time.Millisecond
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-retry-min", "database"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-retry-min", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(1))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.error"))
 		var data routing.ErrorData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -496,14 +311,14 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 
 	It("fails immediately on non-retryable 4xx (IT-RTE-090)", func() {
 		registerProvider("bad-sp", "database", "http://mock:8080", "external", v1alpha1.Ready)
-		fakeForwarder.createErr = &routing.SPResponseError{StatusCode: 400, Message: "Bad Request"}
+		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 400, Message: "Bad Request"}
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-4xx", "database"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-4xx", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(1))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.error"))
 		var data routing.ErrorData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -516,11 +331,11 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		denyList.Add("res-456")
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-456", "container"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-456", "container"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
 
-		expectNoResponseCE(responseSub, 500*time.Millisecond)
+		routingtest.ExpectNoResponseCE(responseSub, 500*time.Millisecond)
 	})
 
 	It("deny list consume-on-use allows second request through (IT-RTE-105)", func() {
@@ -528,15 +343,15 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		denyList.Add("res-consume")
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-consume", "container"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-consume", "container"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
 
-		err = router.HandleRequest(ctx, buildCreateCE("res-consume", "container"))
+		err = router.HandleRequest(ctx, routingtest.BuildCreateCE("res-consume", "container"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(1))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.creation-acknowledged"))
 		var data routing.CreationAckData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -545,27 +360,40 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 	})
 
 	It("deny list LRU eviction allows evicted resource through (IT-RTE-110)", func() {
-		smallDenyList := routing.NewDenyList(3)
+		smallDenyList := routing.NewResourceSet(3)
 		smallDenyList.Add("res-oldest")
 		smallDenyList.Add("res-mid")
 		smallDenyList.Add("res-newest")
 		smallDenyList.Add("res-evicting") // evicts res-oldest
 
 		registerProvider("normal-sp", "container", "", "embedded", v1alpha1.Ready)
-		router = routing.NewRouter(registry, healthTracker, st, fakeForwarder, publisher, fakeRetry, smallDenyList, routingCfg, slog.Default(), "agent-prod-1", topicName)
+		router = routing.NewRouter(routing.RouterDeps{
+			Registry:      registry,
+			HealthTracker: healthTracker,
+			Store:         st,
+			Forwarder:     fakeForwarder,
+			Publisher:     publisher,
+			RetryConsumer: fakeRetry,
+			DenyList:      smallDenyList,
+			Config:        routingCfg,
+			Logger:        slog.Default(),
+			AgentName:     "agent-prod-1",
+			TopicName:     topics.Main,
+			RetryTopic:    topics.Retry,
+		})
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-oldest", "container"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-oldest", "container"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(1))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.creation-acknowledged"))
 		var data routing.CreationAckData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-oldest"))
 		Expect(data.Status).To(Equal("PROVISIONING"))
 
-		err = router.HandleRequest(ctx, buildCreateCE("res-newest", "container"))
+		err = router.HandleRequest(ctx, routingtest.BuildCreateCE("res-newest", "container"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(1)) // still denied, no new call
 	})
@@ -574,20 +402,20 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		registerProvider("unhealthy-sp", "database", "http://mock:8080", "external", v1alpha1.Unhealthy)
 
 		acked := false
-		fakeRetry.messages = []routing.RetryMessage{
-			{Data: buildCreateCE("res-789", "database"), ResourceID: "res-789", ServiceType: "database", AckFunc: func() error { acked = true; return nil }},
-			{Data: buildCreateCE("res-other", "database"), ResourceID: "res-other", ServiceType: "database", AckFunc: func() error { return nil }},
+		fakeRetry.Messages = []routing.RetryMessage{
+			{Data: routingtest.BuildCreateCE("res-789", "database"), ResourceID: "res-789", ServiceType: "database", AckFunc: func() error { acked = true; return nil }},
+			{Data: routingtest.BuildCreateCE("res-other", "database"), ResourceID: "res-other", ServiceType: "database", AckFunc: func() error { return nil }},
 		}
 		setupDefaultRouter()
 
-		err := router.HandleCancel(ctx, buildCancelCE("res-789", "database"))
+		err := router.HandleCancel(ctx, routingtest.BuildCancelCE("res-789", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(acked).To(BeTrue())
-		Expect(fakeRetry.republished).To(HaveLen(1))
+		Expect(fakeRetry.Republished).To(HaveLen(1))
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
 		Expect(denyList.Contains("res-789")).To(BeTrue())
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.cancel-acknowledged"))
 		var data routing.CancelAckData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -601,11 +429,11 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		denyList.Add("res-deny-del")
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildDeleteCE("res-deny-del", "container"))
+		err := router.HandleRequest(ctx, routingtest.BuildDeleteCE("res-deny-del", "container"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.DeleteCallCount()).To(Equal(1))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.deletion-acknowledged"))
 		var data routing.DeletionAckData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -618,12 +446,12 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 	It("cancel before any request adds to deny list and publishes cancel-ack CE (TC-7)", Label("integration"), func() {
 		setupDefaultRouter()
 
-		err := router.HandleCancel(ctx, buildCancelCE("res-never-seen", "container"))
+		err := router.HandleCancel(ctx, routingtest.BuildCancelCE("res-never-seen", "container"))
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(denyList.Contains("res-never-seen")).To(BeTrue())
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.cancel-acknowledged"))
 		var data routing.CancelAckData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -635,38 +463,38 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		registerProvider("normal-sp", "container", "", "embedded", v1alpha1.Ready)
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-101", "container"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-101", "container"))
 		Expect(err).NotTo(HaveOccurred())
 
 		// Drain the creation-ack CE from the first request
-		_ = expectResponseCE(responseSub)
+		_ = routingtest.ExpectResponseCE(responseSub)
 
-		err = router.HandleCancel(ctx, buildCancelCE("res-101", "container"))
+		err = router.HandleCancel(ctx, routingtest.BuildCancelCE("res-101", "container"))
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(denyList.Contains("res-101")).To(BeFalse())
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.cancel-rejected"))
 		var data routing.CancelRejectedData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-101"))
 		Expect(data.AgentName).To(Equal("agent-prod-1"))
-		Expect(data.Reason).To(Equal("resource already dispatched"))
+		Expect(data.Reason).To(Equal("resource already claimed"))
 	})
 
 	It("allows delete after successful create for same resourceId (IT-RTE-140)", func() {
 		registerProvider("lifecycle-sp", "container", "", "embedded", v1alpha1.Ready)
 		setupDefaultRouter()
 
-		Expect(router.HandleRequest(ctx, buildCreateCE("res-lifecycle", "container"))).To(Succeed())
+		Expect(router.HandleRequest(ctx, routingtest.BuildCreateCE("res-lifecycle", "container"))).To(Succeed())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(1))
-		_ = expectResponseCE(responseSub)
+		_ = routingtest.ExpectResponseCE(responseSub)
 
-		Expect(router.HandleRequest(ctx, buildDeleteCE("res-lifecycle", "container"))).To(Succeed())
+		Expect(router.HandleRequest(ctx, routingtest.BuildDeleteCE("res-lifecycle", "container"))).To(Succeed())
 		Expect(fakeForwarder.DeleteCallCount()).To(Equal(1))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.deletion-acknowledged"))
 		var data routing.DeletionAckData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -689,11 +517,11 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		healthTracker.SetState(fixedID, v1alpha1.Ready, time.Now())
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-id-check", "container"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-id-check", "container"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(1))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.creation-acknowledged"))
 		var data routing.CreationAckData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -714,11 +542,11 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		})).To(Succeed())
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-corrupt", "database"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-corrupt", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
 
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.error"))
 		var data routing.ErrorData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
@@ -731,31 +559,88 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		routingCfg.RetryMaxAttempts = 1
 		routingCfg.RetryBackoff = time.Millisecond
 		routingCfg.RetryMaxBackoff = time.Millisecond
-		fakeForwarder.createErr = &routing.SPResponseError{StatusCode: 503, Message: "Service Unavailable"}
+		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "Service Unavailable"}
 		setupDefaultRouter()
 
-		err := router.HandleRequest(ctx, buildCreateCE("res-retry-redeliver", "database"))
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-retry-redeliver", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(1))
 
 		// Drain the retry-exhausted error CE
-		ce := expectResponseCE(responseSub)
+		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.error"))
 
 		// Simulate redelivery: SP now healthy, same resource
-		fakeForwarder.mu.Lock()
-		fakeForwarder.createErr = nil
-		fakeForwarder.mu.Unlock()
+		fakeForwarder.SetCreateErr(nil)
 
-		err = router.HandleRequest(ctx, buildCreateCE("res-retry-redeliver", "database"))
+		err = router.HandleRequest(ctx, routingtest.BuildCreateCE("res-retry-redeliver", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(2))
 
-		ce = expectResponseCE(responseSub)
+		ce = routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.creation-acknowledged"))
 		var data routing.CreationAckData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-retry-redeliver"))
 		Expect(data.Status).To(Equal("PROVISIONING"))
+	})
+
+	It("cancel during startup window with no retry consumer publishes cancel-ack (IT-RTE-165)", func() {
+		registerProvider("startup-sp", "container", "", "embedded", v1alpha1.Ready)
+		router = routing.NewRouter(routing.RouterDeps{
+			Registry:      registry,
+			HealthTracker: healthTracker,
+			Store:         st,
+			Forwarder:     fakeForwarder,
+			Publisher:     publisher,
+			DenyList:      denyList,
+			Config:        routingCfg,
+			Logger:        slog.Default(),
+			AgentName:     "agent-prod-1",
+			TopicName:     topics.Main,
+			RetryTopic:    topics.Retry,
+		})
+
+		err := router.HandleCancel(ctx, routingtest.BuildCancelCE("res-startup-cancel", "container"))
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(denyList.Contains("res-startup-cancel")).To(BeTrue())
+
+		ce := routingtest.ExpectResponseCE(responseSub)
+		Expect(ce.Type()).To(Equal("dcm.agent.cancel-acknowledged"))
+		var data routing.CancelAckData
+		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
+		Expect(data.ResourceID).To(Equal("res-startup-cancel"))
+		Expect(data.ServiceType).To(Equal("container"))
+	})
+
+	It("context cancellation suppresses error CE after SP failure (IT-RTE-160)", func() {
+		registerProvider("cancel-sp", "database", "http://mock:8080", "external", v1alpha1.Ready)
+		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "Service Unavailable"}
+		routingCfg.RetryMaxAttempts = 1
+		setupDefaultRouter()
+
+		cancelCtx, cancelFn := context.WithCancel(ctx)
+		cancelFn()
+
+		err := router.HandleRequest(cancelCtx, routingtest.BuildCreateCE("res-ctx-cancel", "database"))
+		Expect(err).To(MatchError(context.Canceled))
+		routingtest.ExpectNoResponseCE(responseSub, 100*time.Millisecond)
+	})
+
+	It("context deadline during retry backoff aborts without error CE (IT-RTE-170)", func() {
+		registerProvider("deadline-sp", "database", "http://mock:8080", "external", v1alpha1.Ready)
+		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "Service Unavailable"}
+		routingCfg.RetryMaxAttempts = 3
+		routingCfg.RetryBackoff = 10 * time.Second
+		routingCfg.RetryMaxBackoff = 10 * time.Second
+		setupDefaultRouter()
+
+		shortCtx, shortCancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		defer shortCancel()
+
+		err := router.HandleRequest(shortCtx, routingtest.BuildCreateCE("res-ctx-deadline", "database"))
+		Expect(err).To(MatchError(context.DeadlineExceeded))
+		routingtest.ExpectNoResponseCE(responseSub, 100*time.Millisecond)
 	})
 })

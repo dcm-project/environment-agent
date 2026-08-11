@@ -2,6 +2,8 @@ package store_test
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -24,7 +26,7 @@ var _ = Describe("FileStore", Label("unit"), func() {
 		ctx = context.Background()
 		tmpDir = GinkgoT().TempDir()
 		var err error
-		fs, err = store.NewFileStore(filepath.Join(tmpDir, "providers.json"))
+		fs, err = store.NewFileStore(filepath.Join(tmpDir, "providers.json"), slog.New(slog.NewTextHandler(io.Discard, nil)))
 		Expect(err).NotTo(HaveOccurred())
 
 		validSP = store.StoredProvider{

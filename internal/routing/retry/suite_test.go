@@ -1,4 +1,4 @@
-package messaging_test
+package retry_test
 
 import (
 	"context"
@@ -13,7 +13,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/dcm-project/environment-agent/internal/cloudevent"
 	"github.com/dcm-project/environment-agent/internal/messaging"
 )
 
@@ -21,14 +20,14 @@ var testNATSServer *natsserver.Server
 
 var testStoreDir string
 
-func TestMessaging(t *testing.T) {
+func TestRetry(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Messaging Suite")
+	RunSpecs(t, "Retry Suite")
 }
 
 var _ = BeforeSuite(func() {
 	var err error
-	testStoreDir, err = os.MkdirTemp("", "nats-test-*")
+	testStoreDir, err = os.MkdirTemp("", "nats-retry-test-*")
 	Expect(err).NotTo(HaveOccurred())
 
 	opts := natstest.DefaultTestOptions
@@ -37,12 +36,11 @@ var _ = BeforeSuite(func() {
 	opts.StoreDir = testStoreDir
 	testNATSServer = natstest.RunServer(&opts)
 
-	// Simulate the control-plane-owned streams (F2 of the CP/agent alignment
-	// review): messaging.Client only creates durable consumers on
-	// dcm-agent-requests (never the stream itself), and publishes responses
-	// by subject with no stream of its own. Created once for the whole suite
-	// since each test derives unique per-test subjects under the
-	// dcm.agent.> wildcard.
+	// Simulate the control-plane-owned dcm-agent-requests stream (F2 of the
+	// CP/agent alignment review): the agent only creates durable consumers
+	// on it, never the stream itself. Created once for the whole suite since
+	// each test derives unique per-test subjects under the dcm.agent.>
+	// wildcard.
 	conn, err := nats.Connect(testNATSServer.ClientURL())
 	Expect(err).NotTo(HaveOccurred())
 	defer conn.Close()
@@ -52,10 +50,6 @@ var _ = BeforeSuite(func() {
 	defer setupCancel()
 	_, err = js.CreateOrUpdateStream(setupCtx, jetstream.StreamConfig{
 		Name: messaging.RequestStreamName, Subjects: []string{"dcm.agent.>"},
-	})
-	Expect(err).NotTo(HaveOccurred())
-	_, err = js.CreateOrUpdateStream(setupCtx, jetstream.StreamConfig{
-		Name: "dcm-agent-responses", Subjects: []string{cloudevent.SubjectResponses},
 	})
 	Expect(err).NotTo(HaveOccurred())
 })

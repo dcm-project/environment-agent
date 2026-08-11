@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -62,6 +63,23 @@ func (h *stubHandler) GetProvider(w http.ResponseWriter, r *http.Request, provid
 
 var _ server.ServerInterface = (*stubHandler)(nil)
 
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (sb *syncBuffer) Write(p []byte) (int, error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Write(p)
+}
+
+func (sb *syncBuffer) String() string {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.String()
+}
+
 func defaultConfig() *config.Config {
 	return &config.Config{
 		Server: config.ServerConfig{
@@ -79,7 +97,7 @@ func httpClient() *http.Client {
 var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 	var (
 		cfg    *config.Config
-		logBuf *bytes.Buffer
+		logBuf *syncBuffer
 		logger *slog.Logger
 		ln     net.Listener
 		srv    *apiserver.Server
@@ -89,7 +107,7 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 
 	BeforeEach(func() {
 		cfg = defaultConfig()
-		logBuf = &bytes.Buffer{}
+		logBuf = &syncBuffer{}
 		logger = slog.New(slog.NewJSONHandler(logBuf, nil))
 
 		var err error

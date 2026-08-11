@@ -7,12 +7,12 @@ import (
 	"github.com/dcm-project/environment-agent/internal/routing"
 )
 
-var _ = Describe("DenyList", Label("unit"), func() {
-	var dl *routing.DenyList
+var _ = Describe("ResourceSet", Label("unit"), func() {
+	var dl *routing.ResourceSet
 
 	Describe("Add and Contains", func() {
 		BeforeEach(func() {
-			dl = routing.NewDenyList(3)
+			dl = routing.NewResourceSet(3)
 		})
 
 		It("reports added entry as present and absent entry as not present (UT-RTE-010)", func() {
@@ -24,7 +24,7 @@ var _ = Describe("DenyList", Label("unit"), func() {
 
 	Describe("Consume-on-use", func() {
 		BeforeEach(func() {
-			dl = routing.NewDenyList(3)
+			dl = routing.NewResourceSet(3)
 			dl.Add("res-001")
 		})
 
@@ -36,7 +36,7 @@ var _ = Describe("DenyList", Label("unit"), func() {
 
 	Describe("LRU eviction at capacity", func() {
 		BeforeEach(func() {
-			dl = routing.NewDenyList(3)
+			dl = routing.NewResourceSet(3)
 			dl.Add("res-001")
 			dl.Add("res-002")
 			dl.Add("res-003")
@@ -53,7 +53,7 @@ var _ = Describe("DenyList", Label("unit"), func() {
 
 	Describe("Access refreshes LRU position", func() {
 		BeforeEach(func() {
-			dl = routing.NewDenyList(3)
+			dl = routing.NewResourceSet(3)
 			dl.Add("res-001")
 			dl.Add("res-002")
 			dl.Add("res-003")

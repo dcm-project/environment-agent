@@ -10,18 +10,27 @@ import (
 )
 
 var _ = Describe("DeriveTopicNames", Label("unit"), func() {
-	DescribeTable("derives main, retry, and cancel topic names",
-		func(agentName, override, expectMain, expectRetry, expectCancel string) {
+	DescribeTable("derives base, main, retry, and cancel topic names",
+		func(agentName, override, expectBase, expectMain, expectRetry, expectCancel string) {
 			result := messaging.DeriveTopicNames(agentName, override)
+			Expect(result.Base).To(Equal(expectBase))
 			Expect(result.Main).To(Equal(expectMain))
 			Expect(result.Retry).To(Equal(expectRetry))
 			Expect(result.Cancel).To(Equal(expectCancel))
 		},
 		Entry("from agent name when no override (UT-MSG-010)",
-			"agent-prod-1", "", "agent-prod-1", "agent-prod-1.retry", "agent-prod-1.cancel"),
+			"agent-prod-1", "", "agent-prod-1", "dcm.agent.agent-prod-1", "agent-prod-1.retry", "dcm.agent.agent-prod-1.cancel"),
 		Entry("explicit topic name overrides agent name (UT-MSG-020)",
-			"agent-prod-1", "custom-topic", "custom-topic", "custom-topic.retry", "custom-topic.cancel"),
+			"agent-prod-1", "custom-topic", "custom-topic", "dcm.agent.custom-topic", "custom-topic.retry", "dcm.agent.custom-topic.cancel"),
 	)
+
+	It("derives deterministic consumer/stream names from Base (UT-MSG-025)", func() {
+		result := messaging.DeriveTopicNames("agent-prod-1", "")
+		Expect(result.MainConsumer()).To(Equal("agent-prod-1-consumer"))
+		Expect(result.CancelConsumer()).To(Equal("agent-prod-1-cancel-consumer"))
+		Expect(result.RetryStream()).To(Equal("agent-prod-1-retry"))
+		Expect(result.RetryConsumer()).To(Equal("agent-prod-1-retry-consumer"))
+	})
 })
 
 var _ = Describe("ValidateTopicName", Label("unit"), func() {
@@ -46,5 +55,7 @@ var _ = Describe("ValidateTopicName", Label("unit"), func() {
 		Entry("rejects / (UT-MSG-039)", "test/a", "invalid"),
 		Entry("accepts underscore (UT-MSG-040)", "test_topic", ""),
 		Entry("accepts 255-char boundary (UT-MSG-041)", strings.Repeat("a", 255), ""),
+		Entry("rejects reserved dcm.agent. prefix (UT-MSG-042)", "dcm.agent.foo", "reserved"),
+		Entry("rejects exact reserved base dcm.agent with no trailing dot (UT-MSG-043)", "dcm.agent", "reserved"),
 	)
 })

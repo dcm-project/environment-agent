@@ -187,6 +187,70 @@ var _ = Describe("Topic 8 Messaging AckWait Config", Label("unit"), func() {
 	})
 })
 
+var _ = Describe("Messaging Reconnect Backoff Config", Label("unit"), func() {
+	Describe("Load", func() {
+		It("parses ReconnectInitialBackoff and ReconnectMaxBackoff from env", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_MESSAGING_RECONNECT_INITIAL_BACKOFF", "2s")
+			GinkgoT().Setenv("AGENT_MESSAGING_RECONNECT_MAX_BACKOFF", "1m")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Messaging.ReconnectInitialBackoff).To(Equal(2 * time.Second))
+			Expect(cfg.Messaging.ReconnectMaxBackoff).To(Equal(time.Minute))
+		})
+
+		It("defaults ReconnectInitialBackoff to 1s and ReconnectMaxBackoff to 30s", func() {
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Messaging.ReconnectInitialBackoff).To(Equal(1 * time.Second))
+			Expect(cfg.Messaging.ReconnectMaxBackoff).To(Equal(30 * time.Second))
+		})
+	})
+
+	Describe("Validate", func() {
+		It("rejects ReconnectInitialBackoff below 100ms", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_MESSAGING_RECONNECT_INITIAL_BACKOFF", "50ms")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AGENT_MESSAGING_RECONNECT_INITIAL_BACKOFF"))
+		})
+
+		It("rejects ReconnectInitialBackoff above ReconnectMaxBackoff", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_MESSAGING_RECONNECT_INITIAL_BACKOFF", "45s")
+			GinkgoT().Setenv("AGENT_MESSAGING_RECONNECT_MAX_BACKOFF", "30s")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AGENT_MESSAGING_RECONNECT_INITIAL_BACKOFF"))
+		})
+
+		It("rejects ReconnectMaxBackoff above 5m", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_MESSAGING_RECONNECT_MAX_BACKOFF", "6m")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AGENT_MESSAGING_RECONNECT_MAX_BACKOFF"))
+		})
+
+		It("accepts ReconnectInitialBackoff/MaxBackoff at boundaries", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_MESSAGING_RECONNECT_INITIAL_BACKOFF", "100ms")
+			GinkgoT().Setenv("AGENT_MESSAGING_RECONNECT_MAX_BACKOFF", "5m")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Validate()).To(Succeed())
+		})
+	})
+})
+
 var _ = Describe("Topic 6 Config", Label("unit"), func() {
 	Describe("Load", func() {
 		It("parses Topic 6 config fields from env (UT-XC-CFG-040)", func() {
@@ -393,6 +457,86 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 			Expect(err).NotTo(HaveOccurred())
 			err = cfg.Validate()
 			Expect(err).To(HaveOccurred())
+		})
+	})
+})
+
+// writeConfigFile writes a .env-style (KEY=VALUE per line) config file and
+// points AGENT_CONFIG_FILE at it. This is REQ-XC-CFG-010's MAY-level
+// file-based config support (previously entirely unimplemented).
+func writeConfigFile(contents string) {
+	path := GinkgoT().TempDir() + "/agent.env"
+	Expect(os.WriteFile(path, []byte(contents), 0o600)).To(Succeed())
+	GinkgoT().Setenv("AGENT_CONFIG_FILE", path)
+}
+
+var _ = Describe("File-Based Config", Label("unit"), func() {
+	Describe("Load", func() {
+		It("uses a value from the config file when the env var is not set (UT-XC-CFG-060, AC-XC-CFG-011)", func() {
+			setValidEnv()
+			writeConfigFile("AGENT_SERVER_ADDRESS=:9191\n")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Server.Address).To(Equal(":9191"))
+		})
+
+		It("prefers the environment variable over the config file (UT-XC-CFG-061, AC-XC-CFG-012)", func() {
+			setValidEnv()
+			writeConfigFile("AGENT_SERVER_ADDRESS=:9191\n")
+			GinkgoT().Setenv("AGENT_SERVER_ADDRESS", ":7070")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Server.Address).To(Equal(":7070"), "env var must win over the config file")
+		})
+
+		It("ignores blank lines and '#'-prefixed comments (UT-XC-CFG-062)", func() {
+			setValidEnv()
+			writeConfigFile("# this is a comment\n\nAGENT_SERVER_ADDRESS=:9292\n  \n# another comment\n")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Server.Address).To(Equal(":9292"))
+		})
+
+		It("does not mutate the process environment as a side effect (UT-XC-CFG-063)", func() {
+			setValidEnv()
+			writeConfigFile("AGENT_SERVER_ADDRESS=:9393\n")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Server.Address).To(Equal(":9393"))
+
+			_, isSet := os.LookupEnv("AGENT_SERVER_ADDRESS")
+			Expect(isSet).To(BeFalse(),
+				"Load must not os.Setenv file-sourced values into the real process environment "+
+					"(would leak across subsequent Load() calls / tests)")
+		})
+
+		It("is a no-op when AGENT_CONFIG_FILE is not set (UT-XC-CFG-064)", func() {
+			setValidEnv()
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Server.Address).To(Equal(":8080"))
+		})
+
+		It("returns an error when AGENT_CONFIG_FILE points at a nonexistent file (UT-XC-CFG-065)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_CONFIG_FILE", GinkgoT().TempDir()+"/does-not-exist.env")
+
+			_, err := config.Load()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AGENT_CONFIG_FILE"))
+		})
+
+		It("returns an error for a malformed line missing '=' (UT-XC-CFG-066)", func() {
+			setValidEnv()
+			writeConfigFile("THIS_LINE_HAS_NO_EQUALS_SIGN\n")
+
+			_, err := config.Load()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AGENT_CONFIG_FILE"))
 		})
 	})
 })
