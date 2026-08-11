@@ -299,7 +299,7 @@ var _ = Describe("Forwarder", Label("unit"), func() {
 		})
 	})
 
-	Describe("dispatch outcome logging (AC-RCM-250)", func() {
+	Describe("dispatch outcome logging (AC-RCM-150)", func() {
 		var (
 			ch  *captureLogHandler
 			fwd *routing.Forwarder

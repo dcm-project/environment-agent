@@ -24,10 +24,8 @@ const (
 	fetchMaxWait   = 200 * time.Millisecond
 	// storeErrorRetryDelay is the NakWithDelay backoff used whenever a
 	// retry-topic message can't be resolved yet (transient store error,
-	// forward failure, provider not found/not ready). Applied via
-	// NakWithDelay on the SAME JetStream message rather than a fresh
-	// ack+republish, since the message already lives on this stream and
-	// doesn't need to move.
+	// forward failure, provider not found/not ready). See RetryMessage.NakFunc
+	// (routing/types.go) for why this Naks in place instead of republishing.
 	storeErrorRetryDelay = 10 * time.Second
 )
 
@@ -50,6 +48,7 @@ type ProcessorDeps struct {
 	JSProvider          JSProvider
 	DenyList            *routing.ResourceSet
 	ClaimedResourcesSet *routing.ResourceSet // nil-safe; shared with Router for REQ-RTE-180
+	InFlightSet         *routing.ResourceSet // nil-safe; shared with Router, blocks concurrent double-dispatch (F13)
 	Config              ProcessorConfig
 	Logger              *slog.Logger
 	AgentName           string
@@ -376,7 +375,7 @@ func (p *Processor) parseMessages(msgs []jetstream.Msg) []parsedMessage {
 // Trade-off: Acking deduped messages removes them from the stream. If the ack
 // succeeds but the deletion-ack CE publish fails, the resource appears to the
 // control plane as still pending. This is an at-least-once trade-off; SPs are
-// required to be idempotent (REQ-SP-010).
+// required to be idempotent (REQ-RCM-210/220).
 func (p *Processor) dedupCreateDeletePairs(ctx context.Context, items []parsedMessage) []parsedMessage {
 	type dedupEntry struct {
 		creates []int
@@ -484,6 +483,18 @@ func (p *Processor) forwardRequest(ctx context.Context, sp *store.StoredProvider
 		return true
 	}
 
+	// Transient double-dispatch guard (F13): shared with Router so a
+	// main-topic forward and a retry-topic forward for the same resourceId
+	// can't race each other into calling the SP twice. Released
+	// unconditionally below, so it never blocks a later legitimate attempt.
+	if p.deps.InFlightSet != nil {
+		if !p.deps.InFlightSet.AddIfAbsent(res.resourceID) {
+			p.deps.Logger.Info("forward already in flight for resource, deferring", "resource_id", res.resourceID, "ce_id", res.eventID)
+			return false
+		}
+		defer p.deps.InFlightSet.Remove(res.resourceID)
+	}
+
 	var newlyAdded bool
 	if p.deps.ClaimedResourcesSet != nil {
 		newlyAdded = p.deps.ClaimedResourcesSet.AddIfAbsent(res.resourceID)
@@ -565,10 +576,9 @@ func (p *Processor) routeMessage(ctx context.Context, msg jetstream.Msg, res ceR
 }
 
 // requeueToRetryTopic re-queues a message that isn't ready to forward yet.
-// If msg already lives on the retry topic (fromRetryTopic), it's Nak'd in
-// place — no stream move needed. Otherwise it's still on the main topic and
-// must move across streams for the first time: publish a fresh copy to the
-// retry topic, then ack the original.
+// fromRetryTopic Naks in place (see RetryMessage.NakFunc); otherwise the
+// message is still on the main topic and must move streams for the first
+// time: publish a fresh copy to the retry topic, then ack the original.
 func (p *Processor) requeueToRetryTopic(ctx context.Context, msg jetstream.Msg, fromRetryTopic bool) {
 	if fromRetryTopic {
 		_ = msg.NakWithDelay(storeErrorRetryDelay)

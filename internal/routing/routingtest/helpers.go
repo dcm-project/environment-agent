@@ -151,6 +151,49 @@ func (f *FakeSPForwarder) SetCreateErr(err error) {
 	f.CreateErr = err
 }
 
+// GatedSPForwarder blocks CreateResource until Release is called, letting
+// tests observe/control a call while it's still "in flight" (F13: transient
+// double-dispatch guard tests).
+type GatedSPForwarder struct {
+	mu      sync.Mutex
+	calls   int
+	release chan struct{}
+	once    sync.Once
+}
+
+func (f *GatedSPForwarder) CreateResource(_ context.Context, _ string, _ bool, _ routing.CreateResourceRequest) error {
+	f.mu.Lock()
+	f.calls++
+	f.once.Do(func() { f.release = make(chan struct{}) })
+	release := f.release
+	f.mu.Unlock()
+	<-release
+	return nil
+}
+
+func (f *GatedSPForwarder) DeleteResource(_ context.Context, _ string, _ bool, _ routing.DeleteResourceRequest) error {
+	return nil
+}
+
+// Release unblocks any in-flight CreateResource call.
+func (f *GatedSPForwarder) Release() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.once.Do(func() { f.release = make(chan struct{}) })
+	select {
+	case <-f.release:
+	default:
+		close(f.release)
+	}
+}
+
+// CallCount returns the number of CreateResource invocations so far.
+func (f *GatedSPForwarder) CallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
 // GetCreateCalls returns a snapshot of recorded create calls.
 func (f *FakeSPForwarder) GetCreateCalls() []CreateCall {
 	f.mu.Lock()

@@ -147,6 +147,7 @@ func run(ctx context.Context) int {
 		JSProvider:          msgClient.JS,
 		DenyList:            denyList,
 		ClaimedResourcesSet: router.ClaimedResourcesSet(),
+		InFlightSet:         router.InFlightSet(),
 		Config: retry.ProcessorConfig{
 			HandlerTimeout: cfg.Routing.HandlerTimeout,
 		},

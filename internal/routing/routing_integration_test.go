@@ -287,7 +287,7 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(data.Error).To(Equal("RETRY_EXHAUSTED"))
 	})
 
-	It("does not leak the SP response body into SP-error logs (leak-check, mirrors forwarder_test.go AC-RCM-250)", func() {
+	It("does not leak the SP response body into SP-error logs (leak-check, mirrors forwarder_test.go AC-RCM-150)", func() {
 		registerProvider("leak-sp", "database", "http://mock:8080", "external", v1alpha1.Ready)
 		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "sensitive backend detail"}
 		routingCfg.RetryMaxAttempts = 2
@@ -530,7 +530,7 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(data.Reason).To(Equal("resource already claimed"))
 	})
 
-	It("allows delete after successful create for same resourceId (IT-RTE-140)", func() {
+	It("allows delete after successful create for same resourceId (IT-RTE-175)", func() {
 		registerProvider("lifecycle-sp", "container", "", "embedded", v1alpha1.Ready)
 		setupDefaultRouter()
 
@@ -547,6 +547,43 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-lifecycle"))
 		Expect(data.Status).To(Equal("DELETING"))
+	})
+
+	It("blocks a concurrent duplicate forward for the same resourceId in flight, without blocking the eventual legitimate one (IT-RTE-180)", func() {
+		registerProvider("gate-sp", "container", "", "embedded", v1alpha1.Ready)
+		gated := &routingtest.GatedSPForwarder{}
+		router = routing.NewRouter(routing.RouterDeps{
+			Registry: registry, HealthTracker: healthTracker, Store: st,
+			Forwarder: gated, Publisher: publisher, DenyList: denyList,
+			Config: routingCfg, Logger: slog.Default(), AgentName: "agent-prod-1",
+			TopicName: topics.Main, RetryTopic: topics.Retry,
+		})
+
+		firstErr := make(chan error, 1)
+		go func() {
+			firstErr <- router.HandleRequest(ctx, routingtest.BuildCreateCE("res-race", "container"))
+		}()
+
+		Eventually(gated.CallCount, time.Second).Should(Equal(1))
+
+		// Second forward for the SAME resourceId while the first is still
+		// in-flight — must be rejected, not double-dispatched to the SP.
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-race", "container"))
+		Expect(err).To(MatchError(routing.ErrForwardInFlight))
+		Expect(gated.CallCount()).To(Equal(1), "SP must not receive a concurrent second call for the same resourceId")
+
+		gated.Release()
+		Expect(<-firstErr).NotTo(HaveOccurred())
+
+		ce := routingtest.ExpectResponseCE(responseSub)
+		Expect(ce.Type()).To(Equal("dcm.agent.creation-acknowledged"))
+
+		// The lock must be released once the in-flight attempt finished, so a
+		// later (non-concurrent) redelivery for the same resourceId is not
+		// permanently blocked.
+		err = router.HandleRequest(ctx, routingtest.BuildDeleteCE("res-race", "container"))
+		Expect(err).NotTo(HaveOccurred())
+		_ = routingtest.ExpectResponseCE(responseSub)
 	})
 
 	It("resolves provider health by provider ID, not name (IT-RTE-135)", func() {

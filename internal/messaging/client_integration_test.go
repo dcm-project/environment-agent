@@ -371,6 +371,81 @@ var _ = Describe("Topic Advertising", Label("integration"), func() {
 	})
 })
 
+var _ = Describe("Consumer Lag Reporting", Label("integration"), func() {
+	var (
+		ctx       context.Context
+		cancel    context.CancelFunc
+		testConn  *nats.Conn
+		testJS    jetstream.JetStream
+		topicName string
+		topics    messaging.TopicNames
+		logger    *slog.Logger
+	)
+
+	BeforeEach(func() {
+		var err error
+		topicName = fmt.Sprintf("test-%s", uuid.New().String()[:8])
+		topics = messaging.DeriveTopicNames("test-agent", topicName)
+		logger = slog.Default()
+		ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second) //nolint:fatcontext // Ginkgo BeforeEach pattern
+
+		testConn, err = nats.Connect(testNATSServer.ClientURL())
+		Expect(err).NotTo(HaveOccurred())
+		testJS, err = jetstream.New(testConn)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	AfterEach(func() {
+		cancel()
+		deleteTestArtifacts(testJS, topics)
+		testConn.Close()
+	})
+
+	It("counts delivered-but-unacked messages as lag, not just undelivered ones (REQ-DCM-150)", func() {
+		client := messaging.NewClient(messaging.ClientConfig{
+			URL: testNATSServer.ClientURL(), TopicName: topicName, AgentName: "test-agent",
+		}, logger)
+		client.SetCancelHandler(func(context.Context, []byte) error { return nil })
+		block := make(chan struct{})
+		client.SetMainHandler(func(context.Context, []byte) error {
+			<-block
+			return nil
+		})
+		Expect(client.Start(ctx)).To(Succeed())
+		defer func() {
+			close(block)
+			client.Stop()
+		}()
+
+		const published = 5
+		for i := 0; i < published; i++ {
+			publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/control-plane",
+				map[string]string{"resource_id": fmt.Sprintf("res-lag-%d", i)})
+		}
+
+		// At least one message is delivered and stuck in the hanging handler
+		// (NumAckPending), the rest are still undelivered (NumPending). Assert
+		// the split directly (not just the total) so a NumPending-only
+		// implementation can't coincidentally pass by having all 5 undelivered
+		// at check time.
+		mainCons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() uint64 {
+			info, infoErr := mainCons.Info(ctx)
+			if infoErr != nil {
+				return 0
+			}
+			return uint64(info.NumAckPending)
+		}, 5*time.Second).Should(BeNumerically(">=", 1), "at least one message must be delivered-but-unacked")
+
+		// Both NumPending and NumAckPending count as "unacknowledged" per
+		// REQ-DCM-150 — the total must stay 5 regardless of the split, which a
+		// NumPending-only count would undercount.
+		Eventually(func() int64 { return client.ConsumerLag() }, 5*time.Second).Should(Equal(int64(published)))
+		Consistently(func() int64 { return client.ConsumerLag() }, 500*time.Millisecond).Should(Equal(int64(published)))
+	})
+})
+
 var _ = Describe("Message Consumption", Label("integration"), func() {
 	var (
 		ctx       context.Context

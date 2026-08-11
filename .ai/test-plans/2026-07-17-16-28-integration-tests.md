@@ -1654,7 +1654,7 @@ Unless overridden, tests use:
 - **When** cancel for `resourceId="res-789"` is consumed from the cancel topic
 - **Then** the agent MUST immediately consume the retry topic
 - **And** the message for `resourceId="res-789"` MUST be removed and acknowledged
-- **And** the message for `resourceId="res-other"` MUST be re-published to the retry topic
+- **And** the message for `resourceId="res-other"` MUST be Nak'd in place so it remains queued in the retry topic
 - **And** `dcm.agents.responses` MUST receive `dcm.agent.cancel-acknowledged` for `res-789`
 - **And** `resourceId="res-789"` MUST be added to the deny list
 - **And** SP MUST NOT receive any call (SP is still Unhealthy)
@@ -1673,9 +1673,104 @@ Unless overridden, tests use:
 
 ---
 
+### IT-RTE-135: Provider health resolved by ID, not name
+
+- **Validates AC:** AC-RTE-025
+- **Test Infrastructure:** Store record with `ID` distinct from `Name`; health tracker keyed by that `ID`
+- **Given** a registered provider whose store record has `ID="id-not-a-name-12345"` and a different `Name`
+- **And** the health tracker has state Ready for `"id-not-a-name-12345"`
+- **When** a creation request for the provider's service type is processed
+- **Then** the request MUST be routed as Ready (resolved by `ID`, not `Name`)
+
+---
+
+### IT-RTE-150: Empty provider ID treated as Unavailable
+
+- **Validates AC:** AC-RTE-026
+- **Test Infrastructure:** Store record with `ID=""` (simulated data corruption)
+- **Given** a registered provider whose store record has an empty `ID`
+- **When** a creation request for the provider's service type is processed
+- **Then** `dcm.agents.responses` MUST receive `dcm.agent.error` with `error: "SP_UNAVAILABLE"`
+- **And** the SP MUST NOT be called
+
+---
+
+### IT-RTE-145: Failure cleanup allows retry on redelivery
+
+- **Validates AC:** AC-RTE-201
+- **Test Infrastructure:** External SP; in-line retries exhausted, then simulated redelivery
+- **Given** a creation request for a `resourceId` exhausts its in-line retries and an error CE is published
+- **When** the same `resourceId` is forwarded again (simulating a JetStream redelivery) and the SP now succeeds
+- **Then** the second attempt MUST be forwarded to the SP
+- **And** `dcm.agents.responses` MUST receive `dcm.agent.creation-acknowledged` with `status="PROVISIONING"`
+
+---
+
+### IT-RTE-160: Context cancellation suppresses error CE after SP failure
+
+- **Validates AC:** AC-RTE-135
+- **Test Infrastructure:** External SP returning a retryable error; caller context cancelled before dispatch
+- **Given** the SP would return a retryable error
+- **And** the caller's context is already cancelled
+- **When** `HandleRequest` is invoked
+- **Then** it MUST return `context.Canceled`
+- **And** no `dcm.agent.error` CloudEvent MUST be published
+
+---
+
+### IT-RTE-165: Cancel during startup window with no retry consumer
+
+- **Validates AC:** AC-RTE-085
+- **Test Infrastructure:** Router constructed without a `RetryConsumer` wired (startup window)
+- **Given** the retry-topic consumer has not yet been wired into the router
+- **And** a cancel CloudEvent arrives for a `resourceId` never previously seen
+- **When** `HandleCancel` is invoked
+- **Then** the `resourceId` MUST be added to the deny list
+- **And** `dcm.agents.responses` MUST receive `dcm.agent.cancel-acknowledged`
+- **And** the agent MUST NOT error from the missing retry-topic consumer
+
+---
+
+### IT-RTE-170: Context deadline during retry backoff aborts without error CE
+
+- **Validates AC:** AC-RTE-135
+- **Test Infrastructure:** External SP returning a retryable error; short caller context deadline; long retry backoff
+- **Given** the SP repeatedly returns a retryable error and the retry backoff is long
+- **And** the caller's context has a short deadline
+- **When** the deadline elapses while the agent is waiting in backoff
+- **Then** `HandleRequest` MUST return `context.DeadlineExceeded`
+- **And** no `dcm.agent.error` CloudEvent MUST be published
+
+---
+
+### IT-RTE-175: Delete after successful create for same resourceId
+
+- **Validates AC:** AC-RTE-200
+- **Test Infrastructure:** Embedded SP; sequential create then delete for the same `resourceId`
+- **Given** a creation request for `resourceId="res-lifecycle"` was forwarded and acknowledged
+- **When** a deletion request for the same `resourceId` is subsequently processed
+- **Then** the deletion MUST be forwarded to the SP
+- **And** `dcm.agents.responses` MUST receive `dcm.agent.deletion-acknowledged` with `status="DELETING"`
+
+---
+
+### IT-RTE-180: Concurrent duplicate forward blocked, legitimate one not
+
+- **Validates AC:** AC-RTE-210
+- **Test Infrastructure:** Embedded SP with a `GatedSPForwarder` that blocks until released, to hold a forward in flight
+- **Given** a forward attempt for `resourceId="res-race"` is in flight (gated SP call not yet returned)
+- **When** a second, concurrent forward attempt for the same `resourceId` arrives
+- **Then** the second attempt MUST return `routing.ErrForwardInFlight`
+- **And** the SP MUST NOT receive a second concurrent call for that `resourceId`
+- **Given** the first attempt is then released and completes successfully
+- **When** a subsequent deletion request for the same `resourceId` arrives
+- **Then** it MUST NOT be blocked by the in-flight lock
+
+---
+
 ### IT-RTE-140: CloudEvent publish outcome logged
 
-- **Validates AC:** AC-RCM-240
+- **Validates AC:** AC-RCM-140
 - **Test Infrastructure:** NATS; `slog.Handler` capture in `router_test.go`
 - **Given** `Router.publishCE` is called and the publish succeeds
 - **When** the CE is published
@@ -1686,7 +1781,7 @@ Unless overridden, tests use:
 
 ### IT-RTE-141: SP dispatch outcome logged, no request/response body leaked
 
-- **Validates AC:** AC-RCM-250
+- **Validates AC:** AC-RCM-150
 - **Test Infrastructure:** `slog.Handler` capture in `forwarder_test.go`; mock external SP HTTP server; embedded SP stub
 - **Given** a create or delete dispatch to an SP completes, successfully or not, for both embedded and external providers
 - **When** `Forwarder.CreateResource`/`DeleteResource` returns
@@ -1696,14 +1791,14 @@ Unless overridden, tests use:
 
 ### IT-RTE-142: Deny-list drop and retry-topic purge summary logged
 
-- **Validates AC:** AC-RCM-260
+- **Validates AC:** AC-RCM-160
 - **Test Infrastructure:** Same setup as IT-RTE-100 and IT-RTE-120, extended with `slog.Handler` capture
 - **Given** a create request is dropped because its `resource_id` is on the deny list
 - **When** it is dropped
 - **Then** an INFO log MUST be emitted with `resource_id`
 - **Given** `purgeFromRetryTopic` runs during a cancel with other resources present in the retry topic
 - **When** it completes
-- **Then** an INFO log MUST be emitted with `resource_id`, `matched`, `republished`
+- **Then** an INFO log MUST be emitted with `resource_id`, `matched`, `requeued`
 
 ---
 
@@ -1740,7 +1835,7 @@ Unless overridden, tests use:
 - **Given** retry topic has create for "database" (SP Unhealthy) and "container" (SP Unavailable)
 - **When** retry processing triggers
 - **Then** "container" request MUST be rejected with error CE
-- **And** "database" request MUST be re-published to retry topic
+- **And** "database" request MUST remain queued in the retry topic
 - **And** no additional `dcm.agent.request-queued` CEs MUST be published for "database"
 
 ---
@@ -1804,6 +1899,115 @@ Unless overridden, tests use:
 - **When** the agent starts
 - **Then** both cancels MUST be consumed before creates are forwarded
 - **And** SP MUST NOT receive creates for `res-456` or `res-789`
+
+---
+
+### IT-RCM-080: Terminal error CE published when MaxDeliver exceeded
+
+- **Validates AC:** AC-RCM-070
+- **Test Infrastructure:** `messaging.Client` with `MaxDeliver=3`; main-topic handler that always errors
+- **Given** `AGENT_MESSAGING_MAX_DELIVER=3` and a creation request whose handler fails every attempt
+- **When** the message has been delivered 3 times without acknowledgment
+- **Then** `dcm.agents.responses` MUST receive `dcm.agent.error` with `error: "MAX_DELIVERY_EXCEEDED"`
+- **And** the handler MUST NOT be invoked more than 3 times
+- **And** the message MUST be terminated (no pending/ack-pending redelivery left)
+
+---
+
+### IT-RCM-090: Main consumer uses configured MaxDeliver; retry/cancel consumers have none
+
+- **Validates AC:** AC-RCM-080
+- **Test Infrastructure:** `messaging.Client` started against real JetStream; consumer info inspected directly
+- **Given** `AGENT_MESSAGING_MAX_DELIVER=7`
+- **When** the agent creates its durable consumers at startup
+- **Then** the main-subject consumer MUST be configured with `MaxDeliver=7`
+- **And** the retry-subject consumer MUST be configured with `MaxDeliver=-1` (unlimited, per DD-410)
+- **And** the cancel-subject consumer MUST be configured with `MaxDeliver=-1` (unlimited)
+
+---
+
+### IT-RCM-100: Hung SP call aborted after handler deadline elapses
+
+- **Validates AC:** AC-RCM-090
+- **Test Infrastructure:** `messaging.Client` with `HandlerTimeout`; SP forwarder that hangs until context cancellation
+- **Given** `AGENT_ROUTING_HANDLER_TIMEOUT=1s` and an SP that never responds
+- **When** 1s elapses without a response
+- **Then** the in-flight SP call's context MUST be cancelled
+- **And** the message MUST NOT be acknowledged (remains pending/ack-pending for redelivery)
+
+---
+
+### IT-RCM-110: Handler deadline is applied to SP call context
+
+- **Validates AC:** AC-RCM-100
+- **Test Infrastructure:** `messaging.Client` with `HandlerTimeout`; SP forwarder capturing the context deadline it received
+- **Given** `AGENT_ROUTING_HANDLER_TIMEOUT=2.5s`
+- **When** the agent begins processing a message consumed from the main topic
+- **Then** the context passed to the SP call MUST carry a deadline ~2.5s from invocation
+
+---
+
+### IT-RCM-115: Handler deadline enforced on transition-path (retry-topic) forwarding
+
+- **Validates AC:** AC-RCM-090
+- **Test Infrastructure:** `retry.Processor` with `HandlerTimeout`; SP forwarder that hangs until context cancellation; `ProcessOnTransition`
+- **Given** a retry-topic message and an SP forwarder that never responds
+- **When** the SP transitions to Ready and `ProcessOnTransition` forwards the queued message
+- **Then** the SP call's context MUST be cancelled once the handler deadline elapses
+
+---
+
+### IT-RCM-120: Idempotency-Key (CE id) forwarded to external SP
+
+- **Validates AC:** AC-RCM-110
+- **Test Infrastructure:** `messaging.Client` + `Router`; `FakeSPForwarder` recording received requests
+- **Given** an inbound `dcm.request.create` CloudEvent with `id="ce-idem-1"`
+- **When** the agent forwards the request to the external SP
+- **Then** the SP call MUST receive `"ce-idem-1"` as the request's `EventID`
+
+---
+
+### IT-RCM-130: Idempotency-Key stable across in-line retry attempts
+
+- **Validates AC:** AC-RCM-120
+- **Test Infrastructure:** `messaging.Client` + `Router`; SP forwarder failing the first 2 attempts
+- **Given** an inbound CloudEvent with `id="ce-idem-2"` that triggers 2 retryable SP errors before succeeding
+- **When** the agent retries the forward in-line
+- **Then** all 3 SP calls MUST carry `EventID="ce-idem-2"`
+
+---
+
+### IT-RCM-140: Idempotency-Key stable across retry-topic reprocessing
+
+- **Validates AC:** AC-RCM-120
+- **Test Infrastructure:** `retry.Processor`; message published directly to the retry topic; `ProcessOnTransition`
+- **Given** an inbound CloudEvent with `id="ce-idem-3"` queued in the retry topic
+- **When** the SP transitions to Ready and the retry processor forwards it
+- **Then** the SP call MUST carry `EventID="ce-idem-3"`
+
+---
+
+### IT-RCM-150: Idempotency-Key available to embedded SPs via request
+
+- **Validates AC:** AC-RCM-130
+- **Test Infrastructure:** `messaging.Client` + `Router`; embedded SP fake registered via `routingtest.RegisterEmbeddedSP`
+- **Given** an embedded SP registered and Ready for service type "container"
+- **And** an inbound CloudEvent with `id="ce-idem-4"` requesting creation of a "container" resource
+- **When** the agent forwards the request via in-process call
+- **Then** the embedded SP call MUST receive `"ce-idem-4"` as the CE id
+
+---
+
+### IT-RCM-160: Cross-path in-flight guard blocks retry-topic double-dispatch
+
+- **Validates AC:** AC-RTE-210
+- **Test Infrastructure:** `Router` and `retry.Processor` sharing one `InFlightSet` (as wired in `main.go`); `GatedSPForwarder`; same `resourceId` present on both main and retry topics
+- **Given** a forward for `resourceId="res-cross-race"` is in flight via the router (gated SP call not yet returned)
+- **And** the same `resourceId`'s message also lives on the retry topic
+- **When** the SP transitions to Ready and the retry processor concurrently attempts to forward the same `resourceId`
+- **Then** the SP MUST NOT receive a second concurrent call for that `resourceId`
+- **And** the retry-topic message MUST be Nak'd (deferred), not lost or double-dispatched
+- **And** once the router's in-flight attempt completes, the retry-topic message remains eligible for a later successful forward
 
 ---
 
@@ -2095,6 +2299,13 @@ Unless overridden, tests use:
 | AC-RTE-075 | IT-RTE-110 |
 | AC-RTE-080 | IT-RTE-120 |
 | AC-RTE-090 | IT-RTE-130 |
+| AC-RTE-025 | IT-RTE-135 |
+| AC-RTE-026 | IT-RTE-150 |
+| AC-RTE-201 | IT-RTE-145 |
+| AC-RTE-135 | IT-RTE-160, IT-RTE-170 |
+| AC-RTE-085 | IT-RTE-165 |
+| AC-RTE-200 | IT-RTE-175 |
+| AC-RTE-210 | IT-RTE-180, IT-RCM-160 |
 | AC-RCM-010 | IT-RCM-010 |
 | AC-RCM-020 | IT-RCM-020, IT-RCM-045 |
 | AC-RCM-030 | IT-RCM-030, IT-RCM-045 |
@@ -2103,6 +2314,16 @@ Unless overridden, tests use:
 | AC-RCM-047 | IT-MSG-131 exercises `SetOnSetupReady` end to end against a real NATS/JetStream server, wired the same way `main.go` wires it (drain-equivalent work then `StartConsuming`, both synchronously inside the callback) — see `internal/messaging/client_integration_test.go`. See also UT-MSG-080, UT-MSG-090, and UT-MSG-095 (`finishSetup` must not report success when `beginConsuming` fails after the callback runs) in `.ai/test-plans/unit-tests.md`. `main.go`'s own composition-root wiring of `SetOnSetupReady` specifically (as opposed to `messaging.Client`'s side of the contract) is still not exercised by an end-to-end test — a genuine "NATS unreachable at Start()" integration scenario would require controlling the test NATS server's startup ordering relative to the agent process, which the current test harness (shared `testNATSServer` started before any client) doesn't support |
 | AC-RCM-050 | IT-RCM-060 |
 | AC-RCM-060 | IT-RCM-070 |
+| AC-RCM-070 | IT-RCM-080 |
+| AC-RCM-080 | IT-RCM-090 |
+| AC-RCM-090 | IT-RCM-100, IT-RCM-115 |
+| AC-RCM-100 | IT-RCM-110 |
+| AC-RCM-110 | IT-RCM-120 |
+| AC-RCM-120 | IT-RCM-130, IT-RCM-140 |
+| AC-RCM-130 | IT-RCM-150 |
+| AC-RCM-140 | IT-RTE-140 |
+| AC-RCM-150 | IT-RTE-141 |
+| AC-RCM-160 | IT-RTE-142 |
 | AC-XC-ERR-010 | IT-XC-ERR-010 |
 | AC-XC-ERR-020 | IT-XC-ERR-020 |
 | AC-XC-ERR-030 | IT-XC-ERR-030 |

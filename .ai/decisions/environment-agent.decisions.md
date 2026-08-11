@@ -247,7 +247,12 @@ after `store.GetByName()` returns a `StoredProvider`, its `.ID` field matches
 the key used by the health subsystem (guaranteed by the single-writer
 registration path in `provider.Service`).
 
-**Related requirements:** REQ-HMN-050, REQ-RTE-030
+**Related requirements:** REQ-HMN-050, REQ-RTE-030, REQ-RTE-025, REQ-RTE-026
+
+**Amendment (Topic 9 hardening):** `ResolveProvider` treats a store record with
+an empty `.ID` (registry/store data corruption — should be unreachable given
+the single-writer registration path) as Unavailable rather than querying
+health state with an empty key or routing to it. See REQ-RTE-026.
 
 ### DD-190: SP-side idempotency for JetStream redelivery protection
 
@@ -255,8 +260,8 @@ registration path in `provider.Service`).
 JetStream redeliveries. Protection against duplicate side effects is the
 service provider's responsibility (idempotent create/delete operations).
 
-**Rationale:** The `dispatchedSet` is a cancel-rejection ledger that persists
-across the resource lifecycle (create → delete). It cannot double as a
+**Rationale:** The `claimedResourcesSet` is a cancel-rejection ledger that
+persists across the resource lifecycle (create → delete). It cannot double as a
 message-level dedup mechanism without distinguishing operation type. A naive
 `AddIfAbsent` short-circuit would block legitimate delete-after-create
 operations. Proper message dedup would require CE event ID tracking or a
@@ -264,7 +269,7 @@ TTL-based idempotency key store, which is deferred to Topic 9 (retry/lifecycle
 redesign). The ack-error logging in messaging handlers provides operational
 visibility into redelivery occurrences.
 
-**Related requirements:** REQ-RTE-180, REQ-MSG-116
+**Related requirements:** REQ-RTE-180, REQ-RTE-200, REQ-RTE-210, REQ-MSG-116
 
 **Amendment (Topic 8 hardening):** The agent sets explicit JetStream `AckWait`
 (default 120s for main, 10s for cancel) to prevent spurious redelivery during
@@ -273,6 +278,23 @@ in-line SP retries. This is a static stopgap; Topic 9 will introduce
 context deadlines, and CE event ID forwarding as `Idempotency-Key` to enable
 proper SP-side event-level dedup. SP idempotency for create/delete by resourceId
 is a MUST requirement (not merely an assumption).
+
+**Amendment (Topic 9, F13 — concurrent double-dispatch):** The above rationale
+covers *sequential* redeliveries (message-level dedup, deliberately not
+implemented). It does not cover two *concurrent* forward attempts for the same
+`resource_id` racing each other into the SP simultaneously — e.g. a JetStream
+redelivery firing while the first attempt is still in flight, or the main-topic
+and retry-topic consumers processing the same resource at once. Unlike
+sequential redelivery, concurrent racing serves no purpose (the redelivery
+would resolve on its own once the first attempt acks) and is cheap to prevent
+without the trade-offs a permanent dedup ledger would introduce. The agent adds
+a transient in-flight lock (`Router.inFlight` / shared `InFlightSet`), keyed by
+`resource_id`, held only for the duration of a single forward attempt and
+released unconditionally when it completes. This is intentionally a separate
+structure from `claimedResourcesSet`: that ledger lives for the
+whole create→delete lifecycle and must keep allowing delete-after-create
+(REQ-RTE-200); the in-flight lock lives only for one forward call and blocks
+nothing but true concurrency (REQ-RTE-210).
 
 ### DD-200: CloudEvent source uses agentName (v1alpha1)
 
@@ -366,7 +388,7 @@ could duplicate delivery to the control-plane's response consumer.
 
 **Rationale:** A full requirements-coverage audit confirmed this is not a wiring bug but a genuinely unbuilt feature — the interface and `EMBEDDED_SPS` config exist as scaffolding for a future capability. The agent is fully functional today via external SPs, which is the only registration path actually exercised in practice. Building real embedded-SP operational logic (e.g. an in-process container/cluster/kubevirt handler) is a substantial feature, not a bug fix, and is out of scope for this hardening pass.
 
-**Related requirements:** REQ-RTE-030, REQ-SPR-040, REQ-SPR-050
+**Related requirements:** REQ-RTE-030, REQ-SPR-040, REQ-SPR-050, REQ-RCM-230
 
 ### DD-260: DCM resource capacity reporting deferred (v1alpha1)
 

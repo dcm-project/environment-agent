@@ -1510,6 +1510,13 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 | REQ-RTE-010 | The agent MUST validate that the requested service type in a creation/deletion CloudEvent is supported by a registered SP | MUST | |
 | REQ-RTE-020 | If the service type is not supported, the agent MUST publish an error CloudEvent (`dcm.agent.error`) to `dcm.agents.responses` | MUST | |
 
+#### Requirements — Provider Resolution
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-RTE-025 | When resolving the SP for a service type, the agent MUST determine health/readiness state by the provider's ID, not its name | MUST | See DD-180 |
+| REQ-RTE-026 | If the resolved provider record has an empty ID (store/registry data corruption), the agent MUST treat it as Unavailable and log the anomaly, instead of querying health state with an empty key or routing to it | MUST | |
+
 #### Requirements — Request Routing (SP Ready)
 
 | ID | Requirement | Priority | Notes |
@@ -1543,6 +1550,7 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 | REQ-RTE-120 | When retries are exhausted, the agent MUST publish an error CloudEvent with the resource ID | MUST | |
 | REQ-RTE-130 | The retry policy (max attempts via `routing.retryMaxAttempts`, backoff using formula: min(`routing.retryBackoff` × 2^attempt, `routing.retryMaxBackoff`) with full jitter) MUST be configurable | MUST | |
 | REQ-RTE-131 | The retry policy in REQ-RTE-110/130 applies to immediate in-line retries for transient SP errors. This is distinct from the retry topic mechanism (Topic 9), which holds requests when an SP's health state is Unhealthy. If all immediate retries are exhausted, the agent MUST publish an error CloudEvent (REQ-RTE-120); the request MUST NOT fall back to the retry topic | MUST | |
+| REQ-RTE-135 | If the inbound message-handler context is cancelled or its deadline is exceeded while forwarding to the SP or during retry backoff, the agent MUST abort the forward attempt and MUST NOT publish an error CloudEvent | MUST | The caller (e.g. the handler-deadline enforcement of REQ-RCM-190, or consumer shutdown) owns the outcome once it stops waiting; publishing here would be a spurious response to an already-abandoned request |
 
 #### Requirements — Deny List (Cancel Filtering)
 
@@ -1551,9 +1559,17 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 | REQ-RTE-140 | The agent MUST maintain an in-memory deny list of `resource_id` values from consumed cancel CloudEvents | MUST | |
 | REQ-RTE-150 | When processing creation requests from the main topic, the agent MUST check each `resource_id` against the deny list | MUST | |
 | REQ-RTE-160 | If a `resource_id` matches the deny list, the agent MUST drop the creation request without forwarding it to the SP | MUST | |
-| REQ-RTE-170 | If a cancel CloudEvent arrives for a `resource_id` that is already queued in the retry topic, the agent MUST immediately consume the retry topic, remove the matching message, re-publish any non-matching messages, and publish a `dcm.agent.cancel-acknowledged` CloudEvent to `dcm.agents.responses`. The cancelled resource ID MUST also be added to the deny list | MUST | |
+| REQ-RTE-170 | If a cancel CloudEvent arrives for a `resource_id` that is already queued in the retry topic, the agent MUST immediately consume the retry topic, remove and acknowledge the matching message, Nak any non-matching messages in place so they remain queued for redelivery, and publish a `dcm.agent.cancel-acknowledged` CloudEvent to `dcm.agents.responses`. The cancelled resource ID MUST also be added to the deny list | MUST | |
+| REQ-RTE-171 | If a cancel CloudEvent arrives before the retry-topic consumer is available (e.g. during the agent's startup window), the agent MUST still add the `resource_id` to the deny list and publish the `dcm.agent.cancel-acknowledged` CloudEvent, skipping only the retry-topic purge step (there is nothing queued yet) | MUST | |
 | REQ-RTE-180 | If a cancel CloudEvent arrives for a `resource_id` that has already been dispatched to the SP (request in-flight or SP response received), the agent MUST reject the cancellation by publishing a `dcm.agent.cancel-rejected` CloudEvent to `dcm.agents.responses` with `{resource_id, agent_name, topic_name, reason}`. The rejected cancel MUST NOT be added to the deny list | MUST | |
 | REQ-RTE-190 | Deny list entries MUST be removed once consumed (used to filter a creation request from the main topic). If the deny list exceeds a configurable maximum size, the oldest entries MUST be evicted (LRU). On restart, the deny list is rebuilt from the cancel topic | MUST | |
+
+#### Requirements — Dispatch Tracking & Concurrency Safety
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-RTE-200 | The agent MUST track resources successfully dispatched to an SP (create or delete) in a claimed-resources ledger, used exclusively to reject cancels per REQ-RTE-180. This ledger MUST NOT block a legitimate subsequent forward for the same `resource_id` — e.g. a delete after a successful create, or a retry/redelivery after a prior forward attempt failed. SP-side idempotency (REQ-RCM-210/220) is the safeguard against duplicate side effects, not this ledger | MUST | See DD-190 |
+| REQ-RTE-210 | To prevent two concurrent forward attempts for the same `resource_id` from racing into the SP simultaneously (e.g. a JetStream redelivery racing the still in-flight first attempt, or the main-topic and retry-topic paths racing each other), the agent MUST serialize forward attempts per `resource_id` using a transient in-flight lock. The lock MUST be held only for the duration of a single forward attempt and released unconditionally when it completes, regardless of outcome. The lock MUST NOT use size-bounded eviction: an evicted-but-still-held entry would silently permit the exact double-dispatch this requirement exists to prevent. A rejected concurrent attempt MUST be treated as a transient condition (retry shortly), never a permanent block | MUST | DD-190 amendment (F13); this lock is separate from and does not replace the claimed-resources ledger in REQ-RTE-200. Naturally bounded by concurrent-forward count, not resource cardinality, so unbounded is safe |
 
 #### Configuration Introduced
 
@@ -1643,7 +1659,7 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 - **When** the cancel is consumed from the cancel topic
 - **Then** the agent MUST immediately consume the retry topic
 - **And** the message for `resource_id="res-789"` MUST be removed and acknowledged without forwarding to the SP
-- **And** any non-matching messages MUST be re-published to the retry topic
+- **And** any non-matching messages MUST be Nak'd in place so they remain queued in the retry topic
 - **And** a `dcm.agent.cancel-acknowledged` CloudEvent MUST be published to `dcm.agents.responses`
 - **And** `resource_id="res-789"` MUST be added to the deny list
 
@@ -1678,6 +1694,72 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 - **When** an SP returns a retryable error
 - **Then** the agent MUST retry up to 5 times with backoff starting at 1s
 - **And** if all retries fail, MUST publish an error CE (not fall back to retry topic)
+
+##### AC-RTE-025: Provider health resolved by ID, not name
+
+- **Validates:** REQ-RTE-025
+- **Given** a registered provider whose store record has `ID="id-not-a-name-12345"` and a distinct `Name`
+- **And** the health tracker has state Ready for `"id-not-a-name-12345"` (and no state recorded for `Name`)
+- **When** the agent consumes a creation request for that provider's service type
+- **Then** the agent MUST forward the request to the SP and publish a `dcm.agent.creation-acknowledged` CloudEvent (proving health was resolved by `ID`, not `Name` — a `Name`-keyed lookup would find no state and treat the SP as Unavailable)
+
+##### AC-RTE-026: Empty provider ID treated as Unavailable
+
+- **Validates:** REQ-RTE-026
+- **Given** a registered provider whose store record has an empty `ID` (data corruption)
+- **When** the agent resolves the provider for a creation request
+- **Then** the agent MUST treat it as Unavailable and publish a `dcm.agent.error` CloudEvent indicating the SP is unavailable
+- **And** MUST log the anomaly
+- **And** MUST NOT call the SP
+
+##### AC-RTE-135: Context cancellation/deadline suppresses error CE
+
+- **Validates:** REQ-RTE-135
+- **Given** an SP call is in progress and the caller's context is cancelled
+- **When** the cancellation is observed
+- **Then** `HandleRequest` MUST return the context error
+- **And** no `dcm.agent.error` CloudEvent MUST be published
+- **Given** the caller's context deadline is exceeded while the agent is waiting in retry backoff
+- **When** the deadline elapses
+- **Then** `HandleRequest` MUST return the context error
+- **And** no `dcm.agent.error` CloudEvent MUST be published
+
+##### AC-RTE-085: Cancel succeeds before retry-topic consumer is wired
+
+- **Validates:** REQ-RTE-171
+- **Given** the retry-topic consumer has not yet been wired into the router (startup window)
+- **And** a cancel CloudEvent arrives for a `resource_id` never previously seen
+- **When** the cancel is processed
+- **Then** the `resource_id` MUST be added to the deny list
+- **And** a `dcm.agent.cancel-acknowledged` CloudEvent MUST be published
+- **And** the agent MUST NOT error or panic from the missing retry-topic consumer
+
+##### AC-RTE-200: Delete-after-create is not blocked by the claimed-resources ledger
+
+- **Validates:** REQ-RTE-200
+- **Given** a creation request for `resource_id="res-lifecycle"` was forwarded and acknowledged
+- **When** a deletion request for `resource_id="res-lifecycle"` is subsequently processed
+- **Then** the deletion MUST be forwarded to the SP normally
+- **And** a `dcm.agent.deletion-acknowledged` CloudEvent MUST be published
+
+##### AC-RTE-201: Failed forward attempt does not block a later redelivery
+
+- **Validates:** REQ-RTE-200
+- **Given** a creation request for a `resource_id` exhausts its in-line retries and an error CE is published
+- **When** the same `resource_id` is forwarded again (e.g. JetStream redelivery) and the SP now succeeds
+- **Then** the second attempt MUST be forwarded to the SP
+- **And** a `dcm.agent.creation-acknowledged` CloudEvent MUST be published
+
+##### AC-RTE-210: Concurrent duplicate forward is blocked without permanently blocking the legitimate attempt
+
+- **Validates:** REQ-RTE-210
+- **Given** a forward attempt for `resource_id="res-race"` is in flight (SP call not yet returned)
+- **When** a second forward attempt for the same `resource_id` arrives concurrently
+- **Then** the second attempt MUST be rejected with a transient/retryable error
+- **And** the SP MUST NOT receive a second concurrent call for that `resource_id`
+- **Given** the first attempt then completes (successfully or not)
+- **When** a later, non-concurrent request for the same `resource_id` arrives (e.g. a legitimate redelivery or a delete-after-create)
+- **Then** it MUST NOT be blocked by the in-flight lock
 
 #### Dependencies
 
@@ -1716,10 +1798,10 @@ message, not elapsed time.
 | REQ-RCM-020 | Consumption of the retry topic MUST be event-driven — triggered by SP health state transitions (Ready per REQ-RCM-030, Unavailable per REQ-RCM-040) or agent restart (per REQ-RCM-080), not by periodic timers. The health check interval (REQ-HMN-030) serves as the natural rate-limiter for retry topic processing | MUST | |
 | REQ-RCM-030 | When an SP transitions to Ready, the agent MUST consume the retry topic and process requests whose service type has a Ready SP | MUST | |
 | REQ-RCM-040 | When an SP transitions to Unavailable, the agent MUST consume the retry topic and reject requests whose service type's SP is Unavailable with error CloudEvents to DCM | MUST | |
-| REQ-RCM-050 | Messages for service types whose SP is still Unhealthy MUST be re-published to the retry topic without triggering additional `dcm.agent.request-queued` CloudEvents (the initial CloudEvent is sent only on first routing per REQ-RTE-100) | MUST | |
+| REQ-RCM-050 | Messages for service types whose SP is still Unhealthy MUST remain queued on the retry topic without triggering additional `dcm.agent.request-queued` CloudEvents (the initial CloudEvent is sent only on first routing per REQ-RTE-100) | MUST | Retry-topic-native messages are Nak'd in place (redelivered without moving streams); a message seen for the first time while still on the main topic (e.g. drained on restart per REQ-RCM-080) is published to the retry topic |
 | REQ-RCM-060 | Requests MUST be processed in arrival order per service type. Requests for different service types are independent | MUST | |
 | REQ-RCM-070 | The retry topic MUST use the same durable consumer pattern as other topics (per REQ-MSG-080), ensuring messages survive agent crashes | MUST | See REQ-MSG-080 |
-| REQ-RCM-080 | On restart, the agent MUST re-read both the main topic and the retry topic, treating messages from the retry topic that remain queued (SP still Unhealthy) as re-publications per REQ-RCM-050 without triggering additional `request-queued` CloudEvents | MUST | |
+| REQ-RCM-080 | On restart, the agent MUST re-read both the main topic and the retry topic, and messages that remain queued (SP still Unhealthy) MUST stay queued per REQ-RCM-050 without triggering additional `request-queued` CloudEvents | MUST | |
 
 #### Requirements — Creation/Deletion Dedup
 
@@ -1750,7 +1832,7 @@ message, not elapsed time.
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
 | REQ-RCM-180 | The agent MUST bound the processing time of each consumed message with a configurable per-message handler deadline, covering forwarding to the SP and awaiting its response. For main-subject messages, enforcement MUST occur in the messaging client before invoking the router; for retry-subject messages, enforcement MUST occur in the retry processor | MUST | Prevents a hung SP call from blocking the consumer indefinitely |
-| REQ-RCM-190 | If the handler deadline elapses before the routing outcome is finalized, the agent MUST cancel the in-flight SP call, treat the outcome as a retryable error (per REQ-RTE-110), and MUST NOT acknowledge the message | MUST | Main path: messaging client NAK; retry path: retry processor NAK/re-publish |
+| REQ-RCM-190 | If the handler deadline elapses before the routing outcome is finalized, the agent MUST cancel the in-flight SP call, treat the outcome as a retryable error (per REQ-RTE-110), and MUST NOT acknowledge the message | MUST | Main path: messaging client Naks; retry path: retry processor Naks in place (see `RetryMessage.NakFunc`) |
 | REQ-RCM-200 | The handler deadline MUST be configurable | MUST | |
 
 #### Requirements — SP-Side Idempotency (Event ID Forwarding)
@@ -1759,10 +1841,15 @@ message, not elapsed time.
 |----|-------------|----------|-------|
 | REQ-RCM-210 | When forwarding a creation or deletion request to an external SP (per REQ-RTE-040, REQ-RTE-050), the agent MUST set an `Idempotency-Key` HTTP header on the request equal to the inbound CloudEvent's `id` attribute | MUST | Enables SP-side event-level dedup; per DD-190, SPs remain responsible for enforcing idempotency — the agent's obligation is limited to forwarding the key |
 | REQ-RCM-220 | The `Idempotency-Key` value forwarded for a given inbound CloudEvent MUST be identical across every delivery attempt of that event — in-line retries (REQ-RTE-110), retry-topic reprocessing (REQ-RCM-030), and JetStream redelivery (REQ-MSG-116) | MUST | Without a stable key, an SP cannot distinguish "same event, retried" from "new event", defeating the purpose of event-level dedup |
-| REQ-RCM-230 | For embedded SPs, the agent MUST make the inbound CloudEvent's `id` available to the in-process call (e.g., via request context or a typed request field) | MUST | Keeps idempotency semantics consistent between embedded and external SPs; embedded SPs are not exempt from REQ-RCM-220 |
-| REQ-RCM-240 | Every CloudEvent publish attempt (success and failure) MUST be logged with `ce_type` and `resource_id` | MUST | Today only publish *failures* are logged, and without `resource_id` |
-| REQ-RCM-250 | Every SP dispatch (create or delete, embedded or external) MUST be logged at INFO on completion with `resource_id`, `service_type`, provider kind (embedded/external), `operation`, and `duration`; failed external dispatches MUST additionally include `http_status`. Request/response bodies MUST NOT be logged | MUST | The forwarder had zero logging; this is the largest blind spot for auditing SP interaction |
-| REQ-RCM-260 | Deny-list drops (create requests for a cancelled resource) and cancel-topic purge/republish actions MUST be logged at INFO with `resource_id` and, for purge, matched/republished counts | MUST | |
+| REQ-RCM-230 | For embedded SPs, the agent MUST make the inbound CloudEvent's `id` available to the in-process call (e.g., via request context or a typed request field) | MUST | Keeps idempotency semantics consistent between embedded and external SPs; embedded SPs are not exempt from REQ-RCM-220. Deferred alongside DD-250 — no embedded SP is wired in production, so this is exercised only via a test fake, not a live path |
+
+#### Requirements — Logging
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-RCM-240 | Every CloudEvent publish attempt, success or failure, MUST be logged with `ce_type` and `resource_id` | MUST | |
+| REQ-RCM-250 | Every SP dispatch (create or delete, embedded or external) MUST be logged at INFO on completion with `resource_id`, `service_type`, provider kind (embedded/external), `operation`, and `duration`; failed external dispatches MUST additionally include `http_status`. Request/response bodies MUST NOT be logged | MUST | |
+| REQ-RCM-260 | Deny-list drops (create requests for a cancelled resource) and cancel-topic purge actions MUST be logged at INFO with `resource_id` and, for purge, matched/requeued counts | MUST | Purge Naks non-matching messages in place rather than republishing them — see REQ-RTE-170 |
 
 #### Configuration — Topic 9
 
@@ -1797,8 +1884,8 @@ message, not elapsed time.
 - **Given** the retry topic contains requests for "database" (Unhealthy) and "container" (Unavailable)
 - **When** the agent processes the retry topic
 - **Then** "container" requests MUST be rejected (Unavailable)
-- **And** "database" requests MUST be re-published to the retry topic (still Unhealthy)
-- **And** re-publication MUST NOT trigger additional `dcm.agent.request-queued` CloudEvents
+- **And** "database" requests MUST remain queued in the retry topic (still Unhealthy)
+- **And** remaining queued MUST NOT trigger additional `dcm.agent.request-queued` CloudEvents
 
 ##### AC-RCM-040: FIFO ordering per service type
 
@@ -1829,7 +1916,7 @@ message, not elapsed time.
 - **Validates:** REQ-RCM-080
 - **Given** the retry topic contains messages from a prior session
 - **When** the agent restarts and re-reads the retry topic
-- **Then** messages for still-Unhealthy SPs MUST be re-published without triggering additional `request-queued` CloudEvents
+- **Then** messages for still-Unhealthy SPs MUST remain queued without triggering additional `request-queued` CloudEvents
 
 ##### AC-RCM-047: Restart-drain is not skipped when messaging isn't immediately ready
 
@@ -1900,8 +1987,9 @@ message, not elapsed time.
 - **And** an inbound CloudEvent with `id="evt-xyz-789"` requests creation of a "container" resource
 - **When** the agent forwards the request via in-process call
 - **Then** the embedded SP call MUST receive `"evt-xyz-789"` as the CE id
+- **Note:** Deferred alongside DD-250 — exercised only via a test fake (`routingtest.RegisterEmbeddedSP`), since no embedded SP is wired in production
 
-##### AC-RCM-240: CloudEvent publish outcome logged
+##### AC-RCM-140: CloudEvent publish outcome logged
 
 - **Validates:** REQ-RCM-240
 - **Given** `publishCE` succeeds
@@ -1911,7 +1999,7 @@ message, not elapsed time.
 - **When** the publish attempt fails
 - **Then** a WARN log MUST be emitted with `ce_type`, `resource_id`, `error`
 
-##### AC-RCM-250: SP dispatch outcome logged
+##### AC-RCM-150: SP dispatch outcome logged
 
 - **Validates:** REQ-RCM-250
 - **Given** a dispatch to an SP completes, successfully or not
@@ -1921,7 +2009,7 @@ message, not elapsed time.
 - **When** the failure is logged
 - **Then** `http_status` MUST be included and the response body MUST NOT be included
 
-##### AC-RCM-260: Deny-list drops and cancel purge logged
+##### AC-RCM-160: Deny-list drops and cancel purge logged
 
 - **Validates:** REQ-RCM-260
 - **Given** a create request is dropped because its `resource_id` is on the deny list
@@ -1929,7 +2017,7 @@ message, not elapsed time.
 - **Then** an INFO log MUST be emitted with `resource_id`
 - **Given** `purgeFromRetryTopic` completes
 - **When** it returns
-- **Then** an INFO log MUST be emitted with `resource_id`, `matched`, `republished`
+- **Then** an INFO log MUST be emitted with `resource_id`, `matched`, `requeued`
 
 #### Dependencies
 
@@ -2185,6 +2273,8 @@ All configuration is loadable from environment variables. Configuration files ar
 | routing.retryBackoff | AGENT_ROUTING_RETRY_BACKOFF | 2s | No | 100ms | routing.retryMaxBackoff | duration | 8 |
 | routing.retryMaxBackoff | AGENT_ROUTING_RETRY_MAX_BACKOFF | 30s | No | routing.retryBackoff | 5m | duration | 8 |
 | routing.denyListMaxSize | AGENT_DENY_LIST_MAX_SIZE | 100000 | No | 1000 | 10000000 | integer | 8 |
+| messaging.maxDeliver | AGENT_MESSAGING_MAX_DELIVER | 10 | No | 1 | 100 | integer | 9 |
+| routing.handlerTimeout | AGENT_ROUTING_HANDLER_TIMEOUT | 60s | No | 1s | 10m | duration | 9 |
 
 ---
 
@@ -2230,10 +2320,10 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
 | REQ-HMN-NNN | 4.5: SP Health Monitoring | 31 |
 | REQ-DCM-NNN | 4.6: DCM Registration & Heartbeat | 18 |
 | REQ-MSG-NNN | 4.7: Messaging System Integration | 24 |
-| REQ-RTE-NNN | 4.8: Resource Operation Routing | 22 |
+| REQ-RTE-NNN | 4.8: Resource Operation Routing | 28 |
 | REQ-RCM-NNN | 4.9: Retry & Cancel Mechanisms | 26 |
 | REQ-XC-ERR-NNN | 5.1: Error Handling | 4 |
 | REQ-XC-CE-NNN | 5.2: CloudEvent Definitions | 5 |
 | REQ-XC-LOG-NNN | 5.3: Logging | 2 |
 | REQ-XC-CFG-NNN | 5.4: Configuration Management | 6 |
-| **Total** | | **190** |
+| **Total** | | **196** |

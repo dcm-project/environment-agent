@@ -556,7 +556,17 @@ func (c *Client) Stop() {
 // IsConnected returns the cached connectivity state (no I/O).
 func (c *Client) IsConnected() bool { return c.connected.Load() }
 
-// ConsumerLag returns the current consumer lag from JetStream.
+// consumerLagInfoTimeout bounds the live JetStream round-trip ConsumerLag
+// makes to fetch current consumer state. CachedInfo() is not used here
+// because it reflects only whatever was fetched at consumer creation/bind
+// time and is never refreshed as messages are delivered — it would report a
+// perpetually stale (typically zero) lag.
+const consumerLagInfoTimeout = 5 * time.Second
+
+// ConsumerLag returns the current consumer lag from JetStream: the number of
+// messages not yet acknowledged on the main-subject durable consumer, per
+// REQ-DCM-150 (NumPending: not yet delivered; NumAckPending: delivered but
+// not yet acked — both are "unacknowledged").
 func (c *Client) ConsumerLag() int64 {
 	c.mu.Lock()
 	cons := c.mainCons
@@ -565,7 +575,16 @@ func (c *Client) ConsumerLag() int64 {
 	if cons == nil {
 		return 0
 	}
-	return int64(cons.CachedInfo().NumPending)
+
+	ctx, cancel := context.WithTimeout(context.Background(), consumerLagInfoTimeout)
+	defer cancel()
+	info, err := cons.Info(ctx)
+	if err != nil {
+		c.logger.Warn("failed to fetch consumer info for lag reporting, using last-known value", "error", err)
+		cached := cons.CachedInfo()
+		return int64(cached.NumPending) + int64(cached.NumAckPending)
+	}
+	return int64(info.NumPending) + int64(info.NumAckPending)
 }
 
 // TopicName returns the main topic name advertised to DCM.

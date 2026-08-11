@@ -304,7 +304,7 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 		}, 5*time.Second).Should(Equal(uint64(0)), "denied message must be acked, not left pending")
 	})
 
-	It("does not leak the SP response body into the forward-failure log (leak-check, mirrors forwarder_test.go AC-RCM-250)", func() {
+	It("does not leak the SP response body into the forward-failure log (leak-check, mirrors forwarder_test.go AC-RCM-150)", func() {
 		providerID := routingtest.RegisterSP(ctx, registry, healthTracker, st, "db-provider", "database", v1alpha1.Unhealthy)
 		fwdr.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "sensitive backend detail"}
 

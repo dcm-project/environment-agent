@@ -10,7 +10,8 @@ import (
 )
 
 // DefaultNakDelay is the fallback NakWithDelay duration when no explicit
-// NakDelay is configured. Used by both the messaging client and retry processor.
+// NakDelay is configured. Used by messaging.Client for the main and cancel
+// subjects; the retry processor uses its own fixed storeErrorRetryDelay.
 const DefaultNakDelay = 500 * time.Millisecond
 
 // CE error string constants for deterministic test assertions.

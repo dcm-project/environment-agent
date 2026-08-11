@@ -4,6 +4,7 @@ package routing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -27,6 +28,19 @@ import (
 // instead of cancel-rejected.
 const claimedResourcesSetMaxSize = 100000
 
+// ErrForwardInFlight is returned when a forward attempt for a resourceId is
+// already in progress (e.g. a JetStream redelivery racing the still-running
+// first attempt, or the main-topic and retry-topic paths racing each other
+// for the same resourceId). The caller should treat this like any other
+// transient error (Nak/retry shortly) — it is NOT a permanent block: the
+// lock is released as soon as the in-flight attempt finishes, regardless of
+// outcome, so a later legitimate redelivery or delete-after-create is never
+// blocked. See REQ-RTE-210 and DD-190 (F13 amendment): a naive permanent
+// block on the cancel-rejection ledger (REQ-RTE-200) would wrongly block
+// delete-after-create and, worse, could strand a message that succeeded but
+// crashed before acking.
+var ErrForwardInFlight = errors.New("forward already in flight for this resource")
+
 // Router dispatches resource operation CEs to the appropriate SP.
 type Router struct {
 	registry            *provider.Registry
@@ -38,6 +52,7 @@ type Router struct {
 	retryConsumer       RetryTopicConsumer // set after construction via SetRetryConsumer
 	denyList            *ResourceSet
 	claimedResourcesSet *ResourceSet
+	inFlight            *ResourceSet
 	config              config.RoutingConfig
 	logger              *slog.Logger
 	agentName           string
@@ -97,6 +112,7 @@ func NewRouter(deps RouterDeps) *Router {
 		retryConsumer:       deps.RetryConsumer,
 		denyList:            deps.DenyList,
 		claimedResourcesSet: NewResourceSet(claimedResourcesSetMaxSize),
+		inFlight:            NewUnboundedResourceSet(),
 		config:              deps.Config,
 		logger:              deps.Logger,
 		agentName:           deps.AgentName,
@@ -130,6 +146,11 @@ func (r *Router) SetRetryConsumer(rc RetryTopicConsumer) {
 
 // ClaimedResourcesSet returns the claimed-resources-set for sharing with the retry Processor.
 func (r *Router) ClaimedResourcesSet() *ResourceSet { return r.claimedResourcesSet }
+
+// InFlightSet returns the transient in-flight lock for sharing with the
+// retry Processor, so a main-topic forward and a retry-topic forward for the
+// same resourceId can't race each other into a double dispatch.
+func (r *Router) InFlightSet() *ResourceSet { return r.inFlight }
 
 // HandleRequest routes a creation or deletion CE to the appropriate SP.
 func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
@@ -229,9 +250,20 @@ func (r *Router) resolveProvider(ctx context.Context, serviceType string) (*stor
 // forwardWithRetry forwards a request to the SP with retry logic and
 // claimed-resources-set tracking.
 func (r *Router) forwardWithRetry(ctx context.Context, sp *store.StoredProvider, isCreate bool, payload inboundPayload) error {
+	// Transient double-dispatch guard (F13): reject a second concurrent
+	// forward attempt for the same resourceId instead of racing the SP call.
+	// Released unconditionally when this attempt finishes, so it never blocks
+	// a later, non-concurrent redelivery or delete-after-create.
+	if !r.inFlight.AddIfAbsent(payload.ResourceID) {
+		r.logger.Info("forward already in flight for resource, deferring", "resource_id", payload.ResourceID, "ce_id", payload.EventID)
+		return ErrForwardInFlight
+	}
+	defer r.inFlight.Remove(payload.ResourceID)
+
 	// claimedResourcesSet is a cancel-rejection ledger that persists across the
 	// resource lifecycle (create → delete). AddIfAbsent returning false for
-	// a delete-after-create is legitimate; SPs handle idempotency (REQ-SP-010).
+	// a delete-after-create is legitimate and required (REQ-RTE-200); SPs
+	// handle idempotency (REQ-RCM-210/220).
 	newlyAdded := r.claimedResourcesSet.AddIfAbsent(payload.ResourceID)
 
 	// TOCTOU mitigation: re-check denyList after claiming the claimedResourcesSet
@@ -397,11 +429,8 @@ func (r *Router) HandleCancel(ctx context.Context, msg []byte) error {
 }
 
 // purgeFromRetryTopic drains all retry messages, acking those matching the
-// cancelled resourceID and Nak'ing the rest back in place. Non-matching
-// messages are Nak'd on the same JetStream message rather than
-// acked-and-republished, since they already live on this stream and don't
-// need to move. The retry-subject consumer has no MaxDeliver limit
-// (DD-410), so this choice doesn't affect delivery-count accounting.
+// cancelled resourceID and Nak'ing the rest in place (see RetryMessage.NakFunc
+// for why).
 func (r *Router) purgeFromRetryTopic(ctx context.Context, rc RetryTopicConsumer, resourceID string) error {
 	messages, err := rc.FetchRetryMessages(ctx)
 	if err != nil {
