@@ -52,6 +52,7 @@ type fakeMsg struct {
 	subject   string
 	ackErr    error
 	nakErr    error
+	termErr   error
 	meta      *jetstream.MsgMetadata
 	metaErr   error
 	ackCount  int
@@ -80,7 +81,7 @@ func (m *fakeMsg) NakWithDelay(d time.Duration) error {
 func (m *fakeMsg) InProgress() error { return nil }
 func (m *fakeMsg) Term() error {
 	m.termCount++
-	return nil
+	return m.termErr
 }
 func (m *fakeMsg) TermWithReason(string) error     { return nil }
 func (m *fakeMsg) DoubleAck(context.Context) error { return nil }
@@ -100,18 +101,30 @@ func buildTestCE(id, ceType string) []byte {
 	return data
 }
 
-func TestExtractCEIdentity(t *testing.T) {
+func buildTestCEWithResourceID(id, ceType, resourceID string) []byte {
+	data, err := json.Marshal(map[string]any{
+		"id": id, "type": ceType, "data": map[string]string{"resource_id": resourceID},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return data
+}
+
+func TestExtractLogFields(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    []byte
-		wantID   string
-		wantType string
+		name           string
+		input          []byte
+		wantResourceID string
+		wantID         string
+		wantType       string
 	}{
 		{
-			name:     "valid CE with id and type",
-			input:    buildTestCE("evt-123", cloudevent.TypeRequestCreate),
-			wantID:   "evt-123",
-			wantType: cloudevent.TypeRequestCreate,
+			name:           "valid CE with id, type, and resource_id",
+			input:          []byte(`{"id":"evt-123","type":"dcm.request.create","data":{"resource_id":"res-1"}}`),
+			wantResourceID: "res-1",
+			wantID:         "evt-123",
+			wantType:       cloudevent.TypeRequestCreate,
 		},
 		{
 			name:     "id present, type missing",
@@ -121,44 +134,50 @@ func TestExtractCEIdentity(t *testing.T) {
 		},
 		{
 			name:     "id missing",
-			input:    []byte(`{"type":cloudevent.TypeRequestCreate}`),
+			input:    []byte(`{"type":"dcm.request.create"}`),
 			wantID:   "unknown",
-			wantType: "unknown",
+			wantType: cloudevent.TypeRequestCreate,
 		},
 		{
-			name:     "malformed JSON",
-			input:    []byte(`not json`),
-			wantID:   "unknown",
-			wantType: "unknown",
+			name:           "malformed JSON",
+			input:          []byte(`not json`),
+			wantResourceID: "",
+			wantID:         "unknown",
+			wantType:       "unknown",
 		},
 		{
-			name:     "nil input",
-			input:    nil,
-			wantID:   "unknown",
-			wantType: "unknown",
+			name:           "nil input",
+			input:          nil,
+			wantResourceID: "",
+			wantID:         "unknown",
+			wantType:       "unknown",
 		},
 		{
-			name:     "empty slice",
-			input:    []byte{},
-			wantID:   "unknown",
-			wantType: "unknown",
+			name:           "empty slice",
+			input:          []byte{},
+			wantResourceID: "",
+			wantID:         "unknown",
+			wantType:       "unknown",
 		},
 		{
 			name:     "empty id string",
-			input:    []byte(`{"id":"","type":cloudevent.TypeRequestDelete}`),
+			input:    []byte(`{"id":"","type":"dcm.request.delete"}`),
 			wantID:   "unknown",
-			wantType: "unknown",
+			wantType: cloudevent.TypeRequestDelete,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotID, gotType := extractCEIdentity(tt.input)
+			gotResourceID, gotID, gotType := extractLogFields(tt.input)
+			if gotResourceID != tt.wantResourceID {
+				t.Errorf("extractLogFields() resourceID = %q, want %q", gotResourceID, tt.wantResourceID)
+			}
 			if gotID != tt.wantID {
-				t.Errorf("extractCEIdentity() id = %q, want %q", gotID, tt.wantID)
+				t.Errorf("extractLogFields() id = %q, want %q", gotID, tt.wantID)
 			}
 			if gotType != tt.wantType {
-				t.Errorf("extractCEIdentity() type = %q, want %q", gotType, tt.wantType)
+				t.Errorf("extractLogFields() type = %q, want %q", gotType, tt.wantType)
 			}
 		})
 	}
@@ -174,7 +193,7 @@ func TestHandleMainMessage_AckFailure(t *testing.T) {
 	}
 
 	msg := &fakeMsg{
-		data:    buildTestCE("evt-main-001", cloudevent.TypeRequestCreate),
+		data:    buildTestCEWithResourceID("evt-main-001", cloudevent.TypeRequestCreate, "res-main-001"),
 		subject: "agent-test.main",
 		ackErr:  errors.New("ack timeout"),
 		meta: &jetstream.MsgMetadata{
@@ -188,13 +207,14 @@ func TestHandleMainMessage_AckFailure(t *testing.T) {
 	if msg.ackCount != 1 {
 		t.Errorf("expected 1 ack call, got %d", msg.ackCount)
 	}
-	if ch.count() != 1 {
-		t.Fatalf("expected 1 log record, got %d", ch.count())
+	if ch.count() != 2 {
+		t.Fatalf("expected 2 log records (received + ack failure), got %d", ch.count())
 	}
 	rec := ch.lastRecord()
 	if rec.Message != "failed to ack main message, may be redelivered" {
 		t.Errorf("unexpected message: %s", rec.Message)
 	}
+	assertAttr(t, rec, "resource_id", "res-main-001")
 	assertAttr(t, rec, "ce_id", "evt-main-001")
 	assertAttr(t, rec, "ce_type", cloudevent.TypeRequestCreate)
 	assertAttr(t, rec, "subject", "agent-test.main")
@@ -230,8 +250,8 @@ func TestHandleMainMessage_NakFailure(t *testing.T) {
 	if msg.ackCount != 0 {
 		t.Errorf("expected 0 ack calls on handler-error path, got %d", msg.ackCount)
 	}
-	if ch.count() != 1 {
-		t.Fatalf("expected 1 log record, got %d", ch.count())
+	if ch.count() != 2 {
+		t.Fatalf("expected 2 log records (received + nak failure), got %d", ch.count())
 	}
 	rec := ch.lastRecord()
 	if rec.Message != "failed to nak main message" {
@@ -265,8 +285,8 @@ func TestHandleCancelMessage_AckFailure(t *testing.T) {
 	if msg.ackCount != 1 {
 		t.Errorf("expected 1 ack call, got %d", msg.ackCount)
 	}
-	if ch.count() != 1 {
-		t.Fatalf("expected 1 log record, got %d", ch.count())
+	if ch.count() != 2 {
+		t.Fatalf("expected 2 log records (received + ack failure), got %d", ch.count())
 	}
 	rec := ch.lastRecord()
 	if rec.Message != "failed to ack cancel message, may be redelivered" {
@@ -304,8 +324,8 @@ func TestHandleCancelMessage_NakFailure(t *testing.T) {
 	if msg.ackCount != 0 {
 		t.Errorf("expected 0 ack calls on handler-error path, got %d", msg.ackCount)
 	}
-	if ch.count() != 1 {
-		t.Fatalf("expected 1 log record, got %d", ch.count())
+	if ch.count() != 2 {
+		t.Fatalf("expected 2 log records (received + nak failure), got %d", ch.count())
 	}
 	rec := ch.lastRecord()
 	if rec.Message != "failed to nak cancel message" {
@@ -335,13 +355,236 @@ func TestHandleMainMessage_MetadataUnavailable(t *testing.T) {
 
 	c.handleMainMessage(msg)
 
-	if ch.count() != 1 {
-		t.Fatalf("expected 1 log record, got %d", ch.count())
+	if ch.count() != 2 {
+		t.Fatalf("expected 2 log records (received + ack failure), got %d", ch.count())
 	}
+	received := ch.records[0]
+	assertAttrExists(t, received, "meta_error")
+	assertAttrNotExists(t, received, "stream_seq")
+
 	rec := ch.lastRecord()
 	assertAttr(t, rec, "ce_id", "evt-no-meta")
 	assertAttrExists(t, rec, "meta_error")
 	assertAttrNotExists(t, rec, "stream_seq")
+}
+
+// TestHandleMainMessage_MaxDeliverMetadataFailure verifies the MaxDeliver
+// guard's metadata-failure log includes correlation fields and the Nak()
+// outcome, rather than silently discarding them.
+func TestHandleMainMessage_MaxDeliverMetadataFailure(t *testing.T) {
+	ch := &captureHandler{}
+	c := &Client{
+		logger:      slog.New(ch),
+		cfg:         ClientConfig{MaxDeliver: 3},
+		mainHandler: func(_ context.Context, _ []byte) error { return nil },
+	}
+
+	msg := &fakeMsg{
+		data:    buildTestCEWithResourceID("evt-maxdeliver-meta", cloudevent.TypeRequestCreate, "res-maxdeliver-meta"),
+		subject: "agent-test.main",
+		metaErr: errors.New("no metadata"),
+	}
+
+	c.handleMainMessage(msg)
+
+	if ch.count() != 2 {
+		t.Fatalf("expected 2 log records (received + metadata failure), got %d", ch.count())
+	}
+	rec := ch.lastRecord()
+	if rec.Message != "failed to get message metadata for MaxDeliver guard" {
+		t.Errorf("unexpected message: %s", rec.Message)
+	}
+	assertAttr(t, rec, "resource_id", "res-maxdeliver-meta")
+	assertAttr(t, rec, "ce_id", "evt-maxdeliver-meta")
+	assertAttr(t, rec, "ce_type", cloudevent.TypeRequestCreate)
+	assertAttrExists(t, rec, "error")
+	assertAttrExists(t, rec, "nak_error")
+}
+
+func TestHandleMainMessage_SuccessLogsReceiptAndAck(t *testing.T) {
+	ch := &captureHandler{}
+	c := &Client{
+		logger:      slog.New(ch),
+		mainHandler: func(_ context.Context, _ []byte) error { return nil },
+	}
+
+	msg := &fakeMsg{
+		data:    buildTestCEWithResourceID("evt-main-ok", cloudevent.TypeRequestCreate, "res-main-ok"),
+		subject: "agent-test.main",
+		meta: &jetstream.MsgMetadata{
+			Sequence:     jetstream.SequencePair{Stream: 1, Consumer: 1},
+			NumDelivered: 1,
+		},
+	}
+
+	c.handleMainMessage(msg)
+
+	if ch.count() != 2 {
+		t.Fatalf("expected 2 log records (received + acked), got %d", ch.count())
+	}
+	received := ch.records[0]
+	if received.Message != "message received" {
+		t.Errorf("unexpected first log message: %s", received.Message)
+	}
+	if received.Level != slog.LevelInfo {
+		t.Errorf("expected receipt log at INFO, got %s", received.Level)
+	}
+	assertAttr(t, received, "resource_id", "res-main-ok")
+	assertAttr(t, received, "ce_id", "evt-main-ok")
+	assertAttr(t, received, "ce_type", cloudevent.TypeRequestCreate)
+	assertAttrUint64(t, received, "num_delivered", 1)
+
+	acked := ch.lastRecord()
+	if acked.Message != "main message acked" {
+		t.Errorf("unexpected second log message: %s", acked.Message)
+	}
+	if acked.Level != slog.LevelInfo {
+		t.Errorf("expected ack-success log at INFO, got %s", acked.Level)
+	}
+	assertAttr(t, acked, "resource_id", "res-main-ok")
+	assertAttr(t, acked, "ce_id", "evt-main-ok")
+}
+
+func TestHandleMainMessage_HandlerErrorLogsWarnOnSuccessfulNak(t *testing.T) {
+	ch := &captureHandler{}
+	c := &Client{
+		logger:      slog.New(ch),
+		mainHandler: func(_ context.Context, _ []byte) error { return errors.New("sp unavailable") },
+	}
+
+	msg := &fakeMsg{
+		data:    buildTestCE("evt-main-nak", cloudevent.TypeRequestCreate),
+		subject: "agent-test.main",
+		meta:    &jetstream.MsgMetadata{NumDelivered: 1},
+	}
+
+	c.handleMainMessage(msg)
+
+	if msg.nakCount != 1 {
+		t.Errorf("expected 1 nak call, got %d", msg.nakCount)
+	}
+	if ch.count() != 2 {
+		t.Fatalf("expected 2 log records (received + nacked), got %d", ch.count())
+	}
+	nacked := ch.lastRecord()
+	if nacked.Message != "main message nacked, handler failed" {
+		t.Errorf("unexpected log message: %s", nacked.Message)
+	}
+	if nacked.Level != slog.LevelWarn {
+		t.Errorf("expected nak-success log at WARN, got %s", nacked.Level)
+	}
+	assertAttr(t, nacked, "ce_id", "evt-main-nak")
+	assertAttrExists(t, nacked, "resource_id")
+	assertAttrExists(t, nacked, "error")
+}
+
+func TestHandleCancelMessage_SuccessLogsReceiptAndAck(t *testing.T) {
+	ch := &captureHandler{}
+	c := &Client{
+		logger:        slog.New(ch),
+		cancelHandler: func(_ context.Context, _ []byte) error { return nil },
+	}
+
+	msg := &fakeMsg{
+		data:    buildTestCEWithResourceID("evt-cancel-ok", cloudevent.TypeRequestCancel, "res-cancel-ok"),
+		subject: "agent-test.cancel",
+		meta:    &jetstream.MsgMetadata{NumDelivered: 1},
+	}
+
+	c.handleCancelMessage(msg)
+
+	if ch.count() != 2 {
+		t.Fatalf("expected 2 log records (received + acked), got %d", ch.count())
+	}
+	assertAttr(t, ch.records[0], "resource_id", "res-cancel-ok")
+	assertAttr(t, ch.records[0], "ce_id", "evt-cancel-ok")
+	if ch.records[0].Message != "message received" {
+		t.Errorf("unexpected first log message: %s", ch.records[0].Message)
+	}
+	acked := ch.lastRecord()
+	if acked.Message != "cancel message acked" {
+		t.Errorf("unexpected second log message: %s", acked.Message)
+	}
+	assertAttr(t, acked, "resource_id", "res-cancel-ok")
+}
+
+// fakePublishJetStream is a minimal jetstream.JetStream that only implements
+// Publish, used to exercise publishMaxDeliverError's success/failure logging
+// without a real NATS connection.
+type fakePublishJetStream struct {
+	jetstream.JetStream
+	publishErr error
+}
+
+func (f *fakePublishJetStream) Publish(_ context.Context, _ string, _ []byte, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+	if f.publishErr != nil {
+		return nil, f.publishErr
+	}
+	return &jetstream.PubAck{}, nil
+}
+
+func TestPublishMaxDeliverError_FailureLogsCEType(t *testing.T) {
+	ch := &captureHandler{}
+	c := &Client{
+		logger: slog.New(ch),
+		cfg:    ClientConfig{AgentName: "agent-test"},
+		topics: TopicNames{Main: "agent-test.main"},
+	}
+
+	msg := &fakeMsg{
+		data:    buildTestCEWithResourceID("evt-maxdeliver", cloudevent.TypeRequestCreate, "res-maxdeliver"),
+		subject: "agent-test.main",
+		meta:    &jetstream.MsgMetadata{NumDelivered: 3},
+	}
+
+	c.publishMaxDeliverError(msg)
+
+	if ch.count() != 2 {
+		t.Fatalf("expected 2 log records (max-delivery warn + publish failure warn), got %d", ch.count())
+	}
+	rec := ch.lastRecord()
+	if rec.Message != "failed to publish max-deliver error CE" {
+		t.Errorf("unexpected message: %s", rec.Message)
+	}
+	if rec.Level != slog.LevelWarn {
+		t.Errorf("expected publish-failure log at WARN, got %s", rec.Level)
+	}
+	assertAttr(t, rec, "resource_id", "res-maxdeliver")
+	assertAttr(t, rec, "ce_id", "evt-maxdeliver")
+	assertAttr(t, rec, "published_ce_type", cloudevent.TypeError)
+	assertAttrExists(t, rec, "error")
+}
+
+func TestPublishMaxDeliverError_SuccessLogsInfo(t *testing.T) {
+	ch := &captureHandler{}
+	c := &Client{
+		logger: slog.New(ch),
+		cfg:    ClientConfig{AgentName: "agent-test"},
+		topics: TopicNames{Main: "agent-test.main"},
+		js:     &fakePublishJetStream{},
+	}
+
+	msg := &fakeMsg{
+		data:    buildTestCEWithResourceID("evt-maxdeliver-ok", cloudevent.TypeRequestCreate, "res-maxdeliver-ok"),
+		subject: "agent-test.main",
+		meta:    &jetstream.MsgMetadata{NumDelivered: 3},
+	}
+
+	c.publishMaxDeliverError(msg)
+
+	if ch.count() != 2 {
+		t.Fatalf("expected 2 log records (max-delivery warn + publish success info), got %d", ch.count())
+	}
+	rec := ch.lastRecord()
+	if rec.Message != "published max-deliver error CE" {
+		t.Errorf("unexpected message: %s", rec.Message)
+	}
+	if rec.Level != slog.LevelInfo {
+		t.Errorf("expected publish-success log at INFO, got %s", rec.Level)
+	}
+	assertAttr(t, rec, "resource_id", "res-maxdeliver-ok")
+	assertAttr(t, rec, "ce_id", "evt-maxdeliver-ok")
+	assertAttr(t, rec, "published_ce_type", cloudevent.TypeError)
 }
 
 func assertAttr(t *testing.T, rec slog.Record, key, want string) {
@@ -414,7 +657,7 @@ func TestHandleMainMessage_PanicRecovery(t *testing.T) {
 	}
 
 	msg := &fakeMsg{
-		data:    buildTestCE("evt-panic-main", cloudevent.TypeRequestCreate),
+		data:    buildTestCEWithResourceID("evt-panic-main", cloudevent.TypeRequestCreate, "res-panic-main"),
 		subject: "agent-test.main",
 		meta:    &jetstream.MsgMetadata{NumDelivered: 1},
 	}
@@ -433,6 +676,33 @@ func TestHandleMainMessage_PanicRecovery(t *testing.T) {
 	}
 	assertAttrExists(t, rec, "panic")
 	assertAttrExists(t, rec, "stack")
+	assertAttr(t, rec, "resource_id", "res-panic-main")
+	assertAttr(t, rec, "ce_id", "evt-panic-main")
+	assertAttr(t, rec, "ce_type", cloudevent.TypeRequestCreate)
+	assertAttrNotExists(t, rec, "nak_error")
+}
+
+// TestHandleMainMessage_PanicRecovery_NakError verifies the nak_error attr
+// on the panic log surfaces a real error (not just a nil placeholder) when
+// the NakWithDelay resolution call issued from the recover path itself fails.
+func TestHandleMainMessage_PanicRecovery_NakError(t *testing.T) {
+	ch := &captureHandler{}
+	c := &Client{
+		logger:      slog.New(ch),
+		mainHandler: func(_ context.Context, _ []byte) error { panic("boom") },
+	}
+
+	msg := &fakeMsg{
+		data:    buildTestCE("evt-panic-main-nakerr", cloudevent.TypeRequestCreate),
+		subject: "agent-test.main",
+		meta:    &jetstream.MsgMetadata{NumDelivered: 1},
+		nakErr:  errors.New("nak failed after panic"),
+	}
+
+	c.handleMainMessage(msg)
+
+	rec := ch.lastRecord()
+	assertAttr(t, rec, "nak_error", "nak failed after panic")
 }
 
 func TestHandleCancelMessage_PanicRecovery(t *testing.T) {
@@ -443,7 +713,7 @@ func TestHandleCancelMessage_PanicRecovery(t *testing.T) {
 	}
 
 	msg := &fakeMsg{
-		data:    buildTestCE("evt-panic-cancel", cloudevent.TypeRequestCancel),
+		data:    buildTestCEWithResourceID("evt-panic-cancel", cloudevent.TypeRequestCancel, "res-panic-cancel"),
 		subject: "agent-test.cancel",
 	}
 
@@ -464,4 +734,30 @@ func TestHandleCancelMessage_PanicRecovery(t *testing.T) {
 	}
 	assertAttrExists(t, rec, "panic")
 	assertAttrExists(t, rec, "stack")
+	assertAttr(t, rec, "resource_id", "res-panic-cancel")
+	assertAttr(t, rec, "ce_id", "evt-panic-cancel")
+	assertAttr(t, rec, "ce_type", cloudevent.TypeRequestCancel)
+	assertAttrNotExists(t, rec, "term_error")
+}
+
+// TestHandleCancelMessage_PanicRecovery_TermError verifies the term_error
+// attr on the panic log surfaces a real error (not just a nil placeholder)
+// when the Term resolution call issued from the recover path itself fails.
+func TestHandleCancelMessage_PanicRecovery_TermError(t *testing.T) {
+	ch := &captureHandler{}
+	c := &Client{
+		logger:        slog.New(ch),
+		cancelHandler: func(_ context.Context, _ []byte) error { panic("cancel boom") },
+	}
+
+	msg := &fakeMsg{
+		data:    buildTestCE("evt-panic-cancel-termerr", cloudevent.TypeRequestCancel),
+		subject: "agent-test.cancel",
+		termErr: errors.New("term failed after panic"),
+	}
+
+	c.handleCancelMessage(msg)
+
+	rec := ch.lastRecord()
+	assertAttr(t, rec, "term_error", "term failed after panic")
 }

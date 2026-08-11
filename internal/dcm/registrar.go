@@ -17,13 +17,10 @@ import (
 var ErrNonRetryable = errors.New("non-retryable DCM error")
 
 // registrarPanicRestartDelay bounds how long the supervisor pauses before
-// restarting run() after a recovered panic — long enough to avoid a tight
-// crash loop if the panic is deterministic (e.g. a consistently-panicking
-// dependency), short enough that a one-off panic doesn't meaningfully delay
-// recovery. Deliberately a fixed constant, not derived from
-// InitialBackoff/MaxBackoff: those tune the DCM HTTP registration retry
-// cadence (an expected, normal failure mode), whereas this only fires on the
-// "should never happen" path of a panicking dependency.
+// restarting run() after a recovered panic — avoids a tight crash loop
+// without meaningfully delaying recovery. Deliberately fixed, not derived
+// from InitialBackoff/MaxBackoff, which tune the (expected) DCM HTTP retry
+// cadence rather than this "should never happen" path.
 const registrarPanicRestartDelay = 1 * time.Second
 
 // ServiceTypeLister returns the set of currently advertisable service types
@@ -105,30 +102,24 @@ func (r *Registrar) Start(ctx context.Context) {
 	})
 }
 
-// runSupervised wraps run() in a panic-recovering supervisor loop. An
-// unrecovered panic from run() (e.g. a panicking ServiceTypeLister
-// dependency) must not crash the whole agent process — DCM registration is a
-// background concern and must not be able to take down request routing / the
-// HTTP server with it. Recovering the panic but still
-// letting the goroutine return would only solve half the problem: DCM
-// registration/heartbeating would then be silently, permanently stalled for
-// the rest of the process lifetime with no user-visible symptom besides "DCM
-// never sees this agent again". So on panic, run() is restarted (after
-// registrarPanicRestartDelay) instead of letting the goroutine exit —
-// re-entering run() re-runs the prerequisite wait and re-registers from
-// scratch, which is safe: registration is idempotent per REQ-DCM-080 even if
-// the agent was already registered before the panic.
+// runSupervised wraps run() in a panic-recovering supervisor loop. A panic
+// must not crash the agent process, and must not leave DCM registration
+// permanently stalled either — so run() is restarted after
+// registrarPanicRestartDelay rather than letting the goroutine exit.
+// Re-entering run() is safe: registration is idempotent (REQ-DCM-080).
 func (r *Registrar) runSupervised(ctx context.Context) {
 	defer close(r.done)
+	attempt := 0
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		if r.runRecovering(ctx) {
+		if r.runRecovering(ctx, attempt) {
 			// run() returned normally — only happens on ctx cancellation
 			// (see run()'s own control flow), so the supervisor is done too.
 			return
 		}
+		attempt++
 		select {
 		case <-ctx.Done():
 			return
@@ -139,17 +130,19 @@ func (r *Registrar) runSupervised(ctx context.Context) {
 
 // runRecovering calls run() with panic recovery. Returns true if run()
 // returned normally (no panic), false if a panic was recovered — the caller
-// decides whether/when to restart based on the return value.
-func (r *Registrar) runRecovering(ctx context.Context) (completedNormally bool) {
+// decides whether/when to restart based on the return value. attempt is the
+// zero-based restart count (0 for the initial run), threaded through to
+// run() so its startup log can distinguish a fresh start from a restart.
+func (r *Registrar) runRecovering(ctx context.Context, attempt int) (completedNormally bool) {
 	completedNormally = true
 	defer func() {
 		if rec := recover(); rec != nil {
 			completedNormally = false
 			r.logger.Error("panic in DCM registrar goroutine, restarting",
-				"panic", rec, "stack", string(debug.Stack()))
+				"panic", rec, "stack", string(debug.Stack()), "restart_attempt", attempt+1)
 		}
 	}()
-	r.run(ctx)
+	r.run(ctx, attempt)
 	return completedNormally
 }
 
@@ -173,7 +166,16 @@ func (r *Registrar) AgentID() (string, bool) {
 	return r.agentID, r.registered
 }
 
-func (r *Registrar) run(ctx context.Context) {
+// run executes the registration + heartbeat lifecycle. restartAttempt is 0
+// for the initial start and >0 when re-entered by the supervisor after a
+// recovered panic — logged so operators can distinguish a fresh startup from
+// a post-panic restart purely from the "DCM registrar starting" log line.
+func (r *Registrar) run(ctx context.Context, restartAttempt int) {
+	if restartAttempt > 0 {
+		r.logger.Info("DCM registrar starting", "restart_attempt", restartAttempt)
+	} else {
+		r.logger.Info("DCM registrar starting")
+	}
 	// Prerequisite gate: wait for non-empty service types.
 	// Retries periodically to recover from transient lister errors that return
 	// empty without triggering a notification.
@@ -297,7 +299,9 @@ func (r *Registrar) sendHeartbeat(ctx context.Context) {
 
 	if err := r.client.heartbeat(reqCtx, id, payload); err != nil {
 		r.logger.Warn("heartbeat failed", "error", err)
+		return
 	}
+	r.logger.Debug("heartbeat succeeded", "agent_id", id, "consumer_lag", payload.ConsumerLag)
 }
 
 func (r *Registrar) reRegister(ctx context.Context) {
@@ -313,6 +317,7 @@ func (r *Registrar) reRegister(ctx context.Context) {
 	r.agentID = agentID
 	r.registered = true
 	r.mu.Unlock()
+	r.logger.Info("re-registered with DCM", "agent_id", agentID)
 }
 
 func (r *Registrar) buildPayload() registrationPayload {

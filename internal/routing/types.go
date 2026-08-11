@@ -42,7 +42,6 @@ type Publisher interface {
 // RetryTopicConsumer abstracts retry topic operations for cancel handling.
 type RetryTopicConsumer interface {
 	FetchRetryMessages(ctx context.Context) ([]RetryMessage, error)
-	RepublishToRetry(ctx context.Context, data []byte) error
 }
 
 // RetryMessage wraps a message fetched from the retry topic.
@@ -51,6 +50,12 @@ type RetryMessage struct {
 	ResourceID  string
 	ServiceType string
 	AckFunc     func() error
+	// NakFunc negatively acknowledges this message in place (same JetStream
+	// message, incrementing its delivery count) so it's redelivered later.
+	// MUST be used instead of ack+republish for messages that aren't
+	// cancelled — republishing a fresh copy resets the delivery count and
+	// defeats the MaxDeliver guard (REQ-RCM-270).
+	NakFunc func() error
 }
 
 // CreateResourceRequest is the typed payload for creation forwarding.
@@ -87,6 +92,17 @@ func IsRetryable(err error) bool {
 		return true
 	}
 	return spErr.StatusCode >= 500 || spErr.StatusCode == http.StatusTooManyRequests
+}
+
+// SafeErrorAttrs returns slog key-value attributes describing err without
+// leaking a wrapped SP response body: an *SPResponseError contributes only
+// its HTTP status code, any other error is logged as-is.
+func SafeErrorAttrs(err error) []any {
+	var spErr *SPResponseError
+	if errors.As(err, &spErr) {
+		return []any{"http_status", spErr.StatusCode}
+	}
+	return []any{"error", err}
 }
 
 // ResponseContext holds the common fields shared by all response CE payloads.

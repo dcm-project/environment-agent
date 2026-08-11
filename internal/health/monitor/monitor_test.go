@@ -17,6 +17,50 @@ import (
 	"github.com/dcm-project/environment-agent/internal/provider"
 )
 
+// captureHandler records slog records for assertion.
+type captureHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler            { return h }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.records = append(h.records, r)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureHandler) all() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Record(nil), h.records...)
+}
+
+func findRecord(records []slog.Record, msg string) (slog.Record, bool) {
+	for _, r := range records {
+		if r.Message == msg {
+			return r, true
+		}
+	}
+	return slog.Record{}, false
+}
+
+func recordAttr(rec slog.Record, key string) (slog.Value, bool) {
+	var v slog.Value
+	var found bool
+	rec.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			v, found = a.Value, true
+			return false
+		}
+		return true
+	})
+	return v, found
+}
+
 var _ provider.HealthTracker = (*fakeHealthTracker)(nil)
 
 type fakeHealthTracker struct {
@@ -139,7 +183,7 @@ var _ = Describe("Monitor", Label("unit"), func() {
 				CheckTimeout:     5 * time.Second,
 				FailureThreshold: 3,
 			})
-			m.RegisterProvider("p1", checker, v1alpha1.Unhealthy, false)
+			m.RegisterProvider("p1", checker, "test-service", v1alpha1.Unhealthy, false)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			m.Start(ctx)
@@ -180,7 +224,7 @@ var _ = Describe("Monitor", Label("unit"), func() {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				m.RegisterProvider("p1", slowChecker, v1alpha1.Unhealthy, true)
+				m.RegisterProvider("p1", slowChecker, "test-service", v1alpha1.Unhealthy, true)
 			}()
 
 			// Wait for initialCheck to start
@@ -188,7 +232,7 @@ var _ = Describe("Monitor", Label("unit"), func() {
 
 			// Re-register the same ID with a different checker while initialCheck is in-flight
 			fastChecker := &countingChecker{result: monitor.CheckHealthy}
-			m.RegisterProvider("p1", fastChecker, v1alpha1.Ready, false)
+			m.RegisterProvider("p1", fastChecker, "test-service", v1alpha1.Ready, false)
 
 			// Release the slow checker — its result should be discarded (identity guard)
 			slowChecker.release <- struct{}{}
@@ -227,7 +271,7 @@ var _ = Describe("Monitor", Label("unit"), func() {
 				mu.Unlock()
 			})
 
-			m.RegisterProvider("p1", checker, v1alpha1.Ready, false)
+			m.RegisterProvider("p1", checker, "test-service", v1alpha1.Ready, false)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			m.Start(ctx)
@@ -264,7 +308,7 @@ var _ = Describe("Monitor", Label("unit"), func() {
 				mu.Unlock()
 			})
 
-			m.RegisterProvider("p1", checker, v1alpha1.Ready, true)
+			m.RegisterProvider("p1", checker, "test-service", v1alpha1.Ready, true)
 
 			mu.Lock()
 			Expect(transitions).To(HaveLen(1))
@@ -290,7 +334,7 @@ var _ = Describe("Monitor", Label("unit"), func() {
 				postPanicCalls.Add(1)
 			})
 
-			m.RegisterProvider("p1", checker, v1alpha1.Ready, false)
+			m.RegisterProvider("p1", checker, "test-service", v1alpha1.Ready, false)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			m.Start(ctx)
@@ -318,7 +362,7 @@ var _ = Describe("Monitor", Label("unit"), func() {
 			})
 
 			Expect(func() {
-				m.RegisterProvider("p1", checker, v1alpha1.Ready, true)
+				m.RegisterProvider("p1", checker, "test-service", v1alpha1.Ready, true)
 			}).NotTo(Panic())
 
 			state, ok := ht.GetState("p1")
@@ -341,7 +385,7 @@ var _ = Describe("Monitor", Label("unit"), func() {
 				callCount.Add(1)
 			})
 
-			m.RegisterProvider("p1", checker, v1alpha1.Ready, false)
+			m.RegisterProvider("p1", checker, "test-service", v1alpha1.Ready, false)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			m.Start(ctx)
@@ -357,6 +401,41 @@ var _ = Describe("Monitor", Label("unit"), func() {
 		})
 	})
 
+	Describe("Stop during in-flight periodic check", func() {
+		It("returns promptly instead of waiting for checkTimeout", func() {
+			ht := newFakeHealthTracker()
+			checker := &blockingChecker{
+				entered: make(chan struct{}, 1),
+				release: make(chan struct{}),
+				result:  monitor.CheckHealthy,
+			}
+
+			m := newTestMonitor(ht, config.HealthConfig{
+				CheckInterval:    10 * time.Second,
+				CheckTimeout:     5 * time.Second, // much larger than the Stop() bound below
+				FailureThreshold: 3,
+			})
+			m.RegisterProvider("p1", checker, "test-service", v1alpha1.Unhealthy, false)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel() // deliberately NOT cancelled before Stop(), to reproduce the hang scenario
+			m.Start(ctx)
+
+			Eventually(checker.entered).Should(Receive())
+
+			stopped := make(chan struct{})
+			go func() {
+				defer close(stopped)
+				m.Stop()
+			}()
+
+			Eventually(stopped).WithTimeout(200*time.Millisecond).Should(BeClosed(),
+				"Stop() must cancel in-flight checks via m.stopCtx rather than waiting for checkTimeout")
+
+			close(checker.release)
+		})
+	})
+
 	Describe("Start idempotency", func() {
 		It("only starts one monitoring loop when called twice", func() {
 			ht := newFakeHealthTracker()
@@ -367,7 +446,7 @@ var _ = Describe("Monitor", Label("unit"), func() {
 				CheckTimeout:     5 * time.Second,
 				FailureThreshold: 3,
 			})
-			m.RegisterProvider("p1", checker, v1alpha1.Unhealthy, false)
+			m.RegisterProvider("p1", checker, "test-service", v1alpha1.Unhealthy, false)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			m.Start(ctx)
@@ -382,6 +461,152 @@ var _ = Describe("Monitor", Label("unit"), func() {
 			Consistently(func() int64 {
 				return checker.count.Load()
 			}).WithTimeout(500 * time.Millisecond).WithPolling(50 * time.Millisecond).Should(Equal(int64(1)))
+		})
+	})
+
+	Describe("Health monitoring logging (IT-HMN-190, IT-HMN-191)", func() {
+		It("logs INFO on RegisterProvider and DEBUG per health check", func() {
+			ht := newFakeHealthTracker()
+			checker := &countingChecker{result: monitor.CheckHealthy}
+			ch := &captureHandler{}
+			m := monitor.New(ht, config.HealthConfig{
+				CheckInterval:    50 * time.Millisecond,
+				CheckTimeout:     5 * time.Second,
+				FailureThreshold: 3,
+			}, slog.New(ch))
+
+			m.RegisterProvider("p1", checker, "test-service", v1alpha1.Ready, false)
+
+			registered, ok := findRecord(ch.all(), "provider registered for health monitoring")
+			Expect(ok).To(BeTrue())
+			Expect(registered.Level).To(Equal(slog.LevelInfo))
+			v, ok := recordAttr(registered, "provider_id")
+			Expect(ok).To(BeTrue())
+			Expect(v.String()).To(Equal("p1"))
+			v, ok = recordAttr(registered, "service_type")
+			Expect(ok).To(BeTrue())
+			Expect(v.String()).To(Equal("test-service"))
+			v, ok = recordAttr(registered, "replaced_existing")
+			Expect(ok).To(BeTrue())
+			Expect(v.Bool()).To(BeFalse())
+
+			ctx, cancel := context.WithCancel(context.Background())
+			m.Start(ctx)
+			DeferCleanup(m.Stop)
+			DeferCleanup(cancel)
+
+			Eventually(func() bool {
+				_, ok := findRecord(ch.all(), "health check completed")
+				return ok
+			}).WithTimeout(2 * time.Second).WithPolling(20 * time.Millisecond).Should(BeTrue())
+
+			checkRec, _ := findRecord(ch.all(), "health check completed")
+			Expect(checkRec.Level).To(Equal(slog.LevelDebug))
+			v, _ = recordAttr(checkRec, "provider_id")
+			Expect(v.String()).To(Equal("p1"))
+			v, ok = recordAttr(checkRec, "service_type")
+			Expect(ok).To(BeTrue())
+			Expect(v.String()).To(Equal("test-service"))
+			v, ok = recordAttr(checkRec, "result")
+			Expect(ok).To(BeTrue())
+			Expect(v.Kind()).To(Equal(slog.KindString),
+				"result must be stored as a native string value, not a wrapped HealthCheckResult (Kind=Any), or it will serialize as a raw integer in JSON")
+			Expect(v.String()).To(Equal("healthy"))
+			_, ok = recordAttr(checkRec, "duration")
+			Expect(ok).To(BeTrue())
+		})
+
+		It("logs 'replaced_existing' true when re-registering the same provider ID", func() {
+			ht := newFakeHealthTracker()
+			ch := &captureHandler{}
+			m := monitor.New(ht, config.HealthConfig{
+				CheckInterval:    10 * time.Second,
+				CheckTimeout:     5 * time.Second,
+				FailureThreshold: 3,
+			}, slog.New(ch))
+
+			m.RegisterProvider("p1", &countingChecker{result: monitor.CheckHealthy}, "test-service", v1alpha1.Ready, false)
+			m.RegisterProvider("p1", &countingChecker{result: monitor.CheckHealthy}, "test-service", v1alpha1.Ready, false)
+
+			records := ch.all()
+			var registrations []slog.Record
+			for _, r := range records {
+				if r.Message == "provider registered for health monitoring" {
+					registrations = append(registrations, r)
+				}
+			}
+			Expect(registrations).To(HaveLen(2))
+
+			v, ok := recordAttr(registrations[0], "replaced_existing")
+			Expect(ok).To(BeTrue())
+			Expect(v.Bool()).To(BeFalse())
+
+			v, ok = recordAttr(registrations[1], "replaced_existing")
+			Expect(ok).To(BeTrue())
+			Expect(v.Bool()).To(BeTrue())
+		})
+
+		It("does not log health check completed when the result is discarded (deregistered mid-check)", func() {
+			ht := newFakeHealthTracker()
+			ch := &captureHandler{}
+			checker := &blockingChecker{
+				entered: make(chan struct{}, 1),
+				release: make(chan struct{}),
+				result:  monitor.CheckHealthy,
+			}
+			m := monitor.New(ht, config.HealthConfig{
+				CheckInterval:    10 * time.Second,
+				CheckTimeout:     5 * time.Second,
+				FailureThreshold: 3,
+			}, slog.New(ch))
+			m.RegisterProvider("p1", checker, "test-service", v1alpha1.Unhealthy, false)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			m.Start(ctx)
+			DeferCleanup(m.Stop)
+			DeferCleanup(cancel)
+
+			Eventually(checker.entered).Should(Receive())
+			m.DeregisterProvider("p1")
+			checker.release <- struct{}{}
+
+			Consistently(func() bool {
+				_, ok := findRecord(ch.all(), "health check completed")
+				return ok
+			}).WithTimeout(200*time.Millisecond).WithPolling(20*time.Millisecond).Should(BeFalse(),
+				"the discarded result must not be logged, since it was never applied")
+		})
+
+		It("logs WARN transition parity when the initial check changes state", func() {
+			ht := newFakeHealthTracker()
+			checker := &countingChecker{result: monitor.CheckUnhealthy}
+			ch := &captureHandler{}
+			m := monitor.New(ht, config.HealthConfig{
+				CheckInterval:    10 * time.Second,
+				CheckTimeout:     5 * time.Second,
+				FailureThreshold: 3,
+			}, slog.New(ch))
+
+			m.RegisterProvider("p1", checker, "test-service", v1alpha1.Ready, true)
+
+			rec, ok := findRecord(ch.all(), "provider health transition")
+			Expect(ok).To(BeTrue(), "initial check must log a transition, same as periodic checks")
+			Expect(rec.Level).To(Equal(slog.LevelWarn))
+			v, ok := recordAttr(rec, "service_type")
+			Expect(ok).To(BeTrue())
+			Expect(v.String()).To(Equal("test-service"))
+			v, _ = recordAttr(rec, "from")
+			Expect(v.String()).To(Equal(string(v1alpha1.Ready)))
+			v, _ = recordAttr(rec, "to")
+			Expect(v.String()).To(Equal(string(v1alpha1.Unhealthy)))
+
+			checkRec, ok := findRecord(ch.all(), "health check completed")
+			Expect(ok).To(BeTrue())
+			v, ok = recordAttr(checkRec, "result")
+			Expect(ok).To(BeTrue())
+			Expect(v.Kind()).To(Equal(slog.KindString),
+				"result must be stored as a native string value, not a wrapped HealthCheckResult (Kind=Any), or it will serialize as a raw integer in JSON")
+			Expect(v.String()).To(Equal("unhealthy"))
 		})
 	})
 })

@@ -345,6 +345,7 @@ service type with selection strategies.
 | REQ-SPR-040 | Embedded SP registration MUST be performed in-process without a REST call | MUST | |
 | REQ-SPR-050 | If an embedded SP's service type is already occupied by a persisted external SP registration (from a prior session), the embedded SP registration for that service type MUST be skipped | MUST | |
 | REQ-SPR-051 | When an embedded SP registration is skipped due to slot conflict, the agent MUST log a warning and continue startup without failing; the skipped SP MUST NOT prevent other SPs from registering or the agent from becoming operational (HTTP server listening, messaging system connection initiated, health checks running) | MUST | |
+| REQ-SPR-220 | Successful embedded SP registration MUST be logged at INFO with `service_type`, `provider_id` | MUST | Today only the skip-due-to-conflict case logs; the success path was silent |
 
 #### Requirements — External SP Registration
 
@@ -365,6 +366,8 @@ service type with selection strategies.
 | REQ-SPR-121 | The 409 Conflict response MUST include an error message identifying the conflicting provider name and service type | MUST | |
 | REQ-SPR-130 | If the request body is malformed or fails validation, the agent MUST return 400 Bad Request with RFC 7807 error body | MUST | |
 | REQ-SPR-131 | If the request body passes structural parsing but fails semantic validation (`schema_version` pattern, `endpoint` not a valid URI, `?id=` pattern violation), the agent MUST return 422 Unprocessable Entity with RFC 7807 error body (type=UNPROCESSABLE_ENTITY) | MUST | |
+| REQ-SPR-230 | Successful external SP registration (new registration, not update) MUST be logged at INFO with `service_type`, `provider_id`, `name` | MUST | Domain-level log distinct from the generic HTTP access-log status code |
+| REQ-SPR-240 | External SP registration rejected due to a service-type slot conflict MUST be logged at WARN with `service_type`, `name`, and the conflict error (which identifies the existing slot holder) | MUST | Today only visible as HTTP `status=409` in the generic access log |
 
 #### Requirements — Persistence
 
@@ -374,6 +377,7 @@ service type with selection strategies.
 | REQ-SPR-180 | On startup, the agent MUST load persisted registrations before registering embedded SPs or accepting external ones | MUST | |
 | REQ-SPR-190 | An external SP registered during a prior session MUST retain its service type slot across agent restarts | MUST | |
 | REQ-SPR-181 | If the persistence layer fails to load on startup (corruption, I/O error, schema mismatch), the agent MUST log the error and exit immediately (fail fast) | MUST | |
+| REQ-SPR-250 | On startup, `LoadPersisted` MUST log, at INFO, each restored provider's `name`, `service_type`, and type (embedded/external), plus a final summary count | MUST | Restore was previously silent on success — only conflicts logged |
 
 > **Known limitation (v1alpha1):** When an external SP becomes Unavailable
 > (via health monitoring), its registration is retained in local persistent
@@ -438,13 +442,21 @@ service type with selection strategies.
 - **And** a warning MUST be logged
 - **And** the agent MUST continue starting normally
 
+##### AC-SPR-220: Embedded SP registration success logged
+
+- **Validates:** REQ-SPR-220
+- **Given** `registerEmbeddedType` completes without error
+- **When** the embedded SP is registered
+- **Then** an INFO log MUST be emitted with `service_type`, `provider_id`
+
 ##### AC-SPR-040: External SP registration — success (new)
 
-- **Validates:** REQ-SPR-060, REQ-SPR-100
+- **Validates:** REQ-SPR-060, REQ-SPR-100, REQ-SPR-230
 - **Given** no SP is currently serving service type "database"
 - **When** `POST /api/v1alpha1/providers` is called with `{name: "db-provider", endpoint: "https://sp.example.com:8080", service_type: "database", schema_version: "v1alpha1"}`
 - **Then** the response MUST be 201 Created
 - **And** the response body MUST include server-set fields: `id`, `path`, `create_time`, `update_time`
+- **And** an INFO log MUST be emitted with `service_type`, `provider_id`, `name`
 
 ##### AC-SPR-050: External SP re-registration (idempotent update)
 
@@ -456,11 +468,12 @@ service type with selection strategies.
 
 ##### AC-SPR-060: Service type conflict
 
-- **Validates:** REQ-SPR-120, REQ-SPR-121, REQ-SPR-210
+- **Validates:** REQ-SPR-120, REQ-SPR-121, REQ-SPR-210, REQ-SPR-240
 - **Given** an embedded SP is serving service type "container"
 - **When** an external SP attempts to register for service type "container" with a different name
 - **Then** the response MUST be 409 Conflict
 - **And** the error message MUST identify the conflicting provider
+- **And** a WARN log MUST be emitted with `service_type`, `name`, `error`
 
 ##### AC-SPR-070: Same SP re-registers for same service type (idempotent)
 
@@ -487,6 +500,14 @@ service type with selection strategies.
 - **When** the agent restarts
 - **Then** "db-provider" MUST still hold the "database" service type slot
 - **And** the agent MUST load the persisted registration before processing new registrations
+
+##### AC-SPR-250: Persisted providers restored with identity logged
+
+- **Validates:** REQ-SPR-250
+- **Given** `LoadPersisted` runs at startup with one or more persisted providers
+- **When** each persisted provider is successfully restored
+- **Then** an INFO log MUST be emitted with `name`, `service_type`, `type`
+- **And** a final INFO summary log MUST be emitted with restored/conflict counts
 
 ##### AC-SPR-092: Persisted writes are fsync'd before and after rename
 
@@ -783,6 +804,8 @@ Out of scope: Metrics/observability integration.
 | REQ-HMN-250 | Pod condition updates SHOULD use in-cluster authentication to patch the pod's `status.conditions` | SHOULD | |
 | REQ-HMN-260 | Pod conditions SHOULD be updated only when a health state changes, not on every health check | SHOULD | |
 | REQ-HMN-270 | If the agent cannot update pod conditions (e.g., running outside K8s, missing RBAC), it MUST log a warning and continue all other operations (SP health monitoring, DCM heartbeats, request routing) without interruption | MUST | |
+| REQ-HMN-280 | Each individual SP health-check result MUST be logged at DEBUG with `provider_id`, `service_type` (where available), outcome, and check duration | MUST | High-frequency by design (fires every check interval per provider) — DEBUG, not INFO |
+| REQ-HMN-290 | When a new provider is added to health monitoring (`RegisterProvider`) it MUST be logged at INFO; a state transition detected during the initial check MUST be logged with the same WARN fields a periodic-check transition uses | MUST | Fixes an asymmetry where `RegisterProvider`'s initial check silently skipped the transition log periodic checks emit |
 
 #### Configuration Introduced
 
@@ -963,6 +986,23 @@ Out of scope: Metrics/observability integration.
 - **Then** the agent SHOULD use Pod Readiness Gates to surface the condition
 - **And** SHOULD use in-cluster authentication to patch the pod's `status.conditions`
 
+##### AC-HMN-280: Individual health-check result logged
+
+- **Validates:** REQ-HMN-280
+- **Given** a health check (external HTTP poll or embedded check) completes
+- **When** the result is recorded
+- **Then** a DEBUG log MUST be emitted with `provider_id`, outcome, `duration`
+
+##### AC-HMN-290: New provider registered for monitoring, and initial-check transition logged
+
+- **Validates:** REQ-HMN-290
+- **Given** `RegisterProvider` is called for a new provider
+- **When** it is added to the monitored set
+- **Then** an INFO log MUST be emitted with `provider_id`, `initial_state`
+- **Given** `RegisterProvider`'s initial check detects a state change (`from != to`)
+- **When** the transition is recorded
+- **Then** a WARN log MUST be emitted with `provider_id`, `from`, `to`
+
 #### Dependencies
 
 Depends on Topic 3 (SP Registration & Management).
@@ -1012,6 +1052,7 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 | REQ-DCM-150 | The heartbeat payload MUST include `timestamp` (ISO 8601) and `consumer_lag` (number of unacknowledged messages on the main topic's durable consumer, excluding retry and cancel topics). `timestamp` MUST be strictly greater than the previous heartbeat's `timestamp` | MUST | Generated fresh via `time.Now()` on every send; DCM rejects a heartbeat whose timestamp isn't strictly increasing (control-plane review item #8) |
 | REQ-DCM-160 | The heartbeat interval MUST be configurable | MUST | |
 | REQ-DCM-170 | Heartbeat failures MUST be logged and retried on the next interval without causing the agent to exit | MUST | |
+| REQ-DCM-180 | DCM registrar startup MUST be logged at INFO. Successful heartbeats MUST be logged at DEBUG with `agent_id`, `consumer_lag`. Successful re-registration MUST be logged at INFO with `agent_id` | MUST | Today only failures/retries are logged on these three paths; success was silent |
 
 #### Configuration Introduced
 
@@ -1179,6 +1220,19 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 - **Then** `service_types` MUST include only types backed by SPs in Ready or Unhealthy state
 - **And** MUST NOT include types whose SP is Unavailable
 
+##### AC-DCM-180: Registrar start/stop, heartbeat success, re-registration success logged
+
+- **Validates:** REQ-DCM-180
+- **Given** the registrar starts
+- **When** its goroutine begins running
+- **Then** an INFO log MUST be emitted
+- **Given** a heartbeat succeeds
+- **When** it completes
+- **Then** a DEBUG log MUST be emitted with `agent_id`, `consumer_lag`
+- **Given** re-registration succeeds
+- **When** it completes
+- **Then** an INFO log MUST be emitted with `agent_id`
+
 #### Dependencies
 
 Depends on Topic 3 (SP Registration) and Topic 5 (SP Health Monitoring).
@@ -1260,6 +1314,14 @@ REQ-MSG-051).
 | REQ-MSG-135 | Agent response and health CloudEvents MUST be published via JetStream with a `Nats-Msg-Id` header set to the CloudEvent's own `id`, enabling server-side deduplication if publish is retried | MUST | See REQ-XC-CE-050 |
 | REQ-MSG-140 | Agent response CloudEvents MUST be published to the `dcm.agents.responses` subject without creating a response stream (JetStream routes to the CP-owned `dcm-agent-responses` stream) | MUST | |
 | REQ-MSG-150 | Agent health warning CloudEvents MUST be published to the `dcm.agents.health` subject | MUST | Agent creates `dcm-health` stream for this subject |
+
+#### Requirements — Message Lifecycle Logging
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-MSG-160 | The agent MUST log at INFO when a message is received on the main or cancel subject, including `ce_id`, `ce_type`, `subject`, `stream_seq`, `consumer_seq`, `num_delivered` | MUST | Enables reconstructing receipt of a request from logs alone |
+| REQ-MSG-170 | The agent MUST log the terminal resolution of every consumed message: INFO on successful Ack, WARN on Nak-with-redelivery, including `ce_id`, `ce_type`, `subject` | MUST | Today only Ack/Nak *failures* are logged; the outcome itself was silent |
+| REQ-MSG-180 | The agent MUST log at INFO when messaging setup completes and live consumption begins, and when the messaging client finishes shutting down | MUST | |
 
 #### Configuration Introduced
 
@@ -1396,6 +1458,33 @@ REQ-MSG-051).
 - **Given** a message is consumed from the main topic
 - **When** the routing outcome is finalized (SP response received, retry topic published, or deny list drop)
 - **Then** and only then MUST the message be acknowledged to JetStream
+
+##### AC-MSG-160: Message receipt logged
+
+- **Validates:** REQ-MSG-160
+- **Given** a message arrives on the main or cancel subject
+- **When** the handler begins processing it
+- **Then** an INFO log MUST be emitted with `ce_id`, `ce_type`, `subject`, `stream_seq`, `consumer_seq`, `num_delivered`
+
+##### AC-MSG-170: Message resolution logged
+
+- **Validates:** REQ-MSG-170
+- **Given** a message handler returns nil and Ack succeeds
+- **When** the message is acked
+- **Then** an INFO log MUST be emitted with `ce_id`, `ce_type`, `subject`
+- **Given** a message handler returns an error and NakWithDelay succeeds
+- **When** the message is nacked
+- **Then** a WARN log MUST be emitted with `ce_id`, `ce_type`, `subject`, `error`
+
+##### AC-MSG-180: Messaging ready and stopped logged
+
+- **Validates:** REQ-MSG-180
+- **Given** JetStream setup succeeds and `StartConsuming` runs
+- **When** consumption begins
+- **Then** an INFO log MUST be emitted
+- **Given** `Stop()` completes
+- **When** the messaging client has fully quiesced
+- **Then** an INFO log MUST be emitted
 
 #### Dependencies
 
@@ -1672,6 +1761,10 @@ message, not elapsed time.
 | REQ-RCM-210 | When forwarding a creation or deletion request to an external SP (per REQ-RTE-040, REQ-RTE-050), the agent MUST set an `Idempotency-Key` HTTP header on the request equal to the inbound CloudEvent's `id` attribute | MUST | Enables SP-side event-level dedup; per DD-190, SPs remain responsible for enforcing idempotency — the agent's obligation is limited to forwarding the key |
 | REQ-RCM-220 | The `Idempotency-Key` value forwarded for a given inbound CloudEvent MUST be identical across every delivery attempt of that event — in-line retries (REQ-RTE-110), retry-topic reprocessing (REQ-RCM-030), and JetStream redelivery (REQ-MSG-116) | MUST | Without a stable key, an SP cannot distinguish "same event, retried" from "new event", defeating the purpose of event-level dedup |
 | REQ-RCM-230 | For embedded SPs, the agent MUST make the inbound CloudEvent's `id` available to the in-process call (e.g., via request context or a typed request field) | MUST | Keeps idempotency semantics consistent between embedded and external SPs; embedded SPs are not exempt from REQ-RCM-220 |
+| REQ-RCM-240 | Every CloudEvent publish attempt (success and failure) MUST be logged with `ce_type` and `resource_id` | MUST | Today only publish *failures* are logged, and without `resource_id` |
+| REQ-RCM-250 | Every SP dispatch (create or delete, embedded or external) MUST be logged at INFO on completion with `resource_id`, `service_type`, provider kind (embedded/external), `operation`, and `duration`; failed external dispatches MUST additionally include `http_status`. Request/response bodies MUST NOT be logged | MUST | The forwarder had zero logging; this is the largest blind spot for auditing SP interaction |
+| REQ-RCM-260 | Deny-list drops (create requests for a cancelled resource) and cancel-topic purge/republish actions MUST be logged at INFO with `resource_id` and, for purge, matched/republished counts | MUST | |
+| REQ-RCM-270 | Retry-topic MaxDeliver-exceeded handling MUST log the same structured WARN fields (`resource_id`, `ce_id`, `ce_type`, `subject`, `stream_seq`, `consumer_seq`) that main-topic MaxDeliver handling (REQ-RCM-160) already logs, before terminating the message | MUST | Parity fix — retry-topic terminal handling (REQ-RCM-165) is otherwise less observable than the main-topic path |
 
 #### Configuration — Topic 9
 
@@ -1817,6 +1910,43 @@ message, not elapsed time.
 - **When** the agent forwards the request via in-process call
 - **Then** the embedded SP call MUST receive `"evt-xyz-789"` as the CE id
 
+##### AC-RCM-240: CloudEvent publish outcome logged
+
+- **Validates:** REQ-RCM-240
+- **Given** `publishCE` succeeds
+- **When** the CE is published
+- **Then** an INFO log MUST be emitted with `ce_type`, `resource_id`
+- **Given** `publishCE` fails
+- **When** the publish attempt fails
+- **Then** a WARN log MUST be emitted with `ce_type`, `resource_id`, `error`
+
+##### AC-RCM-250: SP dispatch outcome logged
+
+- **Validates:** REQ-RCM-250
+- **Given** a dispatch to an SP completes, successfully or not
+- **When** `Forwarder.CreateResource`/`DeleteResource` returns
+- **Then** a log MUST be emitted (INFO on success, WARN on failure) with `resource_id`, `service_type`, provider kind, `operation`, `duration`
+- **Given** an external SP dispatch fails with an HTTP error response
+- **When** the failure is logged
+- **Then** `http_status` MUST be included and the response body MUST NOT be included
+
+##### AC-RCM-260: Deny-list drops and cancel purge logged
+
+- **Validates:** REQ-RCM-260
+- **Given** a create request is dropped because its `resource_id` is on the deny list
+- **When** it is dropped
+- **Then** an INFO log MUST be emitted with `resource_id`
+- **Given** `purgeFromRetryTopic` completes
+- **When** it returns
+- **Then** an INFO log MUST be emitted with `resource_id`, `matched`, `republished`
+
+##### AC-RCM-270: Retry-topic MaxDeliver logging parity
+
+- **Validates:** REQ-RCM-270
+- **Given** a retry-topic message exceeds `MaxDeliver`
+- **When** it is about to be terminated
+- **Then** a WARN log MUST be emitted with `resource_id`, `ce_id`, `ce_type`, `subject`, `stream_seq`, `consumer_seq`
+
 #### Dependencies
 
 Depends on Topic 5 (SP Health Monitoring), Topic 7 (Messaging System
@@ -1928,6 +2058,7 @@ Integration), and Topic 8 (Resource Operation Routing).
 |----|-------------|----------|-------|
 | REQ-XC-LOG-010 | Structured logging MUST be used in JSON format with required fields: time (RFC 3339), level, msg. Additional fields (caller, error, component) are OPTIONAL | MUST | |
 | REQ-XC-LOG-020 | Log levels MUST follow the defined convention: ERROR (unrecoverable failures), WARN (recoverable issues), INFO (lifecycle events), DEBUG (detailed data) | MUST | |
+| REQ-XC-LOG-030 | The agent MUST use a single canonical field name for each correlation concept across all log entries: `resource_id`, `ce_id`, `ce_type`, `service_type`, `provider_id`. Log entries MUST NOT use alternate spellings (`resourceId`, `providerID`, `serviceType`, etc.) | MUST | Enables cross-log correlation for auditing a resource's or provider's full lifecycle |
 
 **Log level convention:**
 
@@ -1955,6 +2086,14 @@ Integration), and Topic 8 (Resource Operation Routing).
 - **Then** it MUST use ERROR level
 - **And** recoverable issues MUST use WARN
 - **And** lifecycle events MUST use INFO
+
+##### AC-XC-LOG-030: Canonical correlation field names
+
+- **Validates:** REQ-XC-LOG-030
+- **Given** any log entry includes a resource, CloudEvent, service-type, or provider correlation field
+- **When** the entry is emitted
+- **Then** the field key MUST be one of `resource_id`, `ce_id`, `ce_type`, `service_type`, `provider_id`
+- **And** it MUST NOT use a camelCase variant of any of these keys
 
 ### 5.4 Configuration Management
 

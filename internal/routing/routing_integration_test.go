@@ -45,11 +45,9 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 	BeforeEach(func() {
 		var err error
 		topicName = fmt.Sprintf("agent-test-%s", uuid.New().String()[:8])
-		// Router.TopicName/RetryTopic below use topics.Main/topics.Retry (the
-		// dcm.agent.-prefixed subjects), matching how cmd/environment-agent/
-		// main.go wires the router in production — not the bare topicName —
-		// so a regression accidentally passing the unprefixed base would fail
-		// here too, not just in the messaging package's own tests.
+		// Router.TopicName/RetryTopic below use topics.Main/topics.Retry, the
+		// prefixed subjects main.go wires in production, not the bare
+		// topicName — so a regression passing the unprefixed base fails here too.
 		topics = messaging.DeriveTopicNames(topicName, "")
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second) //nolint:fatcontext
 
@@ -289,6 +287,50 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(data.Error).To(Equal("RETRY_EXHAUSTED"))
 	})
 
+	It("does not leak the SP response body into SP-error logs (leak-check, mirrors forwarder_test.go AC-RCM-250)", func() {
+		registerProvider("leak-sp", "database", "http://mock:8080", "external", v1alpha1.Ready)
+		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "sensitive backend detail"}
+		routingCfg.RetryMaxAttempts = 2
+		routingCfg.RetryBackoff = time.Millisecond
+		routingCfg.RetryMaxBackoff = time.Millisecond
+
+		ch := &captureLogHandler{}
+		router = routing.NewRouter(routing.RouterDeps{
+			Registry: registry, HealthTracker: healthTracker, Store: st, Forwarder: fakeForwarder,
+			Publisher: publisher, RetryConsumer: fakeRetry, DenyList: denyList, Config: routingCfg,
+			Logger: slog.New(ch), AgentName: "agent-prod-1", TopicName: topics.Main, RetryTopic: topics.Retry,
+		})
+
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-leak", "database"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fakeForwarder.CreateCallCount()).To(Equal(2))
+
+		ce := routingtest.ExpectResponseCE(responseSub)
+		Expect(ce.Type()).To(Equal("dcm.agent.error"))
+
+		var spErrRecords []slog.Record
+		for _, rec := range ch.records {
+			if rec.Message == "SP error" || rec.Message == "SP call failed, retrying" {
+				spErrRecords = append(spErrRecords, rec)
+			}
+		}
+		Expect(spErrRecords).NotTo(BeEmpty())
+		for _, rec := range spErrRecords {
+			v, ok := attrValue(rec, "http_status")
+			Expect(ok).To(BeTrue(), "%s log must carry http_status instead of the raw error", rec.Message)
+			Expect(v.Int64()).To(BeEquivalentTo(503))
+			_, hasErrAttr := attrValue(rec, "error")
+			Expect(hasErrAttr).To(BeFalse(), "%s log must not carry a raw error attr for *SPResponseError", rec.Message)
+
+			var body string
+			rec.Attrs(func(a slog.Attr) bool {
+				body += a.Value.String()
+				return true
+			})
+			Expect(body).NotTo(ContainSubstring("sensitive backend detail"))
+		}
+	})
+
 	It("applies retry policy with minimal budget (IT-RTE-080)", func() {
 		registerProvider("retry-sp", "database", "http://mock:8080", "external", v1alpha1.Ready)
 		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "Service Unavailable"}
@@ -401,17 +443,22 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 	It("cancel for request in retry topic removes matching message (IT-RTE-120)", func() {
 		registerProvider("unhealthy-sp", "database", "http://mock:8080", "external", v1alpha1.Unhealthy)
 
-		acked := false
+		acked, nakked := false, false
 		fakeRetry.Messages = []routing.RetryMessage{
 			{Data: routingtest.BuildCreateCE("res-789", "database"), ResourceID: "res-789", ServiceType: "database", AckFunc: func() error { acked = true; return nil }},
-			{Data: routingtest.BuildCreateCE("res-other", "database"), ResourceID: "res-other", ServiceType: "database", AckFunc: func() error { return nil }},
+			{
+				Data: routingtest.BuildCreateCE("res-other", "database"), ResourceID: "res-other", ServiceType: "database",
+				AckFunc: func() error { return fmt.Errorf("non-matching message must be Nak'd, not acked") },
+				NakFunc: func() error { nakked = true; return nil },
+			},
 		}
 		setupDefaultRouter()
 
 		err := router.HandleCancel(ctx, routingtest.BuildCancelCE("res-789", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(acked).To(BeTrue())
-		Expect(fakeRetry.Republished).To(HaveLen(1))
+		Expect(nakked).To(BeTrue(),
+			"non-matching retry message must be Nak'd in place, not acked+republished (would reset MaxDeliver count, REQ-RCM-270)")
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
 		Expect(denyList.Contains("res-789")).To(BeTrue())
 
@@ -642,5 +689,85 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		err := router.HandleRequest(shortCtx, routingtest.BuildCreateCE("res-ctx-deadline", "database"))
 		Expect(err).To(MatchError(context.DeadlineExceeded))
 		routingtest.ExpectNoResponseCE(responseSub, 100*time.Millisecond)
+	})
+
+	It("uses only canonical snake_case correlation field names across a full retry-then-succeed lifecycle (IT-XC-LOG-030)", func() {
+		providerID := uuid.New().String()
+		Expect(registry.Claim("canon-sp", "database")).To(Succeed())
+		Expect(st.Save(ctx, store.StoredProvider{
+			ID: providerID, Name: "canon-sp", Endpoint: "http://mock:8080", ServiceType: "database",
+			SchemaVersion: "v1alpha1", Type: "external", CreateTime: time.Now(), UpdateTime: time.Now(),
+		})).To(Succeed())
+		healthTracker.SetState(providerID, v1alpha1.Ready, time.Now())
+
+		// One retryable failure then success, so both the failure-path
+		// (SP error / SP call failed, retrying) and success-path (SP
+		// dispatch completed / published CE) log sites are exercised.
+		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "Service Unavailable"}
+		routingCfg.RetryMaxAttempts = 3
+		routingCfg.RetryBackoff = 20 * time.Millisecond
+		routingCfg.RetryMaxBackoff = 20 * time.Millisecond
+
+		ch := &captureLogHandler{}
+		router = routing.NewRouter(routing.RouterDeps{
+			Registry: registry, HealthTracker: healthTracker, Store: st, Forwarder: fakeForwarder,
+			Publisher: publisher, RetryConsumer: fakeRetry, DenyList: denyList, Config: routingCfg,
+			Logger: slog.New(ch), AgentName: "agent-prod-1", TopicName: topics.Main, RetryTopic: topics.Retry,
+		})
+
+		const resourceID = "res-canon-log"
+		createCE := routingtest.BuildCreateCE(resourceID, "database")
+		var envelope struct{ ID string }
+		Expect(json.Unmarshal(createCE, &envelope)).To(Succeed())
+		ceID := envelope.ID
+
+		go func() {
+			defer GinkgoRecover()
+			time.Sleep(5 * time.Millisecond)
+			fakeForwarder.SetCreateErr(nil)
+		}()
+		Expect(router.HandleRequest(ctx, createCE)).To(Succeed())
+		Expect(fakeForwarder.CreateCallCount()).To(BeNumerically(">=", 2))
+
+		ce := routingtest.ExpectResponseCE(responseSub)
+		Expect(ce.Type()).To(Equal("dcm.agent.creation-acknowledged"))
+
+		records := ch.all()
+		Expect(records).NotTo(BeEmpty())
+
+		disallowed := []string{"resourceId", "resourceID", "ceId", "ceID", "serviceType", "providerId", "providerID"}
+		found := map[string]bool{}
+		for _, rec := range records {
+			rec.Attrs(func(a slog.Attr) bool {
+				for _, bad := range disallowed {
+					Expect(a.Key).NotTo(Equal(bad),
+						"log %q uses non-canonical key %q instead of a snake_case correlation field", rec.Message, bad)
+				}
+				switch a.Key {
+				case "resource_id":
+					if a.Value.String() == resourceID {
+						found["resource_id"] = true
+					}
+				case "ce_id":
+					if a.Value.String() == ceID {
+						found["ce_id"] = true
+					}
+				case "service_type":
+					if a.Value.String() == "database" {
+						found["service_type"] = true
+					}
+				case "provider_id":
+					if a.Value.String() == providerID {
+						found["provider_id"] = true
+					}
+				case "ce_type":
+					found["ce_type"] = true
+				}
+				return true
+			})
+		}
+		for _, key := range []string{"resource_id", "ce_id", "ce_type", "service_type", "provider_id"} {
+			Expect(found[key]).To(BeTrue(), "expected at least one log record with canonical field %q populated with the expected value", key)
+		}
 	})
 })

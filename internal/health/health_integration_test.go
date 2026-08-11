@@ -204,12 +204,9 @@ var _ = Describe("Health Service Integration", Label("integration"), func() {
 
 			slices.Sort(durations)
 			p99 := durations[98]
-			// 150ms (not the originally-intended ~50ms) to absorb CI/sandbox
-			// CPU contention noise on real HTTP round trips — this test's
-			// purpose (AC-HLT-050) is confirming the handler serves from
-			// in-memory state with no blocking I/O, not enforcing a strict
-			// latency SLA, so a generous bound still catches a real
-			// regression (e.g. an accidental blocking call) without flaking.
+			// 150ms absorbs CI/sandbox CPU contention noise; this test
+			// (AC-HLT-050) only needs to catch a real regression like an
+			// accidental blocking call, not enforce a strict latency SLA.
 			Expect(p99).To(BeNumerically("<", 150*time.Millisecond),
 				"p99 response time must be below 150ms, got %v", p99)
 

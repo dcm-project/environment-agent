@@ -32,11 +32,11 @@ go.work.sum
 .idea/
 # .vscode/
 
-.ai/
+.ai/*
 
-!.ai/specifications/
+!.ai/specs/
 !.ai/decisions/
-!.ai/tests/
+!.ai/test-plans/
 
 .cursor/*
 !.cursor/rules

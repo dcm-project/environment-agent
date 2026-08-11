@@ -137,6 +137,9 @@ var _ = Describe("Retry/Cancel Startup", Label("integration"), func() {
 		info, err := cons.Info(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(info.NumPending + uint64(info.NumAckPending)).To(BeNumerically(">", 0))
+
+		// Drain summary logged for auditability.
+		Expect(logBuf.String()).To(ContainSubstring("drained retry topic on restart"))
 	})
 
 	It("drains cancel topic into deny list, filters main AND retry (IT-RCM-070)", func() {
@@ -178,5 +181,11 @@ var _ = Describe("Retry/Cancel Startup", Label("integration"), func() {
 		// Deny list must be populated
 		Expect(denyList.Contains("res-456")).To(BeTrue())
 		Expect(denyList.Contains("res-789")).To(BeTrue())
+
+		// Drain summaries logged for each phase (cancel, main, retry).
+		logged := logBuf.String()
+		Expect(logged).To(ContainSubstring("drained cancel topic on restart"))
+		Expect(logged).To(ContainSubstring("drained main topic on restart"))
+		Expect(logged).To(ContainSubstring("drained retry topic on restart"))
 	})
 })

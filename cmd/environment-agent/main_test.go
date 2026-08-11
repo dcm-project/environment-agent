@@ -33,17 +33,13 @@ var _ = Describe("run", Label("unit"), func() {
 		Expect(run(ctx)).To(Equal(0))
 	})
 
-	// Fail-fast-on-corrupt-persistence was previously tested only at the
-	// ProviderService.LoadPersisted() unit level, never through run()
-	// itself — the actual composition-root entry point — to prove the
-	// HTTP server never starts serving. run() calls net.Listen before
-	// LoadPersisted, so the TCP port is briefly bound even though Serve()
-	// never runs; this test proves that window never becomes observable
-	// to a client (AC-SPR-109).
+	// run() calls net.Listen before LoadPersisted, so the TCP port is
+	// briefly bound even though Serve() never runs on corrupt persisted
+	// data; this test proves that window never becomes observable to a
+	// client (AC-SPR-109).
 	It("fails fast on corrupt persisted data without ever serving HTTP (IT-SPR-171)", func() {
-		// Reserve a free port synchronously so we know the exact address to
-		// probe after run() returns — run() does its own net.Listen
-		// internally, so we can't get the address from it directly.
+		// Reserve a free port synchronously to know the exact address to
+		// probe after run() returns (run() does its own net.Listen).
 		probeLn, err := net.Listen("tcp", "127.0.0.1:0")
 		Expect(err).NotTo(HaveOccurred())
 		addr := probeLn.Addr().String()

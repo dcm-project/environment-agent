@@ -98,12 +98,9 @@ type ServerConfig struct {
 
 // Load parses configuration from environment variables, optionally merging
 // in lower-precedence values from a file named by AGENT_CONFIG_FILE
-// (REQ-XC-CFG-010). Real process environment variables always take
-// precedence over file-sourced values; file values only fill in keys the
-// environment doesn't already set. Deliberately does NOT call os.Setenv —
-// merging happens in a local map passed via env.Options, so Load has no
-// process-wide side effects (safe to call repeatedly, safe under parallel
-// tests).
+// (REQ-XC-CFG-010). Real env vars always take precedence. Merging happens in
+// a local map rather than via os.Setenv, so Load has no process-wide side
+// effects.
 func Load() (*Config, error) {
 	envMap := env.ToMap(os.Environ())
 
@@ -127,12 +124,9 @@ func Load() (*Config, error) {
 }
 
 // loadConfigFile parses a minimal .env-style file: one KEY=VALUE pair per
-// line, blank lines and '#'-prefixed comments ignored. Keys are expected to
-// be the same environment variable names used by Config's struct tags (e.g.
-// AGENT_SERVER_ADDRESS) — deliberately not the dotted "config key" names
-// from the spec's consolidated reference table, to avoid maintaining a
-// separate name-mapping table that could drift from the struct tags
-// (DD-330).
+// line, blank lines and '#'-prefixed comments ignored. Keys must match
+// Config's struct tags (e.g. AGENT_SERVER_ADDRESS), not the spec's dotted
+// config-key names, to avoid a name-mapping table that could drift (DD-330).
 func loadConfigFile(path string) (map[string]string, error) {
 	f, err := os.Open(path)
 	if err != nil {

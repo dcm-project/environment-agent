@@ -154,24 +154,15 @@ func validateStoredProvider(p *StoredProvider) error {
 	return nil
 }
 
-// writeFile persists providers durably: it fsyncs the temp file's data
-// before renaming it into place, then fsyncs the parent directory so the
-// rename's directory-entry update is itself durable. Without both fsyncs, a
-// crash/power-loss between write and OS flush can corrupt or lose
-// providers.json despite the atomic-rename pattern, undermining REQ-SPR-170's
-// "survives restart" guarantee.
+// writeFile persists providers durably: it fsyncs the temp file before
+// renaming it into place, then fsyncs the parent directory so the rename
+// itself survives a crash (REQ-SPR-170).
 //
-// Once os.Rename succeeds, the write is committed: the new data is already
-// visible to any reader of f.path. Errors from the directory-fsync step that
-// follows are therefore reported (logged) but NOT returned — returning them
-// would make Save/Delete report a failure for a write that already actually
-// happened, and callers (service.ProviderService) treat any Save/Delete
-// error as "not persisted", rolling back in-memory registry/health state to
-// match. Doing that after a successful rename would desync the in-memory
-// registry from the store, which the disk now disagrees with (violating the
-// slot ownership invariant). The directory fsync is defense-in-depth for a
-// narrow crash window right after rename, not the point at which the data
-// itself is committed.
+// Once os.Rename succeeds the write is committed. The directory-fsync error
+// that follows is therefore logged, not returned: returning it would make
+// callers (service.ProviderService) roll back in-memory state for a write
+// that already happened, desyncing the registry from a store that disk now
+// agrees with.
 func (f *FileStore) writeFile(providers []StoredProvider) error {
 	data, err := json.MarshalIndent(providers, "", "  ")
 	if err != nil {

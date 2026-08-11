@@ -36,7 +36,7 @@ func ResolveProvider(
 	}
 
 	if sp.ID == "" {
-		logger.Error("provider has empty ID (data corruption)", "name", providerName, "serviceType", serviceType)
+		logger.Error("provider has empty ID (data corruption)", "name", providerName, "service_type", serviceType)
 		return sp, v1alpha1.Unavailable, true, nil
 	}
 

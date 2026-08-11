@@ -20,12 +20,9 @@ import (
 	"github.com/dcm-project/environment-agent/internal/routing/routingtest"
 )
 
-// Note: idempotency-key forwarding on the *main-topic* consume path
-// (formerly IT-RCM-120/130/150) now lives in messaging.Client + router.HandleRequest,
-// since retry.Processor no longer has its own main-topic consume loop (dead
-// code removed). Those cases are covered in
+// Idempotency-key forwarding on the main-topic consume path is covered in
 // internal/messaging/client_integration_test.go. Only the retry-topic
-// reprocessing case (IT-RCM-140, via ProcessOnTransition) remains here.
+// reprocessing case (IT-RCM-140, via ProcessOnTransition) belongs here.
 var _ = Describe("Idempotency-Key Forwarding", Label("integration"), func() {
 	var (
 		ctx         context.Context

@@ -21,13 +21,9 @@ import (
 	"github.com/dcm-project/environment-agent/internal/routing/routingtest"
 )
 
-// Note: handler-deadline enforcement on the *main-topic* consume path
-// (formerly IT-RCM-100/IT-RCM-110) now lives in messaging.Client.handleMainMessage
-// (HandlerTimeout wraps the ctx passed to the router), since retry.Processor
-// no longer has its own main-topic consume loop (dead code removed — see
-// ProcessorConfig doc comment). Those cases are covered in
+// Handler-deadline enforcement on the main-topic consume path is covered in
 // internal/messaging/client_integration_test.go. Only the transition-path
-// case (IT-RCM-115, via ProcessOnTransition) remains here.
+// case (IT-RCM-115, via ProcessOnTransition) belongs here.
 var _ = Describe("Handler Processing Deadline", Label("integration"), func() {
 	var (
 		ctx       context.Context

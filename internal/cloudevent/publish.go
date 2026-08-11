@@ -12,12 +12,9 @@ import (
 // passing the CE's own id as the NATS message ID (JetStream dedup, F34). The
 // publishFn parameter avoids defining a Publisher interface in this package.
 //
-// NOTE: each call generates a fresh CE id (see NewCloudEvent), so calling
-// PublishCE again after a failed attempt does NOT dedupe against the first
-// attempt — it produces a distinct Nats-Msg-Id. There is no publish-retry
-// today; if one is added, it must retry PublishWithMsgID directly with the
-// already-built (subject, id, bytes) rather than re-invoking PublishCE, or
-// dedup will silently not apply.
+// Each call generates a fresh CE id, so a caller retrying a failed publish
+// must retry PublishWithMsgID directly with the already-built id/bytes, not
+// re-invoke PublishCE, or dedup won't apply.
 func PublishCE(ctx context.Context, publishFn func(context.Context, string, string, []byte) error, subject, agentName, ceType string, data any) error {
 	event, err := NewCloudEvent(agentName, ceType)
 	if err != nil {

@@ -328,8 +328,6 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 		})
 
 		It("sets embedded SP to Unhealthy when immediate check reports unhealthy (IT-HMN-090)", func() {
-			// This requires an embedded SP health checker that can report unhealthy.
-			// Currently RegisterEmbedded hardcodes Ready — this test will be RED.
 			GinkgoT().Setenv("AGENT_EMBEDDED_SPS", "container")
 			GinkgoT().Setenv("AGENT_EMBEDDED_SP_CONTAINER_HEALTH", "unhealthy")
 
@@ -383,7 +381,6 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 			Eventually(func() (v1alpha1.ProviderStatus, error) {
 				return tryGetProviderStatus(baseURL, "dcm-svc")
 			}).WithTimeout(3 * time.Second).WithPolling(50 * time.Millisecond).Should(Equal(v1alpha1.Unavailable))
-			// GREEN phase: also assert DCM received POST without this service type
 		})
 
 		It("re-adds service type and processes retry topic on recovery (IT-HMN-120)", func() {
@@ -415,7 +412,6 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 			Eventually(func() (v1alpha1.ProviderStatus, error) {
 				return tryGetProviderStatus(baseURL, "recover-svc")
 			}).WithTimeout(3 * time.Second).WithPolling(50 * time.Millisecond).Should(Equal(v1alpha1.Ready))
-			// GREEN phase: also assert DCM received updated registration and retry topic was processed
 		})
 	})
 
@@ -440,7 +436,6 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 				return t != nil && t.After(afterRegistration), nil
 			}).WithTimeout(2*time.Second).WithPolling(50*time.Millisecond).Should(BeTrue(),
 				"last_check_time must be after registration, proving monitor ran")
-			// GREEN phase: also assert dcm.agent.health.service-type-degraded CE published to NATS
 		})
 
 		It("publishes service-type-unavailable CloudEvent on Unavailable transition (IT-HMN-135)", func() {
@@ -458,7 +453,6 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 			Eventually(func() (v1alpha1.ProviderStatus, error) {
 				return tryGetProviderStatus(baseURL, "ce-unavail-svc")
 			}).WithTimeout(3 * time.Second).WithPolling(50 * time.Millisecond).Should(Equal(v1alpha1.Unavailable))
-			// GREEN phase: assert dcm.agent.health.service-type-unavailable CE published to NATS
 		})
 	})
 
@@ -484,7 +478,6 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 				return t != nil && t.After(afterRegistration), nil
 			}).WithTimeout(2*time.Second).WithPolling(50*time.Millisecond).Should(BeTrue(),
 				"last_check_time must be after registration, proving monitor ran")
-			// GREEN phase: assert pod condition patched with status=False, reason=Unhealthy
 		})
 
 		It("continues normally when pod condition update fails (IT-HMN-150)", func() {
@@ -532,7 +525,6 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 			Eventually(func() (v1alpha1.ProviderStatus, error) {
 				return tryGetProviderStatus(baseURL, "gate-svc")
 			}).WithTimeout(2 * time.Second).WithPolling(50 * time.Millisecond).Should(Equal(v1alpha1.Ready))
-			// GREEN phase: assert Pod Readiness Gates are used with in-cluster auth
 		})
 	})
 
@@ -657,7 +649,6 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(status).To(Equal(v1alpha1.Unhealthy))
 			}).WithTimeout(3 * time.Second).WithPolling(50 * time.Millisecond).Should(Succeed())
-			// GREEN phase: assert service type re-added to DCM and retry topic NOT processed
 		})
 	})
 })

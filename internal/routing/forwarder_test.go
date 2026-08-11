@@ -3,8 +3,10 @@ package routing_test
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -12,6 +14,51 @@ import (
 	"github.com/dcm-project/environment-agent/internal/provider/store"
 	"github.com/dcm-project/environment-agent/internal/routing"
 )
+
+// captureLogHandler records slog records for assertion.
+type captureLogHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *captureLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureLogHandler) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *captureLogHandler) WithGroup(string) slog.Handler            { return h }
+func (h *captureLogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.records = append(h.records, r)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureLogHandler) last() slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.records[len(h.records)-1]
+}
+
+// all returns a snapshot of every record captured so far, so callers can
+// scan the full dispatch log sequence rather than just the final entry.
+func (h *captureLogHandler) all() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]slog.Record, len(h.records))
+	copy(out, h.records)
+	return out
+}
+
+func attrValue(rec slog.Record, key string) (slog.Value, bool) {
+	var v slog.Value
+	var found bool
+	rec.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			v, found = a.Value, true
+			return false
+		}
+		return true
+	})
+	return v, found
+}
 
 var _ = Describe("Forwarder", Label("unit"), func() {
 	Describe("DELETE URL construction", func() {
@@ -249,6 +296,102 @@ var _ = Describe("Forwarder", Label("unit"), func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(receivedReq.ResourceID).To(Equal("res-2"))
+		})
+	})
+
+	Describe("dispatch outcome logging (AC-RCM-250)", func() {
+		var (
+			ch  *captureLogHandler
+			fwd *routing.Forwarder
+		)
+
+		BeforeEach(func() {
+			ch = &captureLogHandler{}
+		})
+
+		It("logs INFO with resource_id, service_type, provider_kind, operation, duration on external success", func() {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+			defer server.Close()
+			fwd = routing.NewForwarder(routing.ForwarderConfig{HTTPClient: server.Client(), Logger: slog.New(ch)})
+
+			err := fwd.CreateResource(context.Background(), server.URL, false, routing.CreateResourceRequest{
+				ResourceID: "res-log-1", ServiceType: "db", Spec: json.RawMessage(`{}`), EventID: "e",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			rec := ch.last()
+			Expect(rec.Message).To(Equal("SP dispatch completed"))
+			Expect(rec.Level).To(Equal(slog.LevelInfo))
+			v, ok := attrValue(rec, "resource_id")
+			Expect(ok).To(BeTrue())
+			Expect(v.String()).To(Equal("res-log-1"))
+			v, _ = attrValue(rec, "service_type")
+			Expect(v.String()).To(Equal("db"))
+			v, _ = attrValue(rec, "operation")
+			Expect(v.String()).To(Equal("create"))
+			v, _ = attrValue(rec, "provider_kind")
+			Expect(v.String()).To(Equal("external"))
+			_, ok = attrValue(rec, "duration")
+			Expect(ok).To(BeTrue())
+		})
+
+		It("logs WARN with http_status on external failure, without leaking the response body", func() {
+			const sensitiveBody = "sensitive backend detail"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(sensitiveBody))
+			}))
+			defer server.Close()
+			fwd = routing.NewForwarder(routing.ForwarderConfig{HTTPClient: server.Client(), Logger: slog.New(ch)})
+
+			err := fwd.DeleteResource(context.Background(), server.URL, false, routing.DeleteResourceRequest{
+				ResourceID: "res-log-2", ServiceType: "db", EventID: "e",
+			})
+			Expect(err).To(HaveOccurred())
+
+			rec := ch.last()
+			Expect(rec.Message).To(Equal("SP dispatch failed"))
+			Expect(rec.Level).To(Equal(slog.LevelWarn))
+			v, _ := attrValue(rec, "operation")
+			Expect(v.String()).To(Equal("delete"))
+			v, ok := attrValue(rec, "http_status")
+			Expect(ok).To(BeTrue())
+			Expect(v.Int64()).To(BeEquivalentTo(http.StatusServiceUnavailable))
+
+			// Scan every captured record (not just the last) and every attribute
+			// on each record (not just known keys), plus the message text, so a
+			// leak via an earlier log call or an unexpected attribute key is
+			// still caught.
+			for _, r := range ch.all() {
+				Expect(r.Message).NotTo(ContainSubstring(sensitiveBody),
+					"record message must not leak the SP response body")
+				r.Attrs(func(a slog.Attr) bool {
+					Expect(a.Value.String()).NotTo(ContainSubstring(sensitiveBody),
+						"attribute %q must not leak the SP response body", a.Key)
+					return true
+				})
+			}
+		})
+
+		It("logs embedded dispatch outcome with provider_kind=embedded and no http_status", func() {
+			handler := &fakeEmbeddedHandler{
+				createFn: func(_ context.Context, _ routing.CreateResourceRequest) error { return nil },
+			}
+			fwd = routing.NewForwarder(routing.ForwarderConfig{
+				Embedded: map[string]routing.EmbeddedHandler{"db": handler},
+				Logger:   slog.New(ch),
+			})
+
+			err := fwd.CreateResource(context.Background(), "", true, routing.CreateResourceRequest{
+				ResourceID: "res-log-3", ServiceType: "db", Spec: json.RawMessage(`{}`), EventID: "e",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			rec := ch.last()
+			v, _ := attrValue(rec, "provider_kind")
+			Expect(v.String()).To(Equal("embedded"))
+			_, ok := attrValue(rec, "http_status")
+			Expect(ok).To(BeFalse())
 		})
 	})
 

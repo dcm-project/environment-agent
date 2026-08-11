@@ -63,7 +63,7 @@ func (p *CEPublisher) OnTransition(ctx context.Context, providerID string, _, to
 
 	sp, err := p.store.GetByID(ctx, providerID)
 	if err != nil || sp == nil {
-		p.logger.Warn("failed to resolve provider for health CE", "providerID", providerID, "error", err)
+		p.logger.Warn("failed to resolve provider for health CE", "provider_id", providerID, "error", err)
 		return
 	}
 
@@ -76,6 +76,13 @@ func (p *CEPublisher) OnTransition(ctx context.Context, providerID string, _, to
 		AffectedProvider: sp.Name,
 	}
 	if err := cloudevent.PublishCE(ctx, p.publisher.PublishWithMsgID, cloudevent.SubjectHealth, p.agentName, ceType, data); err != nil {
-		p.logger.Warn("failed to publish health CE", "type", ceType, "providerID", providerID, "error", err)
+		p.logger.Warn("failed to publish health CE", "ce_type", ceType, "provider_id", providerID, "service_type", sp.ServiceType, "error", err)
+		return
 	}
+	if sp.ServiceType == "" {
+		p.logger.Warn("health CE published with missing service_type on provider record",
+			"ce_type", ceType, "provider_id", providerID, "reason", reason)
+		return
+	}
+	p.logger.Info("health CE published", "ce_type", ceType, "provider_id", providerID, "service_type", sp.ServiceType, "reason", reason)
 }

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/dcm-project/environment-agent/internal/provider/store"
 )
@@ -57,17 +59,53 @@ func NewForwarder(cfg ForwarderConfig) *Forwarder {
 }
 
 func (f *Forwarder) CreateResource(ctx context.Context, endpoint string, embedded bool, req CreateResourceRequest) error {
+	start := time.Now()
+	var err error
 	if embedded {
-		return f.createEmbedded(ctx, req)
+		err = f.createEmbedded(ctx, req)
+	} else {
+		err = f.createExternal(ctx, endpoint, req)
 	}
-	return f.createExternal(ctx, endpoint, req)
+	f.logDispatch("create", req.ResourceID, req.ServiceType, req.EventID, embedded, time.Since(start), err)
+	return err
 }
 
 func (f *Forwarder) DeleteResource(ctx context.Context, endpoint string, embedded bool, req DeleteResourceRequest) error {
+	start := time.Now()
+	var err error
 	if embedded {
-		return f.deleteEmbedded(ctx, req)
+		err = f.deleteEmbedded(ctx, req)
+	} else {
+		err = f.deleteExternal(ctx, endpoint, req)
 	}
-	return f.deleteExternal(ctx, endpoint, req)
+	f.logDispatch("delete", req.ResourceID, req.ServiceType, req.EventID, embedded, time.Since(start), err)
+	return err
+}
+
+// logDispatch logs the outcome of a single SP dispatch. It never includes
+// request specs or response bodies — only correlation and timing metadata.
+func (f *Forwarder) logDispatch(operation, resourceID, serviceType, ceID string, embedded bool, duration time.Duration, err error) {
+	kind := "external"
+	if embedded {
+		kind = "embedded"
+	}
+	attrs := []any{
+		"resource_id", resourceID, "service_type", serviceType, "ce_id", ceID,
+		"operation", operation, "provider_kind", kind, "duration", duration,
+	}
+	if err == nil {
+		f.logger.Info("SP dispatch completed", attrs...)
+		return
+	}
+	// SPResponseError.Message may embed the raw SP response body (see
+	// doRequest); log only the status code for it, never the error text,
+	// to avoid leaking response bodies into logs.
+	var spErr *SPResponseError
+	if errors.As(err, &spErr) {
+		f.logger.Warn("SP dispatch failed", append(attrs, "http_status", spErr.StatusCode)...)
+		return
+	}
+	f.logger.Warn("SP dispatch failed", append(attrs, "error", err)...)
 }
 
 func (f *Forwarder) createEmbedded(ctx context.Context, req CreateResourceRequest) error {

@@ -145,7 +145,6 @@ func waitForExit(cmd *exec.Cmd, timeout time.Duration) error {
 }
 
 var _ = Describe("HTTP Server Graceful Shutdown", func() {
-
 	It("drains in-flight requests on SIGTERM and exits 0 (IT-HTTP-030)", func() {
 		cmd, port := startAgent()
 		DeferCleanup(func() { cmd.Process.Kill() })

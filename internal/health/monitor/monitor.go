@@ -12,8 +12,9 @@ import (
 )
 
 type providerEntry struct {
-	sm      *StateMachine
-	checker Checker
+	sm          *StateMachine
+	checker     Checker
+	serviceType string
 }
 
 // TransitionFunc is called when a provider's health state changes.
@@ -76,20 +77,25 @@ func (m *Monitor) Stop() {
 
 // RegisterProvider adds a provider to be monitored.
 // If initialCheck is true, performs an immediate health check (for embedded SPs).
-func (m *Monitor) RegisterProvider(id string, checker Checker, initialState v1alpha1.ProviderStatus, initialCheck bool) {
+func (m *Monitor) RegisterProvider(id string, checker Checker, serviceType string, initialState v1alpha1.ProviderStatus, initialCheck bool) {
 	m.mu.Lock()
 	if m.stopped {
 		m.mu.Unlock()
 		return
 	}
+	_, existed := m.providers[id]
 	sm := NewStateMachine(m.failureThreshold, initialState)
-	m.providers[id] = &providerEntry{sm: sm, checker: checker}
+	m.providers[id] = &providerEntry{sm: sm, checker: checker, serviceType: serviceType}
 	m.mu.Unlock()
+	m.logger.Info("provider registered for health monitoring",
+		"provider_id", id, "service_type", serviceType, "initial_state", initialState, "replaced_existing", existed)
 
 	if initialCheck {
+		start := time.Now()
 		checkCtx, cancel := context.WithTimeout(m.stopCtx, m.checkTimeout)
 		result := checker.Check(checkCtx)
 		cancel()
+		duration := time.Since(start)
 
 		var (
 			cb           TransitionFunc
@@ -102,9 +108,18 @@ func (m *Monitor) RegisterProvider(id string, checker Checker, initialState v1al
 			if entry := m.providers[id]; entry != nil && entry.sm == sm {
 				from, to = sm.RecordResult(result)
 				m.healthTracker.SetState(id, to, time.Now().UTC())
-				if from != to && m.onTransition != nil {
-					cb = m.onTransition
-					transitionID = id
+				m.logger.Debug("health check completed",
+					"provider_id", id, "service_type", serviceType, "result", result.String(), "duration", duration)
+				if from != to {
+					// Parity with checkProvider's periodic-check transition log
+					// (REQ-HMN-290): the initial check can also change state
+					// (e.g. an embedded SP reporting Unhealthy immediately).
+					m.logger.Warn("provider health transition",
+						"provider_id", id, "service_type", serviceType, "from", from, "to", to)
+					if m.onTransition != nil {
+						cb = m.onTransition
+						transitionID = id
+					}
 				}
 			}
 		}
@@ -144,7 +159,7 @@ func (m *Monitor) run(ctx context.Context) {
 	defer m.wg.Done()
 	ticker := time.NewTicker(m.checkInterval)
 	defer ticker.Stop()
-	m.checkAll(ctx)
+	m.checkAll()
 	for {
 		select {
 		case <-ctx.Done():
@@ -152,22 +167,23 @@ func (m *Monitor) run(ctx context.Context) {
 		case <-m.stopCtx.Done():
 			return
 		case <-ticker.C:
-			m.checkAll(ctx)
+			m.checkAll()
 		}
 	}
 }
 
 type providerSnapshot struct {
-	id      string
-	checker Checker
-	sm      *StateMachine
+	id          string
+	checker     Checker
+	sm          *StateMachine
+	serviceType string
 }
 
-func (m *Monitor) checkAll(ctx context.Context) {
+func (m *Monitor) checkAll() {
 	m.mu.Lock()
 	snap := make([]providerSnapshot, 0, len(m.providers))
 	for id, entry := range m.providers {
-		snap = append(snap, providerSnapshot{id: id, checker: entry.checker, sm: entry.sm})
+		snap = append(snap, providerSnapshot{id: id, checker: entry.checker, sm: entry.sm, serviceType: entry.serviceType})
 	}
 	m.mu.Unlock()
 
@@ -176,16 +192,20 @@ func (m *Monitor) checkAll(ctx context.Context) {
 		wg.Add(1)
 		go func(p providerSnapshot) {
 			defer wg.Done()
-			m.checkProvider(ctx, p)
+			m.checkProvider(p)
 		}(p)
 	}
 	wg.Wait()
 }
 
-func (m *Monitor) checkProvider(ctx context.Context, p providerSnapshot) {
-	checkCtx, cancel := context.WithTimeout(ctx, m.checkTimeout)
+func (m *Monitor) checkProvider(p providerSnapshot) {
+	start := time.Now()
+	// Bind to m.stopCtx (not the run-loop ctx) so Stop() cancels in-flight
+	// checks promptly, matching RegisterProvider's initial-check binding.
+	checkCtx, cancel := context.WithTimeout(m.stopCtx, m.checkTimeout)
 	result := p.checker.Check(checkCtx)
 	cancel()
+	duration := time.Since(start)
 
 	var cb TransitionFunc
 	var from, to v1alpha1.ProviderStatus
@@ -194,8 +214,11 @@ func (m *Monitor) checkProvider(ctx context.Context, p providerSnapshot) {
 	if entry := m.providers[p.id]; entry != nil && entry.sm == p.sm {
 		from, to = p.sm.RecordResult(result)
 		m.healthTracker.SetState(p.id, to, time.Now().UTC())
+		m.logger.Debug("health check completed",
+			"provider_id", p.id, "service_type", p.serviceType, "result", result.String(), "duration", duration)
 		if from != to {
-			m.logger.Warn("provider health transition", "provider_id", p.id, "from", from, "to", to)
+			m.logger.Warn("provider health transition",
+				"provider_id", p.id, "service_type", p.serviceType, "from", from, "to", to)
 			if m.onTransition != nil {
 				cb = m.onTransition
 			}

@@ -27,6 +27,37 @@ import (
 // (5s) plus the simulated in-flight handler delay used below.
 const shutdownWaitBound = 8 * time.Second
 
+// captureHandler records slog records for assertion.
+type captureHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler            { return h }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.records = append(h.records, r)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureHandler) all() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Record(nil), h.records...)
+}
+
+func findRecord(records []slog.Record, msg string) (slog.Record, bool) {
+	for _, r := range records {
+		if r.Message == msg {
+			return r, true
+		}
+	}
+	return slog.Record{}, false
+}
+
 func setNoopHandlers(c *messaging.Client) {
 	c.SetMainHandler(func(_ context.Context, _ []byte) error { return nil })
 	c.SetCancelHandler(func(_ context.Context, _ []byte) error { return nil })
@@ -220,13 +251,9 @@ var _ = Describe("Message Durability", Label("integration"), func() {
 			URL:       testNATSServer.ClientURL(),
 			TopicName: topicName,
 			AgentName: "test-agent",
-			// Explicit short AckWait as a safety net: client1.Stop() below is
-			// called concurrently with (racing) the handler's async
-			// NakWithDelay call, which can lose that race and never reach the
-			// server before the connection closes. Without this, the pending
-			// message would only become redeliverable after the server
-			// default AckWait (30s) — well past this test's 5s window — so
-			// the test would flake whenever that race is lost.
+			// Short AckWait: client1.Stop() races the handler's async
+			// NakWithDelay, so redelivery must not depend on that Nak
+			// reaching the server before the connection closes.
 			AckWait: 2 * time.Second,
 		}
 
@@ -287,14 +314,9 @@ var _ = Describe("Message Durability", Label("integration"), func() {
 
 		Expect(handlerCalls.Load()).To(Equal(int32(1)))
 
-		// The handler running to completion isn't sufficient proof on its
-		// own (a killed connection doesn't stop an already-dispatched Go
-		// callback) — the real assertion is that its Ack reached the server
-		// before the connection closed: check the durable consumer's own
-		// pending/ack-pending state directly (via the test's independent
-		// connection) rather than racing a second client's AckWait-bound
-		// redelivery, which wouldn't distinguish "acked" from "still
-		// ack-pending, not yet expired" within a short test window.
+		// Check the durable consumer's ack-pending state directly, rather
+		// than the handler completing (which doesn't prove the Ack reached
+		// the server before the connection closed).
 		mainCons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
 		Expect(err).NotTo(HaveOccurred())
 		info, err := mainCons.Info(ctx)
@@ -600,13 +622,9 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 	})
 
 	It("onSetupReady fires against real JetStream and StartConsuming from inside it begins live consumption (IT-MSG-131)", func() {
-		// SetOnSetupReady (the mechanism main.go actually wires
-		// ProcessOnRestart+StartConsuming through) was previously only
-		// exercised by a fake-consumer unit test — no test called it against
-		// a real NATS/JetStream server the way production does. This test
-		// wires the callback exactly like main.go does (drain-equivalent
-		// work, then StartConsuming, both synchronously inside the callback)
-		// and verifies it actually works end to end.
+		// Wires the callback exactly like main.go does (drain-equivalent
+		// work, then StartConsuming, both synchronously) against a real
+		// NATS/JetStream server.
 		cfg := messaging.ClientConfig{
 			URL: testNATSServer.ClientURL(), TopicName: topicName, AgentName: "test-agent",
 			DeferConsume: true,
@@ -850,16 +868,9 @@ var _ = Describe("Connection Resilience", Label("integration"), func() {
 	})
 
 	It("creates consumers once the CP request stream appears mid-retry (IT-MSG-107)", func() {
-		// Unlike IT-MSG-100/105, NATS is already up when the client starts —
-		// only messaging.RequestStreamName (the CP-owned stream) is missing.
-		// This exercises createRequestConsumer's inner retry loop directly
-		// (F2 startup-order race), rather than relying on NATS
-		// disconnect/reconnect to give doSetup another chance.
-		//
-		// Uses a dynamically-assigned port (unlike IT-MSG-100/105, which need
-		// a pre-known port because their server doesn't exist yet when the
-		// client first tries to connect) to avoid any port-reuse race with
-		// those two tests, which share a hardcoded port.
+		// NATS is already up; only RequestStreamName (CP-owned) is missing,
+		// exercising createRequestConsumer's inner retry loop (F2). Uses a
+		// dynamic port to avoid reuse races with IT-MSG-100/105's hardcoded one.
 		opts := natstest.DefaultTestOptions
 		opts.Port = -1
 		opts.JetStream = true
@@ -1182,5 +1193,59 @@ var _ = Describe("CloudEvent Correlation", Label("integration"), func() {
 		// Message should be redelivered because handler returns error
 		Eventually(deliveryCount.Load, 10*time.Second, 100*time.Millisecond).
 			Should(BeNumerically(">=", int32(2)))
+	})
+})
+
+var _ = Describe("Lifecycle Logging", Label("integration"), func() {
+	var (
+		ctx       context.Context
+		cancel    context.CancelFunc
+		testConn  *nats.Conn
+		testJS    jetstream.JetStream
+		topicName string
+		topics    messaging.TopicNames
+	)
+
+	BeforeEach(func() {
+		var err error
+		topicName = fmt.Sprintf("test-%s", uuid.New().String()[:8])
+		topics = messaging.DeriveTopicNames("test-agent", topicName)
+		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second) //nolint:fatcontext // Ginkgo BeforeEach pattern
+
+		testConn, err = nats.Connect(testNATSServer.ClientURL())
+		Expect(err).NotTo(HaveOccurred())
+		testJS, err = jetstream.New(testConn)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	AfterEach(func() {
+		cancel()
+		deleteTestArtifacts(testJS, topics)
+		testConn.Close()
+	})
+
+	It("logs messaging ready on consumption start and messaging stopped on shutdown (IT-MSG-172)", func() {
+		ch := &captureHandler{}
+		client := messaging.NewClient(messaging.ClientConfig{
+			URL:       testNATSServer.ClientURL(),
+			TopicName: topicName,
+			AgentName: "test-agent",
+		}, slog.New(ch))
+		setNoopHandlers(client)
+		Expect(client.Start(ctx)).To(Succeed())
+
+		var readyRec slog.Record
+		Eventually(func() bool {
+			var ok bool
+			readyRec, ok = findRecord(ch.all(), "messaging ready, main/cancel consumption started")
+			return ok
+		}, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+		Expect(readyRec.Level).To(Equal(slog.LevelInfo))
+
+		client.Stop()
+
+		stoppedRec, ok := findRecord(ch.all(), "messaging stopped")
+		Expect(ok).To(BeTrue())
+		Expect(stoppedRec.Level).To(Equal(slog.LevelInfo))
 	})
 })

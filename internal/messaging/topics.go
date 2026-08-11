@@ -9,13 +9,10 @@ import (
 
 var validTopicNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-// RequestStreamName is the JetStream stream owned by the control-plane,
-// binding the `dcm.agent.>` wildcard subject. Per the CP/agent alignment
-// review (F2), the agent MUST NOT create or own this stream — it only
-// creates durable consumers on it, filtered to its own subjects (Main and
-// Cancel below). The control plane may not have created this stream yet
-// when the agent starts; callers must tolerate and retry (see
-// Client.createRequestConsumer).
+// RequestStreamName is the JetStream stream owned by the control plane,
+// binding the `dcm.agent.>` wildcard subject (F2). The agent must not create
+// or own this stream — only durable consumers on it, filtered to Main/Cancel
+// below. See Client.createRequestConsumer for the startup-race tolerance.
 const RequestStreamName = "dcm-agent-requests"
 
 // requestSubjectPrefix is prepended to the agent's base topic name to form
@@ -84,12 +81,10 @@ func (t TopicNames) RetryConsumer() string { return t.Base + "-retry-consumer" }
 // "dcm.agent." prefix applied to Main is a trusted static constant, not
 // user input.
 //
-// It also rejects a base that already starts with the reserved
-// requestSubjectPrefix. Without this, AGENT_TOPIC_NAME=dcm.agent.foo would
-// derive Main=dcm.agent.dcm.agent.foo (double-prefixed, never matched by CP)
-// and, worse, Retry=dcm.agent.foo.retry — a subject that falls *inside* the
-// CP-owned dcm.agent.> wildcard, so the agent's own retry stream creation
-// would silently compete with the CP's stream for that subject (F2).
+// Also rejects a base that already starts with the reserved
+// requestSubjectPrefix: otherwise Main would be double-prefixed, and the
+// derived Retry subject would fall inside the CP-owned dcm.agent.> wildcard
+// (F2), colliding with the CP's own stream.
 func ValidateTopicName(name string) error {
 	if name == "" {
 		return errors.New("topic name must not be empty")
@@ -100,10 +95,9 @@ func ValidateTopicName(name string) error {
 	if !validTopicNameRe.MatchString(name) {
 		return errors.New("topic name contains invalid characters (allowed: alphanumeric, hyphens, dots, underscores)")
 	}
-	// The exact base "dcm.agent" (no trailing dot) doesn't match HasPrefix
-	// against "dcm.agent." below, but would still derive Retry="dcm.agent.retry"
-	// — a subject inside the CP-owned dcm.agent.> wildcard — so it must be
-	// rejected explicitly, not just names with the dotted prefix.
+	// The exact base "dcm.agent" (no trailing dot) needs an explicit check:
+	// it wouldn't match HasPrefix below but would still derive a colliding
+	// Retry subject.
 	reservedBase := strings.TrimSuffix(requestSubjectPrefix, ".")
 	if name == reservedBase || strings.HasPrefix(name, requestSubjectPrefix) {
 		return fmt.Errorf("topic name must not start with the reserved %q prefix (it is added automatically)", requestSubjectPrefix)

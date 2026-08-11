@@ -6,14 +6,10 @@ import (
 	"testing"
 )
 
-// TestAttemptSetup_SetupDoneShortCircuits is a regression test for a
-// finding that the reconnect consumer-tracking slice grows unbounded.
-// Investigation showed this was a false positive: attemptSetup's setupDone
-// guard returns before setupStreamsAndConsume ever runs again, so a NATS
-// reconnect (which re-fires ConnectHandler/ReconnectHandler -> doSetup)
-// cannot re-append to c.consumers. This test proves the short-circuit fires
-// BEFORE any consumer/conn access — passing a nil *nats.Conn is safe here
-// only because of that guard, which is exactly the property being verified.
+// TestAttemptSetup_SetupDoneShortCircuits verifies attemptSetup's setupDone
+// guard returns before setupStreamsAndConsume runs again, so a NATS
+// reconnect can't re-append to c.consumers. A nil *nats.Conn is safe here
+// only because that guard fires first.
 func TestAttemptSetup_SetupDoneShortCircuits(t *testing.T) {
 	c := NewClient(ClientConfig{AgentName: "test-agent", TopicName: "t"}, slog.Default())
 	c.setupDone = true // simulate: initial setup already completed once

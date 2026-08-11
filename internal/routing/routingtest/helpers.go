@@ -225,24 +225,15 @@ func (s *FakeStore) GetByName(_ context.Context, name string) (*store.StoredProv
 
 // FakeRetryConsumer records retry topic operations.
 type FakeRetryConsumer struct {
-	mu           sync.Mutex
-	Messages     []routing.RetryMessage
-	Republished  [][]byte
-	FetchErr     error
-	RepublishErr error
+	mu       sync.Mutex
+	Messages []routing.RetryMessage
+	FetchErr error
 }
 
 func (f *FakeRetryConsumer) FetchRetryMessages(_ context.Context) ([]routing.RetryMessage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.Messages, f.FetchErr
-}
-
-func (f *FakeRetryConsumer) RepublishToRetry(_ context.Context, data []byte) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.Republished = append(f.Republished, data)
-	return f.RepublishErr
 }
 
 // --- Assertion helpers ---

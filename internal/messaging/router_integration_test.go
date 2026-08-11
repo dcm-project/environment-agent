@@ -24,14 +24,11 @@ import (
 	"github.com/dcm-project/environment-agent/internal/routing/routingtest"
 )
 
-// This file covers cases formerly exercised through retry.Processor.Start
-// (dead code removed — see internal/routing/retry/processor.go doc comment
-// on ProcessorConfig): MaxDeliver-exceeded handling, MaxDeliver consumer
-// config, handler-deadline enforcement, and idempotency-key forwarding on
-// the main-topic consume path. That path is now exclusively
-// messaging.Client.handleMainMessage → router.HandleRequest → SP forwarder,
-// so it's tested here against a real Client + Router, rather than in the
-// retry package.
+// This file covers MaxDeliver-exceeded handling, MaxDeliver consumer config,
+// handler-deadline enforcement, and idempotency-key forwarding on the
+// main-topic consume path: messaging.Client.handleMainMessage →
+// router.HandleRequest → SP forwarder, tested here against a real Client +
+// Router.
 
 // hangingFakeSPForwarder blocks forever on CreateResource, calling onCancel
 // when its context is cancelled (mirrors retry package's test double).
@@ -148,12 +145,8 @@ var _ = Describe("Main-Topic Delivery Safety Net", Label("integration"), func() 
 		Expect(int(attempts.Load())).To(BeNumerically("<=", maxDeliver))
 
 		// Message must be terminated — no pending/ack-pending left. Eventually,
-		// not immediate: Term() (called right after the error CE publish
-		// above, which we've already observed) is itself an async NATS
-		// operation — the consumer's server-side NumPending/NumAckPending
-		// state can lag slightly behind the client-side call returning,
-		// independent of the CE having already arrived via a separate
-		// pub/sub subscription (IT-RCM-080).
+		// not immediate: Term() is an async NATS operation, so server-side
+		// state can lag slightly behind the call returning (IT-RCM-080).
 		cons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(func() uint64 {

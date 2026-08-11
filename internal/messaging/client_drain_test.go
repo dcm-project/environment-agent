@@ -50,13 +50,9 @@ func (emptyMessageBatch) Messages() <-chan jetstream.Msg {
 
 func (emptyMessageBatch) Error() error { return nil }
 
-// TestDrainCancelTopic_ContinuesPastTransientFetchError is a regression test
-// for cancel-topic drain aborting on the first Fetch error instead of
-// continuing and letting drainTimeout bound the loop.
-// A transient Fetch failure must not truncate the drain — REQ-MSG-090
-// requires the deny list to be fully populated before main-topic processing
-// begins, so silently stopping early on one bad Fetch could let a
-// should-have-been-denied resource through.
+// TestDrainCancelTopic_ContinuesPastTransientFetchError verifies a transient
+// Fetch failure doesn't truncate the drain — REQ-MSG-090 requires the deny
+// list fully populated before main-topic processing begins.
 func TestDrainCancelTopic_ContinuesPastTransientFetchError(t *testing.T) {
 	c := NewClient(ClientConfig{}, slog.Default())
 	fc := &fakeCancelConsumer{failN: 2}

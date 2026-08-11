@@ -71,18 +71,11 @@ type ClientConfig struct {
 	// back to defaultReconnectInitialBackoff/MaxBackoff.
 	ReconnectInitialBackoff time.Duration
 	ReconnectMaxBackoff     time.Duration
-	// DeferConsume, if true, makes Start create streams/durable consumers and
-	// run the initial cancel-topic drain, but NOT begin the live
-	// pull-consumer loops for main/cancel — the caller must explicitly call
-	// StartConsuming() once ready. Used by the composition root to run
-	// retry.Processor.ProcessOnRestart's own Fetch-based drain of those same
-	// durable consumers BEFORE live consumption starts, closing a
-	// message-stealing race between the two: without this, ProcessOnRestart's
-	// Fetch calls can compete with an already-running Consume() for the same
-	// durable, diverting messages onto routeMessage and bypassing
-	// handleMainMessage's MaxDeliver/handler-timeout envelope.
-	// Defaults to false: Start begins consuming immediately, matching all
-	// prior behavior.
+	// DeferConsume, if true, makes Start set up streams/consumers and run the
+	// cancel-topic drain, but NOT begin live main/cancel consumption — the
+	// caller must call StartConsuming() once ready. Lets a caller drain the
+	// retry topic before live consumption starts, avoiding a message-stealing
+	// race between the two. Defaults to false (consume immediately).
 	DeferConsume bool
 }
 
@@ -122,22 +115,12 @@ type Client struct {
 	// assertions; production always uses math/rand's global source.
 	randFn func() float64
 
-	// onSetupReady, if set, is invoked exactly once, synchronously from
-	// within setupStreamsAndConsume, right after JetStream/durable-consumer
-	// setup succeeds for the first time — whether that happens via Start's
-	// initial synchronous connect attempt, or a later async
-	// connect/reconnect-triggered doSetup. Only meaningful when
-	// DeferConsume is true; the callback is responsible for calling
-	// StartConsuming() itself once it's done with any pre-consumption work.
-	//
-	// This exists because Start is non-blocking (AC-MSG-050: NATS may
-	// still be unreachable when Start returns). A caller that ran
-	// restart-drain logic (e.g. retry.Processor.ProcessOnRestart)
-	// synchronously right after Start, assuming JetStream was already
-	// ready, would silently no-op forever if it wasn't — ProcessOnRestart
-	// is only ever invoked once at startup, with no retry of its own.
-	// onSetupReady fires at the moment JetStream genuinely becomes ready,
-	// regardless of how long that takes.
+	// onSetupReady, if set, fires exactly once, synchronously from within
+	// setupStreamsAndConsume, the first time JetStream/durable-consumer setup
+	// succeeds. Only meaningful when DeferConsume is true; the callback owns
+	// calling StartConsuming() once it's done with any pre-consumption work.
+	// Needed because Start is non-blocking (AC-MSG-050), so a caller can't
+	// just run setup-dependent logic synchronously after Start returns.
 	onSetupReady func()
 }
 
@@ -220,21 +203,12 @@ func (c *Client) Start(_ context.Context) error {
 	return nil
 }
 
-// doSetup creates streams/consumers and starts consuming. It is invoked from
-// the initial synchronous connect path in Start (bounded, tests rely on this
-// completing quickly when the CP stream already exists), and from every
-// ConnectHandler/ReconnectHandler (already backgrounded by `go`).
-//
-// A single attempt can itself block for up to requestStreamRetryTimeout if
-// the control-plane hasn't created RequestStreamName yet (startup-order
-// race, F2) — createRequestConsumer retries internally on that bound. If
-// that one attempt still fails, doSetup does NOT retry inline (Start's
-// synchronous caller must not block indefinitely — see its "non-blocking"
-// contract). Instead it hands off to retrySetupInBackground: once the
-// initial NATS connection is up, no further ConnectHandler/ReconnectHandler
-// will fire to give doSetup another chance, so without a background retry
-// the agent would silently sit forever with setupDone still false and no
-// consumer ever started.
+// doSetup creates streams/consumers and starts consuming. Invoked from
+// Start's initial connect attempt and from every ConnectHandler/
+// ReconnectHandler. A single attempt can block for up to
+// requestStreamRetryTimeout waiting on RequestStreamName (F2); if it still
+// fails, doSetup hands off to retrySetupInBackground rather than retrying
+// inline, since Start itself must stay non-blocking.
 func (c *Client) doSetup(ctx context.Context, conn *nats.Conn) {
 	if c.attemptSetup(ctx, conn) {
 		return
@@ -330,26 +304,15 @@ func (c *Client) setupStreamsAndConsume(ctx context.Context, conn *nats.Conn) bo
 // connection.
 func (c *Client) finishSetup() bool {
 	if c.cfg.DeferConsume && !c.consumeRequested.Load() {
-		// This is the one point where JetStream is confirmed ready for the
-		// first time, so it's also where onSetupReady fires (the
-		// restart-drain timing fix) — see onSetupReady's doc comment. The callback is
-		// expected to call StartConsuming() synchronously as part of its work.
+		// JetStream is confirmed ready for the first time here, so this is
+		// where onSetupReady fires; the callback is expected to call
+		// StartConsuming() synchronously.
 		if c.onSetupReady != nil {
 			c.onSetupReady()
 		}
-		// If the callback requested consumption (StartConsuming was called)
-		// but beginConsuming didn't actually succeed (e.g. a transient
-		// Consume() error right after (re)connect), this must NOT report
-		// success: the caller (attemptSetup) would latch setupDone, and
-		// since consumeRequested is now permanently true, this branch would
-		// never run again on any future reconnect/retry — attemptSetup
-		// short-circuits once setupDone is true, so the client would be
-		// silently and permanently stranded "connected but not consuming"
-		// until process restart. Reporting failure instead makes
-		// retrySetupInBackground (or the next reconnect's doSetup) retry the
-		// whole setup; since consumeRequested is already true by then, it
-		// falls through to the non-onSetupReady branch below and retries
-		// beginConsuming directly — onSetupReady itself does not fire again.
+		// Must report failure (not success) if the callback's StartConsuming
+		// didn't actually start consuming, so attemptSetup retries instead of
+		// latching setupDone and permanently stranding the client.
 		if c.consumeRequested.Load() && !c.isConsuming() {
 			return false
 		}
@@ -369,16 +332,10 @@ func (c *Client) isConsuming() bool {
 }
 
 // beginConsuming starts the live pull-consumer loops for main+cancel against
-// the already-created durable consumers. Idempotent and concurrency-safe: c.mu
-// is held for the entire check-then-act sequence (including the Consume()
-// calls themselves, which are non-blocking library calls that only register
-// callbacks and return) so two overlapping callers can't both pass the
-// "not yet consuming" check and each start a duplicate live consume loop on
-// the same durable consumer — that would silently double-process messages
-// exactly like the race this whole function's design is meant to prevent.
-// Called directly by setupStreamsAndConsume when DeferConsume is false
-// (default, immediate-consume behavior matching all prior versions of this
-// client), and by StartConsuming when DeferConsume is true.
+// the already-created durable consumers. Idempotent and concurrency-safe:
+// c.mu is held for the whole check-then-act sequence (the Consume() calls
+// themselves are non-blocking) so two overlapping callers can't both start a
+// duplicate consume loop on the same durable consumer.
 func (c *Client) beginConsuming() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -416,6 +373,7 @@ func (c *Client) beginConsuming() error {
 	}
 	c.consumers = append(c.consumers, cancelCC, mainCC)
 	c.consuming = true
+	c.logger.Info("messaging ready, main/cancel consumption started")
 	return nil
 }
 
@@ -476,13 +434,10 @@ func (c *Client) initConsumers(ctx context.Context, js jetstream.JetStream, retr
 }
 
 // createRequestConsumer creates a durable consumer on the control-plane-owned
-// RequestStreamName, filtered to the given subject. Retries with a bounded
-// interval within this call because the CP may not have created that stream
-// yet at agent startup (F2). If it's still missing after
-// requestStreamRetryTimeout, this returns an error — the caller (doSetup)
-// retries the whole setup indefinitely, so this bound just controls how
-// often the (possibly noisy) "not found" case is re-logged, not whether the
-// agent ever gives up.
+// RequestStreamName, filtered to the given subject. Retries internally for up
+// to requestStreamRetryTimeout since the CP may not have created that stream
+// yet at agent startup (F2); the caller (doSetup) retries the whole setup
+// indefinitely beyond that.
 func (c *Client) createRequestConsumer(ctx context.Context, js jetstream.JetStream, durable, filterSubject string, ackWait time.Duration, maxDeliver int) (jetstream.Consumer, error) {
 	cfg := jetstream.ConsumerConfig{
 		Durable: durable, FilterSubject: filterSubject,
@@ -528,12 +483,9 @@ func (c *Client) drainCancelTopic(_ context.Context, cancelCons jetstream.Consum
 	for drainCtx.Err() == nil {
 		batch, err := cancelCons.Fetch(drainBatchSize, jetstream.FetchMaxWait(drainBatchWait))
 		if err != nil {
-			// A transient Fetch failure (e.g. a momentary NATS hiccup) must
-			// not abort the drain outright — that would populate the deny
-			// list incompletely before main-topic processing begins
-			// (REQ-MSG-090). Retry instead; drainTimeout remains the single
-			// bound on how long draining is allowed to take (this previously
-			// returned on the first error).
+			// Retry rather than abort: an incomplete deny-list before
+			// main-topic processing begins would violate REQ-MSG-090.
+			// drainTimeout still bounds the total time this can take.
 			c.logger.Warn("cancel topic drain fetch failed, retrying", "error", err)
 			select {
 			case <-drainCtx.Done():
@@ -555,14 +507,9 @@ func (c *Client) drainCancelTopic(_ context.Context, cancelCons jetstream.Consum
 
 // Stop gracefully shuts down the client.
 //
-// Uses ConsumeContext.Drain (not Stop) so any message already fetched into
-// the local pull-consumer buffer — including one actively mid-handling in
-// handleMainMessage/handleCancelMessage — gets to finish its callback
-// (ack/nak/publish) before the subscription is torn down, instead of being
-// silently discarded and force-redelivered (with duplicate side effects) on
-// restart. Waits up to shutdownDrainTimeout per consumer for that to
-// happen before closing the NATS connection regardless, so a hung handler
-// can't block shutdown indefinitely.
+// Uses ConsumeContext.Drain (not Stop) so an in-flight handler gets to finish
+// (ack/nak/publish) instead of being discarded and redelivered on restart.
+// Bounded by shutdownDrainTimeout so a hung handler can't block shutdown.
 func (c *Client) Stop() {
 	c.stopOnce.Do(func() {
 		c.stopped.Store(true)
@@ -598,6 +545,7 @@ func (c *Client) Stop() {
 			conn.Close()
 		}
 		c.connected.Store(false)
+		c.logger.Info("messaging stopped")
 	})
 }
 
@@ -643,12 +591,8 @@ func (c *Client) Publish(ctx context.Context, subject string, data []byte) error
 }
 
 // PublishWithMsgID publishes with a Nats-Msg-Id header for JetStream
-// server-side dedup, using the CE's own id (F34). Used for response CEs so
-// that a *future* publish-retry mechanism (re-publishing the same
-// already-built bytes+id after a failed attempt) can't cause duplicate
-// delivery to the control-plane's response consumer. There is no such retry
-// today, so this is currently inert — see cloudevent.PublishCE's doc comment
-// for why re-invoking PublishCE itself does not get this benefit.
+// server-side dedup, using the CE's own id (F34). Used for response CEs to
+// guard against duplicate delivery on a future publish-retry.
 func (c *Client) PublishWithMsgID(ctx context.Context, subject, msgID string, data []byte) error {
 	c.mu.Lock()
 	js := c.js

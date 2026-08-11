@@ -122,12 +122,9 @@ var _ = Describe("Slot Registry", Label("unit"), func() {
 			Expect(holder).To(Equal("db-provider"))
 		})
 
-		// Regression coverage: Move previously did an unconditional
-		// delete(r.slots, oldType) without verifying the caller actually
-		// holds oldType. If registry/store ever desync, this let a provider
-		// "moving" out of a service type it doesn't actually hold silently
-		// delete a *different* provider's active slot for that type —
-		// violating the single-slot-per-service-type invariant (REQ-SPR-200).
+		// Move must verify the caller actually holds oldType before
+		// deleting it, or it can delete a different provider's active
+		// slot if registry/store ever desync (REQ-SPR-200).
 		It("rejects move when oldType is held by a different provider, leaving that provider's slot intact (UT-SPR-072)", func() {
 			reg := provider.NewRegistry()
 			Expect(reg.Claim("real-holder", "database")).To(Succeed())

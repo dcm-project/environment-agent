@@ -109,10 +109,15 @@ func (r *Router) responseCtx(resourceID string) ResponseContext {
 	return ResponseContext{ResourceID: resourceID, AgentName: r.agentName, TopicName: r.topicName}
 }
 
-func (r *Router) publishCE(ctx context.Context, ceType string, data any) {
+// publishCE publishes an outcome CE. ceID is the inbound CE id that
+// triggered this publish (empty when no single inbound CE applies), included
+// in the logs so redeliveries can be correlated back to their trigger.
+func (r *Router) publishCE(ctx context.Context, ceType, resourceID, ceID string, data any) {
 	if err := cloudevent.PublishCE(ctx, r.publisher.PublishWithMsgID, cloudevent.SubjectResponses, r.agentName, ceType, data); err != nil {
-		r.logger.Warn("failed to publish CE", "type", ceType, "error", err)
+		r.logger.Warn("failed to publish CE", "ce_type", ceType, "resource_id", resourceID, "ce_id", ceID, "error", err)
+		return
 	}
+	r.logger.Info("published CE", "ce_type", ceType, "resource_id", resourceID, "ce_id", ceID)
 }
 
 // SetRetryConsumer late-binds the retry consumer after the messaging client
@@ -134,8 +139,8 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 	}
 
 	if payload.ResourceID == "" || payload.ServiceType == "" {
-		r.logger.Warn("CE missing required fields", "resourceId", payload.ResourceID, "serviceType", payload.ServiceType)
-		r.publishCE(ctx, cloudevent.TypeError, ErrorData{
+		r.logger.Warn("CE missing required fields", "resource_id", payload.ResourceID, "service_type", payload.ServiceType, "ce_id", payload.EventID)
+		r.publishCE(ctx, cloudevent.TypeError, "", payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(""),
 			Error:           ErrorInvalidPayload, Details: "resourceId and serviceType are required",
 		})
@@ -143,16 +148,18 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 	}
 
 	if isCreate && r.denyList.Consume(payload.ResourceID) {
+		r.logger.Info("create request dropped, resource in deny list", "resource_id", payload.ResourceID)
 		return nil
 	}
 
 	sp, status, ok, storeErr := r.resolveProvider(ctx, payload.ServiceType)
 	if storeErr != nil {
-		r.logger.Warn("transient store error during provider resolution", "error", storeErr, "serviceType", payload.ServiceType)
+		r.logger.Warn("transient store error during provider resolution", "error", storeErr,
+			"resource_id", payload.ResourceID, "service_type", payload.ServiceType, "ce_id", payload.EventID)
 		return storeErr
 	}
 	if !ok {
-		r.publishCE(ctx, cloudevent.TypeError, ErrorData{
+		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
 			Error:           ErrorUnsupportedServiceType, Details: "provider not found for service type: " + payload.ServiceType,
 		})
@@ -160,7 +167,7 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 	}
 
 	if status == v1alpha1.Unavailable {
-		r.publishCE(ctx, cloudevent.TypeError, ErrorData{
+		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
 			Error:           ErrorSPUnavailable, Details: "provider unavailable for service type: " + payload.ServiceType,
 		})
@@ -170,7 +177,7 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 		if err := r.publisher.Publish(ctx, r.retryTopic, msg); err != nil {
 			return err
 		}
-		r.publishCE(ctx, cloudevent.TypeRequestQueued, RequestQueuedData{
+		r.publishCE(ctx, cloudevent.TypeRequestQueued, payload.ResourceID, payload.EventID, RequestQueuedData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
 			ServiceType:     payload.ServiceType, Status: "QUEUED",
 		})
@@ -178,7 +185,7 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 	}
 
 	if r.forwarder == nil {
-		r.publishCE(ctx, cloudevent.TypeError, ErrorData{
+		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
 			Error:           ErrorSPUnavailable, Details: "provider unavailable for service type: " + payload.ServiceType,
 		})
@@ -203,12 +210,12 @@ func (r *Router) parseRequestCE(msg []byte) (isCreate bool, payload inboundPaylo
 	case cloudevent.TypeRequestDelete:
 		isCreate = false
 	default:
-		r.logger.Warn("dropping unknown CE type", "type", event.Type())
+		r.logger.Warn("dropping unknown CE type", "ce_type", event.Type(), "ce_id", event.ID())
 		return false, payload, true
 	}
 
 	if jsonErr := json.Unmarshal(event.Data(), &payload); jsonErr != nil {
-		r.logger.Warn("dropping CE with unparseable data", "error", jsonErr)
+		r.logger.Warn("dropping CE with unparseable data", "error", jsonErr, "ce_id", event.ID(), "ce_type", event.Type())
 		return false, payload, true
 	}
 	payload.EventID = event.ID()
@@ -234,6 +241,7 @@ func (r *Router) forwardWithRetry(ctx context.Context, sp *store.StoredProvider,
 		if newlyAdded {
 			r.claimedResourcesSet.Remove(payload.ResourceID)
 		}
+		r.logger.Info("create request dropped, resource in deny list", "resource_id", payload.ResourceID)
 		return nil
 	}
 
@@ -248,11 +256,11 @@ func (r *Router) forwardWithRetry(ctx context.Context, sp *store.StoredProvider,
 	if fwdErr == nil {
 		success = true
 		if isCreate {
-			r.publishCE(ctx, cloudevent.TypeCreationAcked, CreationAckData{
+			r.publishCE(ctx, cloudevent.TypeCreationAcked, payload.ResourceID, payload.EventID, CreationAckData{
 				ResponseContext: r.responseCtx(payload.ResourceID), Status: "PROVISIONING",
 			})
 		} else {
-			r.publishCE(ctx, cloudevent.TypeDeletionAcked, DeletionAckData{
+			r.publishCE(ctx, cloudevent.TypeDeletionAcked, payload.ResourceID, payload.EventID, DeletionAckData{
 				ResponseContext: r.responseCtx(payload.ResourceID), Status: "DELETING",
 			})
 		}
@@ -263,14 +271,17 @@ func (r *Router) forwardWithRetry(ctx context.Context, sp *store.StoredProvider,
 		return ctx.Err()
 	}
 
-	r.logger.Warn("SP error", "error", fwdErr, "resourceId", payload.ResourceID, "serviceType", payload.ServiceType)
+	r.logger.Warn("SP error", append([]any{
+		"resource_id", payload.ResourceID, "service_type", payload.ServiceType,
+		"ce_id", payload.EventID, "provider_id", sp.ID,
+	}, SafeErrorAttrs(fwdErr)...)...)
 	if !IsRetryable(fwdErr) {
-		r.publishCE(ctx, cloudevent.TypeError, ErrorData{
+		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
 			Error:           ErrorNonRetryable, Details: "service provider returned non-retryable error for service type: " + payload.ServiceType,
 		})
 	} else {
-		r.publishCE(ctx, cloudevent.TypeError, ErrorData{
+		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
 			Error:           ErrorRetryExhausted, Details: "service provider error after retry exhaustion for service type: " + payload.ServiceType,
 		})
@@ -307,6 +318,11 @@ func (r *Router) attemptForward(ctx context.Context, sp *store.StoredProvider, i
 			return fwdErr
 		}
 		if attempt < maxAttempts-1 {
+			r.logger.Warn("SP call failed, retrying", append([]any{
+				"resource_id", payload.ResourceID, "service_type", payload.ServiceType,
+				"attempt", attempt + 1, "max_attempts", maxAttempts,
+				"ce_id", payload.EventID, "provider_id", sp.ID,
+			}, SafeErrorAttrs(fwdErr)...)...)
 			delay := backoff.ApplyJitter(
 				backoff.CalculateBackoff(r.config.RetryBackoff, r.config.RetryMaxBackoff, attempt),
 				rand.Float64,
@@ -332,19 +348,20 @@ func (r *Router) HandleCancel(ctx context.Context, msg []byte) error {
 	}
 
 	if event.Type() != cloudevent.TypeRequestCancel {
-		r.logger.Warn("dropping non-cancel CE on cancel topic", "type", event.Type())
+		r.logger.Warn("dropping non-cancel CE on cancel topic", "ce_type", event.Type(), "ce_id", event.ID())
 		return nil
 	}
 
 	var payload inboundPayload
 	if err := json.Unmarshal(event.Data(), &payload); err != nil {
-		r.logger.Warn("dropping cancel CE with unparseable data", "error", err)
+		r.logger.Warn("dropping cancel CE with unparseable data", "error", err, "ce_id", event.ID(), "ce_type", event.Type())
 		return nil
 	}
+	payload.EventID = event.ID()
 
 	if payload.ResourceID == "" || payload.ServiceType == "" {
-		r.logger.Warn("cancel CE missing required fields", "resourceId", payload.ResourceID, "serviceType", payload.ServiceType)
-		r.publishCE(ctx, cloudevent.TypeError, ErrorData{
+		r.logger.Warn("cancel CE missing required fields", "resource_id", payload.ResourceID, "service_type", payload.ServiceType, "ce_id", payload.EventID)
+		r.publishCE(ctx, cloudevent.TypeError, "", payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(""),
 			Error:           ErrorInvalidPayload, Details: "resourceId and serviceType are required",
 		})
@@ -352,7 +369,7 @@ func (r *Router) HandleCancel(ctx context.Context, msg []byte) error {
 	}
 
 	if r.claimedResourcesSet.Contains(payload.ResourceID) {
-		r.publishCE(ctx, cloudevent.TypeCancelRejected, CancelRejectedData{
+		r.publishCE(ctx, cloudevent.TypeCancelRejected, payload.ResourceID, payload.EventID, CancelRejectedData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
 			Reason:          "resource already claimed",
 		})
@@ -372,7 +389,7 @@ func (r *Router) HandleCancel(ctx context.Context, msg []byte) error {
 		}
 	}
 
-	r.publishCE(ctx, cloudevent.TypeCancelAcked, CancelAckData{
+	r.publishCE(ctx, cloudevent.TypeCancelAcked, payload.ResourceID, payload.EventID, CancelAckData{
 		ResponseContext: r.responseCtx(payload.ResourceID),
 		ServiceType:     payload.ServiceType,
 	})
@@ -380,26 +397,33 @@ func (r *Router) HandleCancel(ctx context.Context, msg []byte) error {
 }
 
 // purgeFromRetryTopic drains all retry messages, acking those matching the
-// cancelled resourceID and republishing the rest.
+// cancelled resourceID and Nak'ing the rest back in place.
+//
+// Non-matching messages MUST be Nak'd on the same JetStream message rather
+// than acked-and-republished: a fresh republish resets JetStream's delivery
+// count to 1, silently defeating the MaxDeliver guard for any OTHER
+// in-flight retry item every time an unrelated resource is cancelled
+// (REQ-RCM-270).
 func (r *Router) purgeFromRetryTopic(ctx context.Context, rc RetryTopicConsumer, resourceID string) error {
 	messages, err := rc.FetchRetryMessages(ctx)
 	if err != nil {
 		return err
 	}
 
+	var matched, requeued int
 	for _, m := range messages {
 		if m.ResourceID == resourceID {
 			if err := m.AckFunc(); err != nil {
 				return fmt.Errorf("failed to ack cancelled message: %w", err)
 			}
+			matched++
 			continue
 		}
-		if err := rc.RepublishToRetry(ctx, m.Data); err != nil {
-			return fmt.Errorf("failed to republish non-matching message: %w", err)
+		if err := m.NakFunc(); err != nil {
+			return fmt.Errorf("failed to nak non-matching message: %w", err)
 		}
-		if err := m.AckFunc(); err != nil {
-			return fmt.Errorf("failed to ack republished message: %w", err)
-		}
+		requeued++
 	}
+	r.logger.Info("retry topic purged for cancel", "resource_id", resourceID, "matched", matched, "requeued", requeued)
 	return nil
 }

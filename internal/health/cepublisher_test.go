@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -19,6 +20,50 @@ import (
 	"github.com/dcm-project/environment-agent/internal/routing"
 )
 
+// captureHandler records slog records for assertion.
+type captureHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler            { return h }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.records = append(h.records, r)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureHandler) all() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Record(nil), h.records...)
+}
+
+func findRecord(records []slog.Record, msg string) (slog.Record, bool) {
+	for _, r := range records {
+		if r.Message == msg {
+			return r, true
+		}
+	}
+	return slog.Record{}, false
+}
+
+func recordAttr(rec slog.Record, key string) (slog.Value, bool) {
+	var v slog.Value
+	var found bool
+	rec.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			v, found = a.Value, true
+			return false
+		}
+		return true
+	})
+	return v, found
+}
+
 type fakeStore struct {
 	provider *store.StoredProvider
 	err      error
@@ -30,6 +75,7 @@ func (f *fakeStore) GetByID(_ context.Context, _ string) (*store.StoredProvider,
 
 type fakePublisher struct {
 	published []publishedMsg
+	err       error
 }
 
 type publishedMsg struct {
@@ -38,11 +84,17 @@ type publishedMsg struct {
 }
 
 func (f *fakePublisher) Publish(_ context.Context, subject string, data []byte) error {
+	if f.err != nil {
+		return f.err
+	}
 	f.published = append(f.published, publishedMsg{subject: subject, data: data})
 	return nil
 }
 
 func (f *fakePublisher) PublishWithMsgID(_ context.Context, subject, _ string, data []byte) error {
+	if f.err != nil {
+		return f.err
+	}
 	f.published = append(f.published, publishedMsg{subject: subject, data: data})
 	return nil
 }
@@ -111,5 +163,75 @@ var _ = Describe("CEPublisher", func() {
 
 		cePub.OnTransition(context.Background(), "provider-1", v1alpha1.Ready, v1alpha1.Unhealthy)
 		Expect(pub.published).To(BeEmpty())
+	})
+
+	It("logs INFO with canonical fields on successful health CE publish", func() {
+		ch := &captureHandler{}
+		cePub = health.NewCEPublisher(fs, pub, slog.New(ch), "agent-1", "topic-main")
+
+		cePub.OnTransition(context.Background(), "provider-1", v1alpha1.Ready, v1alpha1.Unhealthy)
+
+		rec, ok := findRecord(ch.all(), "health CE published")
+		Expect(ok).To(BeTrue())
+		Expect(rec.Level).To(Equal(slog.LevelInfo))
+		v, ok := recordAttr(rec, "provider_id")
+		Expect(ok).To(BeTrue())
+		Expect(v.String()).To(Equal("provider-1"))
+		v, ok = recordAttr(rec, "ce_type")
+		Expect(ok).To(BeTrue())
+		Expect(v.String()).To(Equal(cloudevent.TypeHealthDegraded))
+		v, ok = recordAttr(rec, "service_type")
+		Expect(ok).To(BeTrue())
+		Expect(v.String()).To(Equal("compute"))
+	})
+
+	It("logs WARN when the stored provider has an empty service_type", func() {
+		fs.provider = &store.StoredProvider{
+			ID:          "provider-1",
+			Name:        "my-sp",
+			ServiceType: "",
+		}
+		ch := &captureHandler{}
+		cePub = health.NewCEPublisher(fs, pub, slog.New(ch), "agent-1", "topic-main")
+
+		cePub.OnTransition(context.Background(), "provider-1", v1alpha1.Ready, v1alpha1.Unhealthy)
+
+		Expect(pub.published).To(HaveLen(1))
+
+		rec, ok := findRecord(ch.all(), "health CE published with missing service_type on provider record")
+		Expect(ok).To(BeTrue())
+		Expect(rec.Level).To(Equal(slog.LevelWarn))
+		v, ok := recordAttr(rec, "ce_type")
+		Expect(ok).To(BeTrue())
+		Expect(v.String()).To(Equal(cloudevent.TypeHealthDegraded))
+		v, ok = recordAttr(rec, "provider_id")
+		Expect(ok).To(BeTrue())
+		Expect(v.String()).To(Equal("provider-1"))
+		v, ok = recordAttr(rec, "reason")
+		Expect(ok).To(BeTrue())
+		Expect(v.String()).To(ContainSubstring("threshold"))
+
+		_, ok = findRecord(ch.all(), "health CE published")
+		Expect(ok).To(BeFalse())
+	})
+
+	It("logs WARN with service_type when publishing the health CE fails", func() {
+		pub.err = errors.New("publish broken")
+		ch := &captureHandler{}
+		cePub = health.NewCEPublisher(fs, pub, slog.New(ch), "agent-1", "topic-main")
+
+		cePub.OnTransition(context.Background(), "provider-1", v1alpha1.Ready, v1alpha1.Unhealthy)
+
+		Expect(pub.published).To(BeEmpty())
+
+		rec, ok := findRecord(ch.all(), "failed to publish health CE")
+		Expect(ok).To(BeTrue())
+		Expect(rec.Level).To(Equal(slog.LevelWarn))
+		v, ok := recordAttr(rec, "service_type")
+		Expect(ok).To(BeTrue())
+		Expect(v.String()).To(Equal("compute"), "service_type must be logged even on publish failure, since the provider record was already loaded")
+		v, ok = recordAttr(rec, "provider_id")
+		Expect(ok).To(BeTrue())
+		Expect(v.String()).To(Equal("provider-1"))
 	})
 })

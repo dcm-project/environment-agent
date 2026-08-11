@@ -37,12 +37,9 @@ var _ = BeforeSuite(func() {
 	opts.StoreDir = testStoreDir
 	testNATSServer = natstest.RunServer(&opts)
 
-	// Simulate the control-plane-owned streams (F2 of the CP/agent alignment
-	// review): messaging.Client only creates durable consumers on
-	// dcm-agent-requests (never the stream itself), and publishes responses
-	// by subject with no stream of its own. Created once for the whole suite
-	// since each test derives unique per-test subjects under the
-	// dcm.agent.> wildcard.
+	// Simulate the control-plane-owned request stream (F2): messaging.Client
+	// only creates durable consumers on it, never the stream itself. Created
+	// once for the suite; each test derives unique subjects under dcm.agent.>.
 	conn, err := nats.Connect(testNATSServer.ClientURL())
 	Expect(err).NotTo(HaveOccurred())
 	defer conn.Close()

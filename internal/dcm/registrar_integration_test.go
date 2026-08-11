@@ -167,11 +167,7 @@ func (c *callCountingLister) AdvertisableServiceTypes() []string {
 }
 
 // panicNTimesLister panics on its first n calls, then behaves like a normal
-// lister — simulating a dependency that's transiently broken (e.g. a
-// provider service still initializing) rather than permanently broken. Used
-// to prove the registrar survives multiple panics and keeps making forward
-// progress afterward, rather than merely surviving a single panic before
-// silently going idle forever.
+// lister, simulating a transiently-broken dependency.
 type panicNTimesLister struct {
 	mu    sync.Mutex
 	calls int
@@ -228,6 +224,60 @@ func defaultRegistrarConfig(mockURL string) dcm.RegistrarConfig {
 }
 
 var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// captureHandler records slog records for assertion.
+type captureHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler            { return h }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.records = append(h.records, r)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureHandler) all() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Record(nil), h.records...)
+}
+
+func findRecord(records []slog.Record, msg string) (slog.Record, bool) {
+	for _, r := range records {
+		if r.Message == msg {
+			return r, true
+		}
+	}
+	return slog.Record{}, false
+}
+
+func findRecords(records []slog.Record, msg string) []slog.Record {
+	var out []slog.Record
+	for _, r := range records {
+		if r.Message == msg {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func recordAttr(rec slog.Record, key string) (slog.Value, bool) {
+	var v slog.Value
+	var found bool
+	rec.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			v, found = a.Value, true
+			return false
+		}
+		return true
+	})
+	return v, found
+}
 
 // --- Tests ---
 
@@ -560,12 +610,6 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 
 	It("recovers from a panic in the registrar goroutine without crashing the process, "+
 		"and keeps the goroutine alive to make forward progress afterward (IT-DCM-180)", func() {
-		// A panicking ServiceTypeLister (or any other dependency) must not be
-		// able to take down the whole agent process — DCM registration runs
-		// in its own background goroutine per Start's godoc. Recovering the
-		// panic is only half the fix: the goroutine must also keep retrying
-		// afterward, rather than silently, permanently going idle with DCM
-		// registration stalled forever.
 		cfg := defaultRegistrarConfig(mock.server.URL)
 		lister := &panicNTimesLister{n: 3, types: []string{"container"}}
 		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
@@ -650,11 +694,9 @@ var _ = Describe("DCM Heartbeat", Label("integration"), func() {
 	})
 
 	It("sends strictly increasing heartbeat payload timestamps (IT-DCM-135)", func() {
-		// Unlike IT-DCM-130 (which checks server-observed receipt time), this
-		// asserts on the `timestamp` field *inside* the heartbeat body the
-		// agent actually sends — the field the control-plane rejects
-		// heartbeats on if it isn't strictly greater than the last one it
-		// recorded (action item #8).
+		// Unlike IT-DCM-130, this asserts on the `timestamp` field inside the
+		// heartbeat body itself, which the control plane requires to be
+		// strictly increasing.
 		lister := &stubServiceTypeLister{types: []string{"container"}}
 		r, err := dcm.NewRegistrar(
 			defaultRegistrarConfig(mock.server.URL),
@@ -816,5 +858,105 @@ var _ = Describe("Service Type Updates", Label("integration"), func() {
 		Expect(ok).To(BeTrue())
 		Expect(types).To(ContainElement("container"))
 		Expect(types).To(ContainElement("database"))
+	})
+})
+
+var _ = Describe("DCM Registrar Lifecycle Logging", Label("integration"), func() {
+	var (
+		mock   *mockDCM
+		ctx    context.Context
+		cancel context.CancelFunc
+		ch     *captureHandler
+	)
+
+	BeforeEach(func() {
+		mock = newMockDCM()
+		DeferCleanup(mock.server.Close)
+		ctx, cancel = context.WithCancel(context.Background()) //nolint:fatcontext // Ginkgo BeforeEach requires closure variable assignment
+		DeferCleanup(cancel)
+		ch = &captureHandler{}
+	})
+
+	It("logs startup, heartbeat success, and re-registration success (IT-DCM-190)", func() {
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		lag := &stubConsumerLagProvider{lag: 7}
+		r, err := dcm.NewRegistrar(
+			defaultRegistrarConfig(mock.server.URL),
+			lister, lag, nil, slog.New(ch),
+		)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() bool {
+			_, ok := findRecord(ch.all(), "DCM registrar starting")
+			return ok
+		}, 2*time.Second, 20*time.Millisecond).Should(BeTrue())
+
+		Eventually(func() bool {
+			_, ok := findRecord(ch.all(), "heartbeat succeeded")
+			return ok
+		}, 2*time.Second, 20*time.Millisecond).Should(BeTrue())
+		hbRec, _ := findRecord(ch.all(), "heartbeat succeeded")
+		Expect(hbRec.Level).To(Equal(slog.LevelDebug))
+		v, ok := recordAttr(hbRec, "agent_id")
+		Expect(ok).To(BeTrue())
+		Expect(v.String()).To(Equal("agent-123"))
+		v, ok = recordAttr(hbRec, "consumer_lag")
+		Expect(ok).To(BeTrue())
+		Expect(v.Int64()).To(Equal(int64(7)))
+
+		lister.setTypes([]string{"container", "database"})
+		r.NotifyServiceTypeChange()
+
+		Eventually(func() bool {
+			_, ok := findRecord(ch.all(), "re-registered with DCM")
+			return ok
+		}, 2*time.Second, 20*time.Millisecond).Should(BeTrue())
+		reRegRec, _ := findRecord(ch.all(), "re-registered with DCM")
+		Expect(reRegRec.Level).To(Equal(slog.LevelInfo))
+		v, ok = recordAttr(reRegRec, "agent_id")
+		Expect(ok).To(BeTrue())
+		Expect(v.String()).To(Equal("agent-123"))
+	})
+
+	It("distinguishes a post-panic restart from a fresh start in the startup log (IT-DCM-195)", func() {
+		// panicNTimesLister panics once from inside run(), forcing the
+		// supervisor to recover and restart run() — the resulting second
+		// "DCM registrar starting" log line must cross-reference the
+		// restart via restart_attempt so operators can tell it apart from
+		// the initial startup log.
+		lister := &panicNTimesLister{n: 1, types: []string{"container"}}
+		r, err := dcm.NewRegistrar(
+			defaultRegistrarConfig(mock.server.URL),
+			lister, &stubConsumerLagProvider{}, nil, slog.New(ch),
+		)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() int {
+			return len(findRecords(ch.all(), "DCM registrar starting"))
+		}, 3*time.Second, 20*time.Millisecond).Should(Equal(2),
+			"expected exactly one fresh-start log and one restart log")
+
+		startRecs := findRecords(ch.all(), "DCM registrar starting")
+		Expect(startRecs).To(HaveLen(2))
+
+		_, hasAttr := recordAttr(startRecs[0], "restart_attempt")
+		Expect(hasAttr).To(BeFalse(), "the initial startup log must not carry restart_attempt")
+
+		v, hasAttr := recordAttr(startRecs[1], "restart_attempt")
+		Expect(hasAttr).To(BeTrue(), "the post-panic restart log must carry restart_attempt")
+		Expect(v.Int64()).To(BeNumerically(">=", 1))
+
+		Eventually(func() bool {
+			_, ok := findRecord(ch.all(), "panic in DCM registrar goroutine, restarting")
+			return ok
+		}, 2*time.Second, 20*time.Millisecond).Should(BeTrue())
+		panicRec, _ := findRecord(ch.all(), "panic in DCM registrar goroutine, restarting")
+		v, hasAttr = recordAttr(panicRec, "restart_attempt")
+		Expect(hasAttr).To(BeTrue(), "the panic log should also carry restart_attempt for cross-reference")
+		Expect(v.Int64()).To(Equal(int64(1)))
 	})
 })

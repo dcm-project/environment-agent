@@ -573,6 +573,39 @@ Unless overridden, tests use:
 - **And** the error detail MUST name the conflicting holder ("db-provider") in addition to the
   service type
 
+### IT-SPR-190: Embedded SP registration success logged
+
+- **Validates AC:** AC-SPR-220
+- **Test Infrastructure:** `slog.Handler` capture in `service_test.go`/`service_integration_test.go`
+- **Given** `registerEmbeddedType` completes without error
+- **When** the embedded SP is registered
+- **Then** an INFO log MUST be emitted with `service_type`, `provider_id`
+
+### IT-SPR-191: External SP registration success logged
+
+- **Validates AC:** AC-SPR-040 (REQ-SPR-230)
+- **Test Infrastructure:** Real HTTP server; `slog.Handler` capture
+- **Given** `POST /api/v1alpha1/providers` registers a brand-new SP successfully
+- **When** `createRegistration` completes
+- **Then** an INFO log MUST be emitted with `service_type`, `provider_id`, `name`
+
+### IT-SPR-192: External SP registration rejection logged with holder identity
+
+- **Validates AC:** AC-SPR-060 (REQ-SPR-240)
+- **Test Infrastructure:** Real HTTP server; `slog.Handler` capture
+- **Given** a service type slot is already held by another provider
+- **When** a new external SP attempts to register for that service type and is rejected with 409
+- **Then** a WARN log MUST be emitted with `service_type`, `name`, `error` (identifying the existing holder)
+
+### IT-SPR-193: Persisted provider restore logged with identity and summary
+
+- **Validates AC:** AC-SPR-250
+- **Test Infrastructure:** `slog.Handler` capture in `provider_integration_test.go`; persistence store pre-populated with 2+ providers
+- **Given** `LoadPersisted` runs at startup with providers "db-provider" (external, "database") and "widget" (embedded, "widget")
+- **When** each is successfully restored
+- **Then** an INFO log MUST be emitted per provider with `name`, `service_type`, `type`
+- **And** a final INFO summary log MUST be emitted with `restored` and `conflicts` counts
+
 ---
 
 ## Topic 4: Provider Query Endpoints
@@ -889,6 +922,25 @@ Unless overridden, tests use:
 - **When** the SP re-registers with the same endpoint but a different display_name
 - **Then** the SP state MUST remain Ready
 
+### IT-HMN-190: Individual health-check result logged at DEBUG
+
+- **Validates AC:** AC-HMN-280
+- **Test Infrastructure:** `slog.Handler` capture in `monitor_test.go`/`checker_test.go`; mock external SP; embedded checker
+- **Given** a health check (external HTTP poll or embedded check) completes
+- **When** the result is recorded
+- **Then** a DEBUG log MUST be emitted with `provider_id`, outcome, `duration`
+
+### IT-HMN-191: New provider registered for monitoring, and initial-check transition logged with parity
+
+- **Validates AC:** AC-HMN-290
+- **Test Infrastructure:** `slog.Handler` capture in `monitor_test.go`
+- **Given** `RegisterProvider` is called for a new provider
+- **When** it is added to the monitored set
+- **Then** an INFO log MUST be emitted with `provider_id`, `initial_state`
+- **Given** the initial check performed by `RegisterProvider` detects `from != to`
+- **When** the transition is recorded
+- **Then** a WARN log MUST be emitted with `provider_id`, `from`, `to` — the same fields a periodic-check transition emits (regression check: this path used to skip the transition log entirely)
+
 ---
 
 ## Topic 6: DCM Registration & Heartbeat
@@ -1121,6 +1173,20 @@ Unless overridden, tests use:
   registration silently, permanently stalled for the rest of the process lifetime — a regression
   this version of the test would have missed entirely, since it treated goroutine exit as correct.
   See `DD-360`
+
+### IT-DCM-190: Registrar start/stop, heartbeat success, re-registration success logged
+
+- **Validates AC:** AC-DCM-180
+- **Test Infrastructure:** Mock DCM; `slog.Handler` capture in `registrar_integration_test.go`
+- **Given** the registrar starts
+- **When** its goroutine begins running
+- **Then** an INFO log MUST be emitted
+- **Given** a heartbeat succeeds
+- **When** it completes
+- **Then** a DEBUG log MUST be emitted with `agent_id`, `consumer_lag`
+- **Given** a service-type change triggers re-registration and it succeeds
+- **When** it completes
+- **Then** an INFO log MUST be emitted with `agent_id`
 
 ---
 
@@ -1382,6 +1448,37 @@ Unless overridden, tests use:
 - **And** the message MUST be nak'd
 - **And** JetStream MUST redeliver the message (delivery count >= 2)
 
+### IT-MSG-170: Message receipt logged on main and cancel subjects
+
+- **Validates AC:** AC-MSG-160
+- **Test Infrastructure:** NATS JetStream; `slog.Handler` capture (extend `handlers_test.go`'s `captureHandler`)
+- **Given** a CloudEvent is published to the main subject
+- **When** `handleMainMessage` begins processing it
+- **Then** an INFO log MUST be emitted with `ce_id`, `ce_type`, `subject`, `stream_seq`, `consumer_seq`, `num_delivered`
+- **And** the same MUST hold for `handleCancelMessage` on the cancel subject
+
+### IT-MSG-171: Message resolution (ack/nak) logged
+
+- **Validates AC:** AC-MSG-170
+- **Test Infrastructure:** Same capture-handler setup as IT-MSG-170
+- **Given** a main-topic message whose handler returns nil
+- **When** `msg.Ack()` succeeds
+- **Then** an INFO log MUST be emitted with `ce_id`, `ce_type`, `subject`
+- **Given** a main-topic message whose handler returns an error
+- **When** `msg.NakWithDelay` succeeds
+- **Then** a WARN log MUST be emitted with `ce_id`, `ce_type`, `subject`, `error`
+
+### IT-MSG-172: Messaging ready and stopped logged
+
+- **Validates AC:** AC-MSG-180
+- **Test Infrastructure:** Real embedded NATS/JetStream server; `slog.Handler` capture
+- **Given** the messaging client starts and JetStream setup succeeds
+- **When** consumption begins (`StartConsuming` runs, directly or via `SetOnSetupReady`)
+- **Then** an INFO log MUST be emitted
+- **Given** `Stop()` is called
+- **When** shutdown completes
+- **Then** an INFO log MUST be emitted
+
 ---
 
 ## Topic 8: Resource Operation Routing
@@ -1576,6 +1673,40 @@ Unless overridden, tests use:
 
 ---
 
+### IT-RTE-140: CloudEvent publish outcome logged
+
+- **Validates AC:** AC-RCM-240
+- **Test Infrastructure:** NATS; `slog.Handler` capture in `router_test.go`
+- **Given** `Router.publishCE` is called and the publish succeeds
+- **When** the CE is published
+- **Then** an INFO log MUST be emitted with `ce_type`, `resource_id`
+- **Given** the publish fails (e.g. publisher returns an error)
+- **When** the publish attempt fails
+- **Then** a WARN log MUST be emitted with `ce_type`, `resource_id`, `error`
+
+### IT-RTE-141: SP dispatch outcome logged, no request/response body leaked
+
+- **Validates AC:** AC-RCM-250
+- **Test Infrastructure:** `slog.Handler` capture in `forwarder_test.go`; mock external SP HTTP server; embedded SP stub
+- **Given** a create or delete dispatch to an SP completes, successfully or not, for both embedded and external providers
+- **When** `Forwarder.CreateResource`/`DeleteResource` returns
+- **Then** a log MUST be emitted (INFO on success, WARN on failure) with `resource_id`, `service_type`, provider kind, `operation`, `duration`
+- **And** a failed external dispatch's log MUST include `http_status`
+- **And** no log entry MUST contain the request spec payload or the HTTP response body
+
+### IT-RTE-142: Deny-list drop and retry-topic purge summary logged
+
+- **Validates AC:** AC-RCM-260
+- **Test Infrastructure:** Same setup as IT-RTE-100 and IT-RTE-120, extended with `slog.Handler` capture
+- **Given** a create request is dropped because its `resource_id` is on the deny list
+- **When** it is dropped
+- **Then** an INFO log MUST be emitted with `resource_id`
+- **Given** `purgeFromRetryTopic` runs during a cancel with other resources present in the retry topic
+- **When** it completes
+- **Then** an INFO log MUST be emitted with `resource_id`, `matched`, `republished`
+
+---
+
 ## Topic 9: Retry & Cancel Mechanisms
 
 ### IT-RCM-010: SP recovers — retry topic processed
@@ -1694,6 +1825,14 @@ Unless overridden, tests use:
   retry-topic path (`routing/retry/processor.go`) had none, so a retry-topic message that
   exhausted server-side `MaxDeliver` used to vanish with no error CE and no `Term()`.
 
+### IT-RCM-086: Retry-topic MaxDeliver logging has main-topic parity
+
+- **Validates AC:** AC-RCM-270
+- **Test Infrastructure:** Same setup as IT-RCM-085, extended with `slog.Handler` capture
+- **Given** a retry-topic message exceeds `MaxDeliver`
+- **When** it is about to be terminated
+- **Then** a WARN log MUST be emitted with `resource_id`, `ce_id`, `ce_type`, `subject`, `stream_seq`, `consumer_seq` — the same fields the main-topic guard (IT-RCM-080) already logs
+
 ---
 
 ## Cross-Cutting: Error Handling
@@ -1773,6 +1912,17 @@ Unless overridden, tests use:
 - **Then** unrecoverable failures MUST use ERROR level
 - **And** recoverable issues (retries, SP health transitions) MUST use WARN
 - **And** lifecycle events (startup, SP registration) MUST use INFO
+
+---
+
+### IT-XC-LOG-030: Canonical correlation field names across log sites
+
+- **Validates AC:** AC-XC-LOG-030
+- **Test Infrastructure:** `slog.Handler` capture spanning a full resource lifecycle (receive, dispatch, publish) and an SP registration, asserting across the accumulated log records
+- **Given** a create request flows through receipt, dispatch, and response-publish, and an SP registers
+- **When** the accumulated log records are inspected
+- **Then** every resource/CE/service-type/provider correlation field key MUST be one of `resource_id`, `ce_id`, `ce_type`, `service_type`, `provider_id`
+- **And** none MUST use a camelCase variant (`resourceId`, `ceId`, `providerID`, etc.)
 
 ---
 

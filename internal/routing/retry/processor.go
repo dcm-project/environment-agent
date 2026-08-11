@@ -20,8 +20,14 @@ import (
 )
 
 const (
-	fetchBatchSize       = 100
-	fetchMaxWait         = 200 * time.Millisecond
+	fetchBatchSize = 100
+	fetchMaxWait   = 200 * time.Millisecond
+	// storeErrorRetryDelay is the NakWithDelay backoff used whenever a
+	// retry-topic message can't be resolved yet (transient store error,
+	// forward failure, provider not found/not ready). It MUST be applied via
+	// NakWithDelay on the SAME JetStream message rather than a fresh
+	// ack+republish, so JetStream's own delivery count increments and the
+	// terminalOnMaxDeliver guard can eventually trigger (REQ-RCM-270).
 	storeErrorRetryDelay = 10 * time.Second
 )
 
@@ -29,11 +35,7 @@ const (
 //
 // MaxDeliver-exceeded handling is split by topic: messaging.Client
 // (handleMainMessage) owns it for the main topic, and Processor
-// (terminalOnMaxDeliver) owns the mirrored guard for the retry topic — see
-// terminalOnMaxDeliver's doc comment. An earlier main-topic consume loop
-// duplicated main-topic handling here (Processor.Start/handleMessage); that
-// was dead code (never wired from main.go) and has been removed, but the
-// retry-topic guard below is live, wired code, not a leftover.
+// (terminalOnMaxDeliver) owns the mirrored guard for the retry topic.
 type ProcessorConfig struct {
 	HandlerTimeout time.Duration
 	// MaxDeliver mirrors messaging.ClientConfig.MaxDeliver: the same value is
@@ -126,11 +128,11 @@ func (p *Processor) RunTransition(ctx context.Context, providerID string, from, 
 		defer p.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				p.deps.Logger.Error("panic in transition processor", "panic", r, "providerID", providerID)
+				p.deps.Logger.Error("panic in transition processor", "panic", r, "provider_id", providerID)
 			}
 		}()
 		if err := p.ProcessOnTransition(ctx, providerID, from, to); err != nil {
-			p.deps.Logger.Error("transition processing failed", "error", err, "providerID", providerID, "to", to)
+			p.deps.Logger.Error("transition processing failed", "error", err, "provider_id", providerID, "to", to)
 		}
 	}()
 }
@@ -142,13 +144,14 @@ func (p *Processor) ProcessOnTransition(ctx context.Context, providerID string, 
 	if to != v1alpha1.Ready && to != v1alpha1.Unavailable {
 		return nil
 	}
+	p.deps.Logger.Info("processing retry topic for transition", "provider_id", providerID, "to", to)
 
 	sp, err := p.deps.Store.GetByID(ctx, providerID)
 	if err != nil {
 		return fmt.Errorf("ProcessOnTransition: store lookup failed for provider %s: %w", providerID, err)
 	}
 	if sp == nil {
-		p.deps.Logger.Warn("ProcessOnTransition: provider not found in store", "providerID", providerID)
+		p.deps.Logger.Warn("ProcessOnTransition: provider not found in store", "provider_id", providerID)
 		return nil
 	}
 
@@ -162,40 +165,39 @@ func (p *Processor) ProcessOnTransition(ctx context.Context, providerID string, 
 	items := p.parseMessages(ctx, msgs)
 	items = p.dedupCreateDeletePairs(ctx, items)
 	p.processTransitionItems(ctx, sp, items)
+	p.deps.Logger.Info("processed retry topic for transition", "provider_id", providerID, "to", to, "items", len(items))
 	return nil
 }
 
 // processTransitionItems dispatches surviving (non-deduped) retry items after a
 // provider health transition.
 //
-// health-toctou-guard: this always re-resolves the CURRENT provider status for
-// the item's service type rather than trusting the transition callback's `to`
-// parameter, which can be stale by the time this goroutine runs (RunTransition
-// backgrounds it). Per REQ-RCM-040, an item is only rejected when the service
-// type's SP is *currently* Unavailable — if the SP flapped back to Ready (or is
-// merely Unhealthy) in the interim, it must not be permanently rejected/acked
-// based on a transition notification that no longer reflects reality.
+// Re-resolves the CURRENT provider status rather than trusting the stale `to`
+// parameter (RunTransition backgrounds this call) — an item is only rejected
+// when the SP is *currently* Unavailable (REQ-RCM-040).
 func (p *Processor) processTransitionItems(ctx context.Context, sp *store.StoredProvider, items []parsedMessage) {
 	heartbeatAll(items)
 	for _, item := range items {
 		isCreate := item.ceType == cloudevent.TypeRequestCreate
 		if isCreate && p.deps.DenyList.Contains(item.resourceID) {
+			p.deps.Logger.Info("create request dropped, resource in deny list", "resource_id", item.resourceID)
 			_ = item.msg.Ack()
 			continue
 		}
 		if item.serviceType != sp.ServiceType {
 			_ = item.msg.InProgress()
-			p.routeMessage(ctx, item.msg, item.ceResult)
+			p.routeMessage(ctx, item.msg, item.ceResult, true)
 			continue
 		}
 		_, currentStatus, ok, storeErr := p.resolveProviderForServiceType(ctx, item.serviceType)
 		if storeErr != nil {
-			p.deps.Logger.Warn("transient store error during transition processing", "error", storeErr, "resourceId", item.resourceID)
+			p.deps.Logger.Warn("transient store error during transition processing", "error", storeErr,
+				"resource_id", item.resourceID, "ce_id", item.eventID, "service_type", item.serviceType)
 			_ = item.msg.NakWithDelay(storeErrorRetryDelay)
 			continue
 		}
 		if !ok || currentStatus == v1alpha1.Unavailable {
-			p.publishCE(ctx, cloudevent.TypeError, routing.ErrorData{
+			p.publishCE(ctx, cloudevent.TypeError, item.resourceID, item.eventID, routing.ErrorData{
 				ResponseContext: p.responseCtx(item.resourceID),
 				Error:           routing.ErrorSPUnavailable, Details: "provider unavailable for service type: " + item.serviceType,
 			})
@@ -204,9 +206,10 @@ func (p *Processor) processTransitionItems(ctx context.Context, sp *store.Stored
 		}
 		_ = item.msg.InProgress()
 		if !p.forwardRequest(ctx, sp, item.ceResult) {
-			if err := p.deps.Publisher.Publish(ctx, p.deps.Topics.Retry, item.msg.Data()); err == nil {
-				_ = item.msg.Ack()
-			}
+			// item.msg already lives on the retry topic: Nak it in place
+			// (not ack+republish) so JetStream's delivery count increments
+			// instead of resetting to 1 on every failed attempt.
+			_ = item.msg.NakWithDelay(storeErrorRetryDelay)
 			continue
 		}
 		_ = item.msg.Ack()
@@ -243,6 +246,7 @@ func (p *Processor) drainCancelsToDenyList(ctx context.Context) error {
 		p.deps.DenyList.Add(res.resourceID)
 		_ = m.Ack()
 	}
+	p.deps.Logger.Info("drained cancel topic on restart", "messages", len(cancelMsgs))
 	return nil
 }
 
@@ -259,12 +263,14 @@ func (p *Processor) drainMainTopic(ctx context.Context) error {
 			continue
 		}
 		if res.ceType == cloudevent.TypeRequestCreate && p.deps.DenyList.Contains(res.resourceID) {
+			p.deps.Logger.Info("create request dropped, resource in deny list", "resource_id", res.resourceID)
 			_ = m.Ack()
 			continue
 		}
 		_ = m.InProgress()
-		p.routeMessage(ctx, m, res)
+		p.routeMessage(ctx, m, res, false)
 	}
+	p.deps.Logger.Info("drained main topic on restart", "messages", len(mainMsgs))
 	return nil
 }
 
@@ -282,23 +288,25 @@ func (p *Processor) drainRetryTopicWithDedup(ctx context.Context) error {
 	heartbeatAll(items)
 	for _, item := range items {
 		if item.ceType == cloudevent.TypeRequestCreate && p.deps.DenyList.Contains(item.resourceID) {
+			p.deps.Logger.Info("create request dropped, resource in deny list", "resource_id", item.resourceID)
 			_ = item.msg.Ack()
 			continue
 		}
 		_ = item.msg.InProgress()
-		p.routeMessage(ctx, item.msg, item.ceResult)
+		p.routeMessage(ctx, item.msg, item.ceResult, true)
 	}
+	p.deps.Logger.Info("drained retry topic on restart", "fetched", len(retryMsgs), "processed", len(items))
 	return nil
 }
 
 // publishAckCE emits the appropriate creation-acked or deletion-acked CE.
 func (p *Processor) publishAckCE(ctx context.Context, res ceResult) {
 	if res.ceType == cloudevent.TypeRequestDelete {
-		p.publishCE(ctx, cloudevent.TypeDeletionAcked, routing.DeletionAckData{
+		p.publishCE(ctx, cloudevent.TypeDeletionAcked, res.resourceID, res.eventID, routing.DeletionAckData{
 			ResponseContext: p.responseCtx(res.resourceID), Status: "DELETING",
 		})
 	} else {
-		p.publishCE(ctx, cloudevent.TypeCreationAcked, routing.CreationAckData{
+		p.publishCE(ctx, cloudevent.TypeCreationAcked, res.resourceID, res.eventID, routing.CreationAckData{
 			ResponseContext: p.responseCtx(res.resourceID), Status: "PROVISIONING",
 		})
 	}
@@ -333,14 +341,10 @@ func (p *Processor) FetchRetryMessages(ctx context.Context) ([]routing.RetryMess
 			ResourceID:  res.resourceID,
 			ServiceType: res.serviceType,
 			AckFunc:     func() error { return msg.Ack() },
+			NakFunc:     func() error { return msg.NakWithDelay(storeErrorRetryDelay) },
 		})
 	}
 	return result, nil
-}
-
-// RepublishToRetry implements routing.RetryTopicConsumer.
-func (p *Processor) RepublishToRetry(ctx context.Context, data []byte) error {
-	return p.deps.Publisher.Publish(ctx, p.deps.Topics.Retry, data)
 }
 
 type ceResult struct {
@@ -377,14 +381,9 @@ func (p *Processor) parseMessages(ctx context.Context, msgs []jetstream.Msg) []p
 }
 
 // terminalOnMaxDeliver mirrors messaging.Client.handleMainMessage's MaxDeliver
-// guard (internal/messaging/handlers.go) for the retry-topic path. Both
-// consumers are created with the same configured MaxDeliver
-// (messaging.Client.initConsumers), but prior to this the retry path had no
-// terminal handling: a retry message that exhausted JetStream's server-side
-// MaxDeliver would simply stop being redelivered silently, with no error CE
-// and no Term() — the resource operation would vanish without a trace. See
-// REQ-RCM-160 and the decision doc's entry on retry-topic MaxDeliver
-// handling.
+// guard (internal/messaging/handlers.go) for the retry-topic path, so a
+// message that exhausts JetStream's MaxDeliver gets an error CE and a Term()
+// instead of silently vanishing (REQ-RCM-160).
 //
 // Returns true if the message was terminally handled here (caller must not
 // process it further).
@@ -402,11 +401,21 @@ func (p *Processor) terminalOnMaxDeliver(ctx context.Context, m jetstream.Msg) b
 		return false
 	}
 
-	resourceID := ""
+	resourceID, ceID, ceType := "", "unknown", "unknown"
 	if res, ok := p.parseCE(m.Data()); ok {
-		resourceID = res.resourceID
+		resourceID, ceID, ceType = res.resourceID, res.eventID, res.ceType
 	}
-	p.publishCE(ctx, cloudevent.TypeError, routing.ErrorData{
+	if ceID == "" {
+		ceID = "unknown"
+	}
+	// Parity with messaging.Client.publishMaxDeliverError (main-topic path):
+	// log the same structured fields before terminating so the retry-topic
+	// path is equally observable (REQ-RCM-270).
+	p.deps.Logger.Warn("max delivery exceeded, terminating retry message",
+		"resource_id", resourceID, "ce_id", ceID, "ce_type", ceType, "subject", m.Subject(),
+		"stream_seq", meta.Sequence.Stream, "consumer_seq", meta.Sequence.Consumer,
+	)
+	p.publishCE(ctx, cloudevent.TypeError, resourceID, ceID, routing.ErrorData{
 		ResponseContext: p.responseCtx(resourceID),
 		Error:           routing.ErrorMaxDeliveryExceeded, Details: "max delivery attempts exceeded",
 	})
@@ -415,7 +424,8 @@ func (p *Processor) terminalOnMaxDeliver(ctx context.Context, m jetstream.Msg) b
 	// publishing a duplicate terminal error CE — same documented trade-off as
 	// messaging.Client.publishMaxDeliverError.
 	if err := m.Term(); err != nil {
-		p.deps.Logger.Warn("failed to terminate max-delivery retry message, may be redelivered", "error", err)
+		p.deps.Logger.Warn("failed to terminate max-delivery retry message, may be redelivered",
+			"error", err, "resource_id", resourceID, "ce_id", ceID, "ce_type", ceType)
 	}
 	return true
 }
@@ -458,10 +468,10 @@ func (p *Processor) dedupCreateDeletePairs(ctx context.Context, items []parsedMe
 				_ = items[idx].msg.Ack()
 				deduped[idx] = true
 			}
-			p.publishCE(ctx, cloudevent.TypeDeletionAcked, routing.DeletionAckData{
+			p.publishCE(ctx, cloudevent.TypeDeletionAcked, resID, "", routing.DeletionAckData{
 				ResponseContext: p.responseCtx(resID), Status: "DELETED",
 			})
-			p.deps.Logger.Info("dedup cancelled create+delete pair", "resourceId", resID)
+			p.deps.Logger.Info("dedup cancelled create+delete pair", "resource_id", resID)
 		}
 	}
 
@@ -486,7 +496,7 @@ func (p *Processor) parseCE(data []byte) (ceResult, bool) {
 	switch event.Type() {
 	case cloudevent.TypeRequestCreate, cloudevent.TypeRequestDelete, cloudevent.TypeRequestCancel:
 	default:
-		p.deps.Logger.Warn("dropping unknown CE type", "type", event.Type())
+		p.deps.Logger.Warn("dropping unknown CE type", "ce_type", event.Type(), "ce_id", event.ID())
 		return ceResult{}, false
 	}
 	var payload struct {
@@ -495,7 +505,7 @@ func (p *Processor) parseCE(data []byte) (ceResult, bool) {
 		Spec        json.RawMessage `json:"spec,omitempty"`
 	}
 	if err := json.Unmarshal(event.Data(), &payload); err != nil {
-		p.deps.Logger.Warn("dropping CE with unparseable data", "error", err)
+		p.deps.Logger.Warn("dropping CE with unparseable data", "error", err, "ce_id", event.ID(), "ce_type", event.Type())
 		return ceResult{}, false
 	}
 	return ceResult{
@@ -511,10 +521,15 @@ func (p *Processor) responseCtx(resourceID string) routing.ResponseContext {
 	return routing.ResponseContext{ResourceID: resourceID, AgentName: p.deps.AgentName, TopicName: p.deps.Topics.Main}
 }
 
-func (p *Processor) publishCE(ctx context.Context, ceType string, data any) {
+// publishCE publishes an outcome CE. ceID is the inbound CE id that
+// triggered this publish (empty when no single inbound CE applies), included
+// in the logs so redeliveries can be correlated back to their trigger.
+func (p *Processor) publishCE(ctx context.Context, ceType, resourceID, ceID string, data any) {
 	if err := cloudevent.PublishCE(ctx, p.deps.Publisher.PublishWithMsgID, cloudevent.SubjectResponses, p.deps.AgentName, ceType, data); err != nil {
-		p.deps.Logger.Warn("failed to publish CE", "type", ceType, "error", err)
+		p.deps.Logger.Warn("failed to publish CE", "ce_type", ceType, "resource_id", resourceID, "ce_id", ceID, "error", err)
+		return
 	}
+	p.deps.Logger.Info("published CE", "ce_type", ceType, "resource_id", resourceID, "ce_id", ceID)
 }
 
 func (p *Processor) resolveProviderForServiceType(ctx context.Context, serviceType string) (*store.StoredProvider, v1alpha1.ProviderStatus, bool, error) {
@@ -523,7 +538,7 @@ func (p *Processor) resolveProviderForServiceType(ctx context.Context, serviceTy
 
 func (p *Processor) forwardRequest(ctx context.Context, sp *store.StoredProvider, res ceResult) bool {
 	if p.deps.Forwarder == nil {
-		p.publishCE(ctx, cloudevent.TypeError, routing.ErrorData{
+		p.publishCE(ctx, cloudevent.TypeError, res.resourceID, res.eventID, routing.ErrorData{
 			ResponseContext: p.responseCtx(res.resourceID),
 			Error:           routing.ErrorSPUnavailable, Details: "forwarder not configured",
 		})
@@ -541,6 +556,7 @@ func (p *Processor) forwardRequest(ctx context.Context, sp *store.StoredProvider
 	// deny-listed (REQ-RTE-150/160).
 	isCreate := res.ceType == cloudevent.TypeRequestCreate
 	if isCreate && p.deps.DenyList.Contains(res.resourceID) {
+		p.deps.Logger.Info("create request dropped, resource in deny list", "resource_id", res.resourceID)
 		if newlyAdded {
 			p.deps.ClaimedResourcesSet.Remove(res.resourceID)
 		}
@@ -561,7 +577,9 @@ func (p *Processor) forwardRequest(ctx context.Context, sp *store.StoredProvider
 		Spec: res.spec, EventID: res.eventID, IsCreate: res.ceType != cloudevent.TypeRequestDelete,
 	})
 	if err != nil {
-		p.deps.Logger.Warn("forward failed during transition processing", "resourceId", res.resourceID, "error", err)
+		p.deps.Logger.Warn("forward failed during transition processing", append([]any{
+			"resource_id", res.resourceID, "ce_id", res.eventID, "provider_id", sp.ID, "service_type", res.serviceType,
+		}, routing.SafeErrorAttrs(err)...)...)
 		if newlyAdded {
 			p.deps.ClaimedResourcesSet.Remove(res.resourceID)
 		}
@@ -572,38 +590,60 @@ func (p *Processor) forwardRequest(ctx context.Context, sp *store.StoredProvider
 	return true
 }
 
-func (p *Processor) routeMessage(ctx context.Context, msg jetstream.Msg, res ceResult) {
+// routeMessage resolves a provider for res and either forwards, rejects, or
+// re-queues msg for a later attempt. fromRetryTopic must be true when msg was
+// fetched from the retry-topic consumer (RunTransition, drainRetryTopicWithDedup)
+// and false when it's still on the main topic (drainMainTopic) — see
+// requeueToRetryTopic for why the distinction matters.
+func (p *Processor) routeMessage(ctx context.Context, msg jetstream.Msg, res ceResult, fromRetryTopic bool) {
 	sp, status, ok, storeErr := p.resolveProviderForServiceType(ctx, res.serviceType)
 	if storeErr != nil {
-		p.deps.Logger.Warn("transient store error during routing", "error", storeErr, "resourceId", res.resourceID)
+		p.deps.Logger.Warn("transient store error during routing", "error", storeErr,
+			"resource_id", res.resourceID, "ce_id", res.eventID, "service_type", res.serviceType)
 		_ = msg.NakWithDelay(storeErrorRetryDelay)
 		return
 	}
 	if !ok {
-		if err := p.deps.Publisher.Publish(ctx, p.deps.Topics.Retry, msg.Data()); err == nil {
-			_ = msg.Ack()
-		}
+		p.requeueToRetryTopic(ctx, msg, fromRetryTopic)
 		return
 	}
 	switch status {
 	case v1alpha1.Ready:
 		if !p.forwardRequest(ctx, sp, res) {
-			if err := p.deps.Publisher.Publish(ctx, p.deps.Topics.Retry, msg.Data()); err == nil {
-				_ = msg.Ack()
-			}
+			p.requeueToRetryTopic(ctx, msg, fromRetryTopic)
 			return
 		}
 		_ = msg.Ack()
 	case v1alpha1.Unavailable:
-		p.publishCE(ctx, cloudevent.TypeError, routing.ErrorData{
+		p.publishCE(ctx, cloudevent.TypeError, res.resourceID, res.eventID, routing.ErrorData{
 			ResponseContext: p.responseCtx(res.resourceID),
 			Error:           routing.ErrorSPUnavailable, Details: "provider unavailable for service type: " + res.serviceType,
 		})
 		_ = msg.Ack()
 	default:
-		if err := p.deps.Publisher.Publish(ctx, p.deps.Topics.Retry, msg.Data()); err == nil {
-			_ = msg.Ack()
-		}
+		p.requeueToRetryTopic(ctx, msg, fromRetryTopic)
+	}
+}
+
+// requeueToRetryTopic re-queues a message that isn't ready to forward yet.
+//
+// If msg already lives on the retry topic (fromRetryTopic), it is Nak'd in
+// place so JetStream's own delivery count increments across attempts —
+// required for terminalOnMaxDeliver to ever trigger (REQ-RCM-270). Acking it
+// and publishing a fresh copy instead would reset that count to 1 on every
+// attempt, defeating the MaxDeliver guard for a persistently-failing SP.
+//
+// If msg is still on the main topic (!fromRetryTopic), it must move across
+// streams to enter the retry flow for the first time: publishing a fresh copy
+// to the retry topic and acking the original is the only way to do that, and
+// correctly starts the retry-topic delivery count at 1.
+func (p *Processor) requeueToRetryTopic(ctx context.Context, msg jetstream.Msg, fromRetryTopic bool) {
+	if fromRetryTopic {
+		_ = msg.NakWithDelay(storeErrorRetryDelay)
+		return
+	}
+	if err := p.deps.Publisher.Publish(ctx, p.deps.Topics.Retry, msg.Data()); err == nil {
+		_ = msg.Ack()
 	}
 }
 

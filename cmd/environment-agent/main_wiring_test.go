@@ -19,24 +19,12 @@ import (
 	"github.com/dcm-project/environment-agent/internal/routing"
 )
 
-// This test exercises main.go's actual composition-root wiring end to end —
-// unlike UT-SPR-100/101 in internal/provider/service, which construct
-// ProviderService/monitor.Monitor directly and prove the general ordering
-// property in isolation. Those unit tests give no regression protection
-// against main.go itself accidentally reverting to the buggy ordering
-// (SetOnTransition wired after RegisterEmbedded): they'd keep passing either
-// way, since they never touch main.go's run() at all.
-//
-// A real embedded NATS/JetStream server is required here because the only
-// externally-observable side effect of the embedded SP's synchronous
-// Ready->Unhealthy transition (forced via AGENT_EMBEDDED_SP_WIDGET_HEALTH)
-// reaching healthMonitor's onTransition callback is a
-// dcm.agent.health.service-type-degraded CloudEvent published to
-// dcm.agents.health (health.CEPublisher.OnTransition) — the other two
-// effects wired into that same callback either don't fire for a plain
-// Unhealthy transition (registrar.NotifyServiceTypeChange only fires for
-// Unavailable-involving transitions) or aren't independently observable from
-// outside run() (retryProcessor.RunTransition).
+// This test exercises main.go's actual composition-root wiring end to end,
+// unlike UT-SPR-100/101 which construct ProviderService/monitor.Monitor
+// directly. A real embedded NATS/JetStream server is required because the
+// only externally-observable effect of the embedded SP's synchronous
+// Ready->Unhealthy transition is a health CE published to dcm.agents.health
+// (health.CEPublisher.OnTransition).
 var _ = Describe("run wiring: embedded SP transitions during RegisterEmbedded", Label("integration"), func() {
 	var (
 		testNATSServer *natsserver.Server
@@ -62,12 +50,9 @@ var _ = Describe("run wiring: embedded SP transitions during RegisterEmbedded", 
 		setupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		// dcm-agent-requests: control-plane-owned stream (F2) that
-		// messaging.Client.Start needs before it will consider setup
-		// complete and fire onSetupReady/populate c.js. The agent creates
-		// its own "dcm-health" stream for the health CE subject internally
-		// (initInternalStreams) — must not be pre-created here too, or
-		// JetStream rejects it with "subjects overlap with an existing
-		// stream".
+		// messaging.Client.Start needs before setup completes. Must not
+		// also pre-create "dcm-health" (the agent creates that one itself
+		// in initInternalStreams), or JetStream rejects the subject overlap.
 		_, err = js.CreateOrUpdateStream(setupCtx, jetstream.StreamConfig{
 			Name: messaging.RequestStreamName, Subjects: []string{"dcm.agent.>"},
 		})
@@ -95,9 +80,8 @@ var _ = Describe("run wiring: embedded SP transitions during RegisterEmbedded", 
 		GinkgoT().Setenv("AGENT_EMBEDDED_SP_WIDGET_HEALTH", "unhealthy")
 		GinkgoT().Setenv("AGENT_HEALTH_FAILURE_THRESHOLD", "1")
 
-		// Independent subscriber, not reusing any of run()'s own internals,
-		// so it observes exactly what a real NATS consumer of the health
-		// subject would see.
+		// Independent subscriber, not reusing run()'s internals, so it
+		// observes exactly what a real NATS consumer would see.
 		sub, err := nats.Connect(testNATSServer.ClientURL())
 		Expect(err).NotTo(HaveOccurred())
 		defer sub.Close()
@@ -109,12 +93,9 @@ var _ = Describe("run wiring: embedded SP transitions during RegisterEmbedded", 
 		ctx, cancel := context.WithCancel(context.Background())
 		runDone := make(chan int, 1)
 		go func() { runDone <- run(ctx) }()
-		// Unconditional cleanup (not just on the happy path at the bottom of
-		// this It): if the Eventually below fails, Ginkgo's Fail panics
-		// before reaching that point, and without this defer the agent's
-		// run(ctx) goroutine — HTTP listener, health monitor, registrar,
-		// messaging client all included — would keep running for the rest
-		// of the test binary's lifetime instead of being torn down.
+		// Deferred (not just at the bottom): Ginkgo's Fail panics on an
+		// Eventually failure, and without this the run(ctx) goroutine would
+		// keep running for the rest of the test binary's lifetime.
 		defer func() {
 			cancel()
 			Eventually(runDone, 5*time.Second).Should(Receive())

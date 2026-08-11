@@ -45,11 +45,9 @@ func (h *Handler) CreateProvider(ctx context.Context, request oapigen.CreateProv
 		}
 		providerID = request.Params.Id
 	}
-	// Trimmed once, at the HTTP trust boundary, then used consistently for
-	// both validation and the natural-key/slot values passed downstream —
-	// untrimmed values would let "provider1 " register as a distinct
-	// provider (or service-type slot) from "provider1", silently bypassing
-	// the idempotency/collision checks that assume an exact-string key.
+	// Trimmed once at the HTTP trust boundary, then used consistently for
+	// validation and downstream natural-key/slot values, so "provider1 " and
+	// "provider1" can't bypass idempotency/collision checks as distinct keys.
 	name := strings.TrimSpace(body.Name)
 	serviceType := strings.TrimSpace(body.ServiceType)
 

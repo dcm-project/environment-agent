@@ -146,11 +146,9 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 		_, err = testJS.Publish(ctx, topicName+".retry", routingtest.BuildCreateCE("res-d2", "database"))
 		Expect(err).NotTo(HaveOccurred())
 
-		// health-toctou-guard: processTransitionItems re-resolves current
-		// status rather than trusting the `to` argument, so the tracker must
-		// actually reflect Unavailable for this scenario (matches how a real
-		// health-monitor transition updates the tracker before invoking the
-		// callback).
+		// processTransitionItems re-resolves current status rather than
+		// trusting the `to` argument, so the tracker must actually reflect
+		// Unavailable for this scenario.
 		healthTracker.SetState(providerID, v1alpha1.Unavailable, time.Now())
 		Expect(processor.ProcessOnTransition(ctx, providerID, v1alpha1.Unhealthy, v1alpha1.Unavailable)).To(Succeed())
 
@@ -201,11 +199,9 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 	})
 
 	It("re-checks current health before rejecting on a stale Unavailable notification (IT-RCM-045, health-toctou-guard)", func() {
-		// Simulates the race: a transition callback fires with to=Unavailable,
-		// but by the time this goroutine actually runs, the SP has already
-		// flapped back to Ready (health monitor updates the tracker before
-		// this call in production — RunTransition backgrounds the work, so
-		// the callback's `to` argument can be stale by the time it executes).
+		// RunTransition backgrounds the transition callback, so its `to`
+		// argument can be stale by the time this runs if the SP has since
+		// flapped back to Ready.
 		providerID := routingtest.RegisterSP(ctx, registry, healthTracker, st, "db-provider", "database", v1alpha1.Unhealthy)
 
 		_, err := testJS.Publish(ctx, topicName+".retry", routingtest.BuildCreateCE("res-flap-1", "database"))
@@ -280,6 +276,97 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 		Expect(logBuf.String()).To(ContainSubstring("res-123"))
 	})
 
+	It("logs and drops a held create for a denied resource without forwarding (REQ-RCM-260)", func() {
+		providerID := routingtest.RegisterSP(ctx, registry, healthTracker, st, "db-provider", "database", v1alpha1.Unhealthy)
+
+		_, err := testJS.Publish(ctx, topicName+".retry", routingtest.BuildCreateCE("res-denied", "database"))
+		Expect(err).NotTo(HaveOccurred())
+
+		denyList.Add("res-denied")
+		healthTracker.SetState(providerID, v1alpha1.Ready, time.Now())
+		Expect(processor.ProcessOnTransition(ctx, providerID, v1alpha1.Unhealthy, v1alpha1.Ready)).To(Succeed())
+
+		Expect(fwdr.CreateCallCount()).To(Equal(0), "denied resource must not be forwarded to the SP")
+		routingtest.ExpectNoResponseCE(responseSub, 2*time.Second)
+
+		logged := logBuf.String()
+		Expect(logged).To(ContainSubstring("create request dropped, resource in deny list"))
+		Expect(logged).To(ContainSubstring("resource_id=res-denied"))
+
+		cons, err := testJS.Consumer(ctx, topicName+"-retry", topics.RetryConsumer())
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() uint64 {
+			info, infoErr := cons.Info(ctx)
+			if infoErr != nil {
+				return 1
+			}
+			return info.NumPending + uint64(info.NumAckPending)
+		}, 5*time.Second).Should(Equal(uint64(0)), "denied message must be acked, not left pending")
+	})
+
+	It("does not leak the SP response body into the forward-failure log (leak-check, mirrors forwarder_test.go AC-RCM-250)", func() {
+		providerID := routingtest.RegisterSP(ctx, registry, healthTracker, st, "db-provider", "database", v1alpha1.Unhealthy)
+		fwdr.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "sensitive backend detail"}
+
+		_, err := testJS.Publish(ctx, topicName+".retry", routingtest.BuildCreateCE("res-leak", "database"))
+		Expect(err).NotTo(HaveOccurred())
+
+		healthTracker.SetState(providerID, v1alpha1.Ready, time.Now())
+		Expect(processor.ProcessOnTransition(ctx, providerID, v1alpha1.Unhealthy, v1alpha1.Ready)).To(Succeed())
+
+		Eventually(func() int { return fwdr.CreateCallCount() }, 5*time.Second).Should(Equal(1))
+
+		logged := logBuf.String()
+		Expect(logged).To(ContainSubstring("forward failed during transition processing"))
+		Expect(logged).To(ContainSubstring("http_status=503"))
+		Expect(logged).NotTo(ContainSubstring("sensitive backend detail"))
+	})
+
+	It("Naks the retry-topic message in place on forward failure, instead of resetting its delivery count (REQ-RCM-270)", func() {
+		providerID := routingtest.RegisterSP(ctx, registry, healthTracker, st, "db-provider", "database", v1alpha1.Unhealthy)
+		fwdr.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "still failing"}
+
+		_, err := testJS.Publish(ctx, topicName+".retry", routingtest.BuildCreateCE("res-nak", "database"))
+		Expect(err).NotTo(HaveOccurred())
+
+		streamBefore, err := testJS.Stream(ctx, topicName+"-retry")
+		Expect(err).NotTo(HaveOccurred())
+		infoBefore, err := streamBefore.Info(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		healthTracker.SetState(providerID, v1alpha1.Ready, time.Now())
+		Expect(processor.ProcessOnTransition(ctx, providerID, v1alpha1.Unhealthy, v1alpha1.Ready)).To(Succeed())
+
+		Eventually(func() int { return fwdr.CreateCallCount() }, 5*time.Second).Should(Equal(1))
+
+		// A failed forward must Nak the EXISTING retry-topic message, not ack
+		// it and publish a fresh replacement: the old ack+republish behavior
+		// reset JetStream's delivery count to 1 on every failed attempt,
+		// making the MaxDeliver guard (terminalOnMaxDeliver) unreachable for
+		// a persistently-failing SP. A fixed implementation leaves the
+		// stream's message count/LastSeq unchanged.
+		streamAfter, err := testJS.Stream(ctx, topicName+"-retry")
+		Expect(err).NotTo(HaveOccurred())
+		infoAfter, err := streamAfter.Info(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(infoAfter.State.Msgs).To(Equal(infoBefore.State.Msgs),
+			"a failed forward must Nak the existing retry-topic message, not publish a fresh replacement")
+		Expect(infoAfter.State.LastSeq).To(Equal(infoBefore.State.LastSeq),
+			"no new message should have been appended to the retry stream")
+
+		// The original message must remain pending/redeliverable (Nak'd),
+		// not acked away.
+		cons, err := testJS.Consumer(ctx, topicName+"-retry", topics.RetryConsumer())
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() uint64 {
+			info, infoErr := cons.Info(ctx)
+			if infoErr != nil {
+				return 0
+			}
+			return info.NumPending + uint64(info.NumAckPending)
+		}, 5*time.Second).Should(BeNumerically(">", 0), "message must remain pending for redelivery, not be acked away")
+	})
+
 	It("publishes terminal error CE and Terms when a retry message exceeds MaxDeliver (IT-RCM-085)", func() {
 		// Give the retry consumer a real MaxDeliver + short AckWait so we can
 		// force genuine JetStream-level redelivery of the SAME message
@@ -329,6 +416,13 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 		Expect(errData.Error).To(Equal("MAX_DELIVERY_EXCEEDED"))
 
 		Expect(fwdr.CreateCallCount()).To(Equal(0), "message must not be forwarded once MaxDeliver is exhausted")
+
+		// Retry-topic MaxDeliver logging has main-topic parity (IT-RCM-086, AC-RCM-270).
+		logged := logBuf.String()
+		Expect(logged).To(ContainSubstring("max delivery exceeded, terminating retry message"))
+		Expect(logged).To(ContainSubstring("resource_id=res-exhausted"))
+		Expect(logged).To(ContainSubstring("stream_seq="))
+		Expect(logged).To(ContainSubstring("consumer_seq="))
 
 		Eventually(func() uint64 {
 			info, infoErr := cons.Info(ctx)

@@ -15,12 +15,9 @@ import (
 	"github.com/dcm-project/environment-agent/internal/messaging"
 )
 
-// REQ-XC-CE-050 (Nats-Msg-Id header) and REQ-MSG-135/150 were "correct by
-// inspection but never asserted at the wire level against a real NATS
-// server — tests bypass the real publish path via stubs." This file
-// exercises Client.PublishWithMsgID against the suite's real embedded
-// NATS/JetStream server and inspects the actual header/dedup behavior a NATS
-// consumer observes, rather than a fake Publisher.
+// This file exercises Client.PublishWithMsgID against the suite's real
+// embedded NATS/JetStream server, asserting the Nats-Msg-Id header and dedup
+// behavior (REQ-XC-CE-050, REQ-MSG-135/150) at the wire level.
 var _ = Describe("PublishWithMsgID wire-level behavior", Label("integration"), func() {
 	var (
 		ctx        context.Context

@@ -13,51 +13,75 @@ import (
 )
 
 func (c *Client) handleCancelMessage(msg jetstream.Msg) {
+	// Extraction must happen before the defer so the recover closure below
+	// can reference resourceID/ceID/ceType (a := declared after a defer
+	// statement is not visible inside a closure written earlier).
+	resourceID, ceID, ceType := extractLogFields(msg.Data())
 	defer func() {
 		if r := recover(); r != nil {
-			c.logger.Error("panic in cancel message handler",
-				"panic", r, "subject", msg.Subject(), "stack", string(debug.Stack()))
-			_ = msg.Term()
+			termErr := msg.Term()
+			attrs := []any{
+				"panic", r, "resource_id", resourceID, "ce_id", ceID, "ce_type", ceType,
+				"subject", msg.Subject(), "stack", string(debug.Stack()),
+			}
+			if termErr != nil {
+				attrs = append(attrs, "term_error", termErr)
+			}
+			c.logger.Error("panic in cancel message handler", attrs...)
 		}
 	}()
+
+	c.logMessageReceived(msg, resourceID, ceID, ceType)
 
 	if err := c.cancelHandler(context.Background(), msg.Data()); err != nil {
 		if nakErr := msg.NakWithDelay(c.nakDelay()); nakErr != nil {
 			c.logMessageResolutionFailure("failed to nak cancel message", msg, nakErr)
+			return
 		}
+		c.logger.Warn("cancel message nacked, handler failed", "resource_id", resourceID, "ce_id", ceID, "ce_type", ceType, "subject", msg.Subject(), "error", err)
 		return
 	}
 	if err := msg.Ack(); err != nil {
 		c.logMessageResolutionFailure("failed to ack cancel message, may be redelivered", msg, err)
+		return
 	}
+	c.logger.Info("cancel message acked", "resource_id", resourceID, "ce_id", ceID, "ce_type", ceType, "subject", msg.Subject())
 }
 
 func (c *Client) handleMainMessage(msg jetstream.Msg) {
+	// Extraction must happen before the defer so the recover closure below
+	// can reference resourceID/ceID/ceType (a := declared after a defer
+	// statement is not visible inside a closure written earlier).
+	resourceID, ceID, ceType := extractLogFields(msg.Data())
 	defer func() {
 		if r := recover(); r != nil {
-			c.logger.Error("panic in main message handler",
-				"panic", r, "subject", msg.Subject(), "stack", string(debug.Stack()))
-			_ = msg.NakWithDelay(c.nakDelay())
+			nakErr := msg.NakWithDelay(c.nakDelay())
+			attrs := []any{
+				"panic", r, "resource_id", resourceID, "ce_id", ceID, "ce_type", ceType,
+				"subject", msg.Subject(), "stack", string(debug.Stack()),
+			}
+			if nakErr != nil {
+				attrs = append(attrs, "nak_error", nakErr)
+			}
+			c.logger.Error("panic in main message handler", attrs...)
 		}
 	}()
+
+	c.logMessageReceived(msg, resourceID, ceID, ceType)
 
 	if c.cfg.MaxDeliver > 0 {
 		meta, err := msg.Metadata()
 		if err != nil {
-			c.logger.Warn("failed to get message metadata for MaxDeliver guard", "error", err)
-			_ = msg.Nak()
+			nakErr := msg.Nak()
+			c.logger.Warn("failed to get message metadata for MaxDeliver guard",
+				"error", err, "resource_id", resourceID, "ce_id", ceID, "ce_type", ceType, "nak_error", nakErr)
 			return
 		}
 		if meta.NumDelivered >= uint64(c.cfg.MaxDeliver) {
 			c.publishMaxDeliverError(msg)
-			// If Term fails (e.g. a transient connection drop, IT-RCM-080),
-			// JetStream will redeliver this message and this MaxDeliver
-			// guard fires again on the next attempt, publishing a duplicate
-			// terminal error CE with a distinct id/Nats-Msg-Id (PublishCE
-			// mints a fresh CE each call, so dedup does not apply across
-			// separate publishMaxDeliverError calls). Not worth retrying
-			// Term itself — it would race the same connection issue — but
-			// worth logging so operators can see it happened.
+			// If Term fails, JetStream redelivers and this guard fires again,
+			// publishing a duplicate terminal error CE (IT-RCM-080). Log
+			// rather than retry Term, since it would race the same issue.
 			if err := msg.Term(); err != nil {
 				c.logMessageResolutionFailure("failed to terminate max-delivery message, may be redelivered", msg, err)
 			}
@@ -77,12 +101,16 @@ func (c *Client) handleMainMessage(msg jetstream.Msg) {
 	if err := c.mainHandler(ctx, msg.Data()); err != nil {
 		if nakErr := msg.NakWithDelay(c.nakDelay()); nakErr != nil {
 			c.logMessageResolutionFailure("failed to nak main message", msg, nakErr)
+			return
 		}
+		c.logger.Warn("main message nacked, handler failed", "resource_id", resourceID, "ce_id", ceID, "ce_type", ceType, "subject", msg.Subject(), "error", err)
 		return
 	}
 	if err := msg.Ack(); err != nil {
 		c.logMessageResolutionFailure("failed to ack main message, may be redelivered", msg, err)
+		return
 	}
+	c.logger.Info("main message acked", "resource_id", resourceID, "ce_id", ceID, "ce_type", ceType, "subject", msg.Subject())
 }
 
 func (c *Client) nakDelay() time.Duration {
@@ -92,15 +120,28 @@ func (c *Client) nakDelay() time.Duration {
 	return routing.DefaultNakDelay
 }
 
+// logMessageReceived logs the receipt of a message before any handling is
+// attempted, so a message's arrival is auditable even if the handler later
+// panics or the process crashes before resolution.
+func (c *Client) logMessageReceived(msg jetstream.Msg, resourceID, ceID, ceType string) {
+	attrs := []any{"resource_id", resourceID, "ce_id", ceID, "ce_type", ceType, "subject", msg.Subject()}
+	if meta, err := msg.Metadata(); err == nil {
+		attrs = append(attrs,
+			"stream_seq", meta.Sequence.Stream,
+			"consumer_seq", meta.Sequence.Consumer,
+			"num_delivered", meta.NumDelivered,
+		)
+	} else {
+		attrs = append(attrs, "meta_error", err)
+	}
+	c.logger.Info("message received", attrs...)
+}
+
 func (c *Client) publishMaxDeliverError(msg jetstream.Msg) {
-	resourceID, ceType := extractCEFields(msg.Data())
-	ceID, _ := extractCEIdentity(msg.Data())
-	// When resourceID is empty/unknown (malformed inbound message), the CP
-	// silently drops the response error CE we're about to publish below
-	// (it requires a non-empty resource_id to correlate). Log the CE id and
-	// stream/consumer sequence here so an operator can still correlate the
-	// incident from agent-side logs against NATS stream state, even though
-	// nothing reaches the CP for it.
+	resourceID, ceID, ceType := extractLogFields(msg.Data())
+	// Log the CE id and stream/consumer sequence so an operator can still
+	// correlate the incident even when resourceID is empty and the CP drops
+	// the error CE published below (it requires a non-empty resource_id).
 	attrs := []any{"resource_id", resourceID, "ce_id", ceID, "ce_type", ceType, "subject", msg.Subject()}
 	if meta, metaErr := msg.Metadata(); metaErr == nil {
 		attrs = append(attrs, "stream_seq", meta.Sequence.Stream, "consumer_seq", meta.Sequence.Consumer)
@@ -117,14 +158,16 @@ func (c *Client) publishMaxDeliverError(msg jetstream.Msg) {
 		Details: "max delivery attempts exceeded",
 	}
 	if err := cloudevent.PublishCE(context.Background(), c.PublishWithMsgID, cloudevent.SubjectResponses, c.cfg.AgentName, cloudevent.TypeError, errData); err != nil {
-		c.logger.Warn("failed to publish max-deliver error CE", "error", err, "resource_id", resourceID)
+		c.logger.Warn("failed to publish max-deliver error CE", "error", err, "resource_id", resourceID, "ce_id", ceID, "published_ce_type", cloudevent.TypeError)
+		return
 	}
+	c.logger.Info("published max-deliver error CE", "resource_id", resourceID, "ce_id", ceID, "published_ce_type", cloudevent.TypeError)
 }
 
 func (c *Client) logMessageResolutionFailure(msgText string, msg jetstream.Msg, err error) {
-	ceID, ceType := extractCEIdentity(msg.Data())
+	resourceID, ceID, ceType := extractLogFields(msg.Data())
 	attrs := make([]any, 0, 14)
-	attrs = append(attrs, "error", err, "ce_id", ceID, "ce_type", ceType, "subject", msg.Subject())
+	attrs = append(attrs, "error", err, "resource_id", resourceID, "ce_id", ceID, "ce_type", ceType, "subject", msg.Subject())
 	if meta, metaErr := msg.Metadata(); metaErr == nil {
 		attrs = append(attrs,
 			"stream_seq", meta.Sequence.Stream,
@@ -137,33 +180,34 @@ func (c *Client) logMessageResolutionFailure(msgText string, msg jetstream.Msg, 
 	c.logger.Warn(msgText, attrs...)
 }
 
-func extractCEIdentity(data []byte) (id, ceType string) {
+// extractLogFields performs a single unmarshal of a CloudEvent envelope to
+// recover the fields needed for correlation in log entries. It never returns
+// an error: ce_id/ce_type fall back to "unknown" on any parse failure so a
+// malformed message can still be logged and traced. resource_id is only
+// ever populated from a successfully-parsed payload; it is "" whenever it's
+// unavailable for any reason (malformed envelope, malformed data, or a
+// genuinely absent field) — never "unknown" — since downstream consumers
+// (e.g. publishMaxDeliverError's outbound ErrorData.ResourceID) treat
+// resource_id="" as "no resource identified", not as an error marker.
+func extractLogFields(data []byte) (resourceID, ceID, ceType string) {
 	var envelope struct {
-		ID   string `json:"id"`
-		Type string `json:"type"`
-	}
-	if json.Unmarshal(data, &envelope) != nil || envelope.ID == "" {
-		return "unknown", "unknown"
-	}
-	if envelope.Type == "" {
-		envelope.Type = "unknown"
-	}
-	return envelope.ID, envelope.Type
-}
-
-func extractCEFields(data []byte) (resourceID, ceType string) {
-	var envelope struct {
+		ID   string          `json:"id"`
 		Type string          `json:"type"`
 		Data json.RawMessage `json:"data"`
 	}
 	if json.Unmarshal(data, &envelope) != nil {
-		return "unknown", "unknown"
+		return "", "unknown", "unknown"
+	}
+	ceID, ceType = envelope.ID, envelope.Type
+	if ceID == "" {
+		ceID = "unknown"
+	}
+	if ceType == "" {
+		ceType = "unknown"
 	}
 	var payload struct {
 		ResourceID string `json:"resource_id"`
 	}
-	if json.Unmarshal(envelope.Data, &payload) != nil {
-		return "unknown", envelope.Type
-	}
-	return payload.ResourceID, envelope.Type
+	_ = json.Unmarshal(envelope.Data, &payload)
+	return payload.ResourceID, ceID, ceType
 }

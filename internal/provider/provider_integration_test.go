@@ -527,11 +527,8 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 			Expect(resp.StatusCode).To(Equal(http.StatusConflict))
 			Expect(resp.Header.Get("Content-Type")).To(Equal("application/problem+json"))
 
-			// Assert the CONFLICTING PROVIDER'S NAME ("other-provider"), not
-			// just the service type ("analytics") — disambiguating, since
-			// name != service type here (unlike IT-SPR-060's embedded-SP
-			// case, where name happens to equal service type and so can't
-			// prove the name is actually surfaced).
+			// name != service type here, unlike IT-SPR-060, so this can prove
+			// the conflicting provider's name is actually surfaced.
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(resp.Body).Decode(&errBody)).To(Succeed())
 			Expect(errBody.Type).To(Equal("CONFLICT"))
@@ -600,20 +597,11 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 	})
 
 	Describe("Strict Handler Decode-Failure Wiring", func() {
-		// Every field in the current CreateProvider request schema is either
-		// an unconstrained string or a readOnly/strictly-formatted value that
-		// the OpenAPI validator middleware (nethttpmiddleware.OapiRequestValidatorWithOptions)
-		// already rejects before the request reaches the strict handler's own
-		// json.Decode — so there is no live end-to-end HTTP payload today that
-		// reaches the strict handler's decode step with a body the middleware
-		// accepted. That is a property of today's schema, not a guarantee: any
-		// future numeric/stricter-Go-type field would make it reachable again.
-		// This test isolates the strict-handler composition-root wiring choice
-		// directly (bypassing chi routing and the OpenAPI validator middleware
-		// entirely) to guard against regressing to the SDK's default
-		// (plain-text, non-RFC-7807) RequestErrorHandlerFunc — see REQ-HTTP-091
-		// / AC-HTTP-091 and cmd/environment-agent/main.go's identical
-		// StrictHTTPServerOptions construction.
+		// No live HTTP payload today reaches the strict handler's own
+		// json.Decode with a body the OpenAPI validator middleware didn't
+		// already reject, so this bypasses chi routing and that middleware
+		// to exercise the strict-handler's RequestErrorHandlerFunc wiring
+		// directly (REQ-HTTP-091 / AC-HTTP-091).
 		It("returns RFC 7807 problem+json when the strict handler's own JSON decode fails (IT-HTTP-110b)", func() {
 			logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 			fileStore, err := store.NewFileStore(filepath.Join(GinkgoT().TempDir(), "registrations.json"), logger)
@@ -770,12 +758,9 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 		})
 
 		It("returns 409 with the colliding provider's name when a DIFFERENT provider name requests an already-used ?id= (IT-SPR-148)", func() {
-			// Distinct from IT-SPR-145: that test re-registers the SAME
-			// provider name with a different ID (hits ensureIDConsistency).
-			// This exercises the separate cross-provider-ID-collision branch
-			// in assignProviderID (service.go), reachable when a brand NEW
-			// provider name requests an ?id= already claimed by a different,
-			// existing provider.
+			// Unlike IT-SPR-145 (same name, different ID), this exercises the
+			// cross-provider-ID-collision branch: a new provider name
+			// requesting an ?id= already claimed by a different provider.
 			client := &http.Client{Timeout: 2 * time.Second}
 			firstBody := `{"name":"collision-holder","endpoint":"https://sp.example.com","service_type":"collision-svc-a","schema_version":"v1alpha1"}`
 			secondBody := `{"name":"collision-challenger","endpoint":"https://sp2.example.com","service_type":"collision-svc-b","schema_version":"v1alpha1"}`
@@ -918,11 +903,9 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 			DeferCleanup(stop)
 		})
 
-		// ValidateName/ValidateServiceType rejected purely empty (post-trim)
-		// values but never trimmed the value actually used for
-		// idempotency/collision keys, so "provider1" and "provider1 "
-		// registered as distinct providers instead of being treated as the
-		// same natural key.
+		// Validation rejects purely empty (post-trim) values but must also
+		// trim the value used for idempotency/collision keys, or
+		// "provider1" and "provider1 " register as distinct providers.
 		It("trims leading/trailing whitespace in name so it cannot bypass idempotency (IT-SPR-149)", func() {
 			client := &http.Client{Timeout: 2 * time.Second}
 

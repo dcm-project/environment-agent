@@ -35,18 +35,10 @@ func (*fakeConsumeContext) Stop()                   {}
 func (*fakeConsumeContext) Drain()                  {}
 func (*fakeConsumeContext) Closed() <-chan struct{} { ch := make(chan struct{}); close(ch); return ch }
 
-// TestSetupStreamsAndConsume_FiresOnSetupReadyBeforeConsuming is a
-// regression test: previously the composition root called
-// retryProcessor.ProcessOnRestart synchronously
-// right after messaging.Client.Start returned, assuming JetStream was
-// already set up. Start is documented as non-blocking (AC-MSG-050) — if NATS
-// wasn't yet connected at that instant, ProcessOnRestart would silently
-// no-op forever (it has no retry of its own), permanently skipping the
-// restart-drain. onSetupReady must fire exactly once, synchronously within
-// setupStreamsAndConsume, with c.js/mainCons/cancelCons already populated,
-// and — critically — BEFORE beginConsuming's live consume loops start, so a
-// caller wiring "drain then StartConsuming" inside the callback still gets
-// the drain-before-consume ordering it requires.
+// TestSetupStreamsAndConsume_FiresOnSetupReadyBeforeConsuming verifies
+// onSetupReady fires exactly once, synchronously within setupStreamsAndConsume
+// with c.js/mainCons/cancelCons already populated, and before beginConsuming's
+// live consume loops start — see onSetupReady's doc comment.
 func TestSetupStreamsAndConsume_FiresOnSetupReadyBeforeConsuming(t *testing.T) {
 	c := NewClient(ClientConfig{AgentName: "test-agent", TopicName: "t", DeferConsume: true}, slog.Default())
 
@@ -78,10 +70,7 @@ func TestSetupStreamsAndConsume_FiresOnSetupReadyBeforeConsuming(t *testing.T) {
 	c.mu.Unlock()
 
 	// Calls the real production function directly — finishSetup is the part
-	// of setupStreamsAndConsume that runs once js/mainCons/cancelCons are
-	// already populated, and needs no live NATS connection to exercise (the
-	// previous version of this test hand-reimplemented this branch instead
-	// of calling real code).
+	// of setupStreamsAndConsume that needs no live NATS connection to exercise.
 	ok := c.finishSetup()
 	if !ok {
 		t.Fatal("finishSetup must report success when beginConsuming (called from within the callback) succeeds")
@@ -108,20 +97,12 @@ type fakeJetStream struct {
 	jetstream.JetStream
 }
 
-// TestBeginConsuming_ConcurrentCallsStartExactlyOneConsumeLoopEach is a
-// regression test: the old beginConsuming released c.mu between its
-// "already consuming?" check and
-// setting c.consuming = true, so two overlapping callers (e.g. StartConsuming
-// racing a concurrently-firing doSetup from a reconnect) could both pass the
-// check and each call Consume(), starting duplicate live consume loops on
-// the same durable consumer. beginConsuming now holds c.mu for the entire
-// check-then-act sequence, so under true concurrency only one caller may
-// ever actually invoke Consume().
+// TestBeginConsuming_ConcurrentCallsStartExactlyOneConsumeLoopEach verifies
+// beginConsuming holds c.mu for its entire check-then-act sequence, so under
+// concurrent calls only one caller ever invokes Consume() per topic.
 func TestBeginConsuming_ConcurrentCallsStartExactlyOneConsumeLoopEach(t *testing.T) {
 	// Many trials, each releasing a batch of goroutines simultaneously via a
-	// shared start barrier — maximizes the odds of hitting the narrow
-	// check-then-act window the old implementation left unlocked between
-	// its "already consuming?" read and its "mark consuming" write.
+	// shared start barrier, to maximize the odds of catching a race.
 	const trials = 200
 	const goroutinesPerTrial = 8
 
@@ -157,19 +138,11 @@ func TestBeginConsuming_ConcurrentCallsStartExactlyOneConsumeLoopEach(t *testing
 	}
 }
 
-// TestFinishSetup_DoesNotReportSuccessWhenBeginConsumingFailsAfterCallback is
-// a regression test for a HIGH-severity finding: finishSetup's
-// DeferConsume/onSetupReady branch used to unconditionally report success
-// once the callback returned, even if the callback's own StartConsuming()
-// call failed to actually start consuming (e.g. a transient Consume() error
-// right after reconnect). Since the caller (attemptSetup) latches setupDone
-// on a true return, and setupDone short-circuits all future setup attempts,
-// this permanently and silently stranded the client "connected but not
-// consuming" — no future reconnect or background retry would ever call
-// beginConsuming again. finishSetup must instead report failure in this
-// case, so retrySetupInBackground/doSetup retries and — since
-// consumeRequested is already latched true by then — falls through to the
-// plain beginConsuming retry path below, without re-invoking onSetupReady.
+// TestFinishSetup_DoesNotReportSuccessWhenBeginConsumingFailsAfterCallback
+// verifies finishSetup reports failure (not success) when the callback's
+// StartConsuming() fails to actually start consuming, so attemptSetup retries
+// instead of latching setupDone and stranding the client — see finishSetup's
+// doc comment.
 func TestFinishSetup_DoesNotReportSuccessWhenBeginConsumingFailsAfterCallback(t *testing.T) {
 	c := NewClient(ClientConfig{AgentName: "test-agent", TopicName: "t", DeferConsume: true}, slog.Default())
 

@@ -80,12 +80,9 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Log before starting to Serve, not after: the listener can already be
-	// accepting connections the instant the goroutine below runs, so logging
-	// afterward races an external observer (e.g. a readiness probe, or a
-	// deployment tool tailing logs for this exact message) against the
-	// scheduler actually getting around to running this log statement
-	// (IT-HTTP-090).
+	// Log before Serve, not after: the listener can already be accepting
+	// connections the instant the goroutine below runs, so logging afterward
+	// races an external observer waiting for this message (IT-HTTP-090).
 	s.logger.Info("server listening", "address", s.listener.Addr().String())
 
 	serveCh := make(chan error, 1)

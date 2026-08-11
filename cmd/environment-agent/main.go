@@ -103,17 +103,10 @@ func run(ctx context.Context) int {
 		logger.Error("failed to load persisted providers", "error", err)
 		return 1
 	}
-	// RegisterEmbedded is deliberately NOT called here.
-	// It performs a synchronous initialCheck (monitor.RegisterProvider) that
-	// fires healthMonitor's onTransition callback in-line if the check
-	// yields a different status than the initial one — but that callback
-	// isn't wired via SetOnTransition until further down, once registrar/
-	// retryProcessor/healthCEPub exist. Calling RegisterEmbedded before that
-	// wiring risks silently dropping a genuine embedded-SP transition (no
-	// retry-topic processing, no health CloudEvent) with only DCM
-	// registration itself compensated for by the one-time
-	// NotifyServiceTypeChange kick below. It's now called after
-	// SetOnTransition/SetOnChange are wired — see below.
+	// RegisterEmbedded is deliberately NOT called here: its synchronous
+	// initialCheck can fire healthMonitor's onTransition callback in-line,
+	// which isn't wired via SetOnTransition until further down. It's called
+	// after that wiring, below.
 
 	// Messaging client — must start before registrar (provides ConsumerLagProvider)
 	msgClient, topics, err := setupMessaging(cfg, logger)
@@ -164,15 +157,10 @@ func run(ctx context.Context) int {
 	})
 	router.SetRetryConsumer(retryProcessor)
 
-	// ProcessOnRestart's own Fetch calls must drain the main/cancel
-	// durable consumers BEFORE live pull-consumption begins (avoiding a
-	// message-stealing race between the two). It must NOT run synchronously
-	// right after Start returns — Start is non-blocking (AC-MSG-050), so
-	// JetStream may not be ready yet at that point, and ProcessOnRestart has
-	// no retry of its own. SetOnSetupReady instead fires this exactly once,
-	// at the moment JetStream genuinely becomes ready (immediately, or after
-	// however long reconnection takes) — see ClientConfig.DeferConsume and
-	// Client.SetOnSetupReady's doc comments.
+	// ProcessOnRestart must drain the main/cancel durable consumers before
+	// live pull-consumption begins, and Start is non-blocking (AC-MSG-050),
+	// so this is wired via SetOnSetupReady rather than run synchronously
+	// after Start — see ClientConfig.DeferConsume.
 	msgClient.SetOnSetupReady(func() {
 		if err := retryProcessor.ProcessOnRestart(ctx); err != nil {
 			logger.Error("failed to process retry on restart", "error", err)
@@ -185,14 +173,10 @@ func run(ctx context.Context) int {
 		return 1
 	}
 
-	// Stop messaging BEFORE the retry processor, deliberately not pure
-	// LIFO-by-construction-order. msgClient.Stop() drains in-flight
-	// handlers and stops accepting new messages; only once that's quiesced
-	// does it make sense to wait for retryProcessor's own in-flight
-	// RunTransition goroutines (Stop() previously ran first here, while
-	// messaging.Client's live Consume() loops kept accepting new work, and
-	// Client.Stop() itself discarded any buffered messages instead of
-	// draining them).
+	// Stop messaging before the retry processor (not LIFO-by-construction):
+	// msgClient.Stop() must quiesce in-flight handlers and stop accepting new
+	// messages before it makes sense to wait for retryProcessor's own
+	// in-flight RunTransition goroutines.
 	defer func() {
 		msgClient.Stop()
 		retryProcessor.Stop()
@@ -243,12 +227,8 @@ func run(ctx context.Context) int {
 	healthMonitor.Start(ctx)
 	defer healthMonitor.Stop()
 
-	// Explicit kick: RegisterEmbedded's steady-state case (initialCheck
-	// confirms the SP is already at its initial status) never calls
-	// through the transition callback at all — from == to is not a
-	// transition — so this remains the primary trigger for the registrar's
-	// prerequisite gate to notice newly-registered embedded SPs, not merely
-	// a fallback for the transition case handled above.
+	// Explicit kick: the steady-state case (SP already at its initial
+	// status) never fires the transition callback above (from == to).
 	registrar.NotifyServiceTypeChange()
 
 	regCtx, regCancel := context.WithCancel(context.Background())
