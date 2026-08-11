@@ -1,0 +1,49 @@
+---
+description: Go coding patterns and conventions for this project
+globs:
+  - "**/*.go"
+alwaysApply: false
+---
+
+## Error Handling
+
+- Return `error` as last return value; wrap with `fmt.Errorf("context: %w", err)`
+- Use sentinel errors (`var ErrNotFound = errors.New(...)`) for expected conditions callers need to match
+- Log at the boundary where the error is handled, not at every intermediate layer
+
+## Naming
+
+- Packages: short, lowercase, singular (`provider`, `routing`, `config`)
+- Interfaces: behavior-based names, not `I`-prefixed (`HealthTracker`, `SPForwarder`, `Publisher`)
+- Constructors: `New<Type>(deps...) *Type` — panic on nil required deps, document nil-safe optional deps
+
+## Dependencies
+
+- Constructor injection, no globals or init()
+- Required deps panic on nil in constructor; optional deps are nil-checked at use site
+- Interfaces defined where consumed, not where implemented
+
+## Struct Layout
+
+```go
+type Router struct {
+	// required deps (injected, never nil after construction)
+	registry      *provider.Registry
+	healthTracker provider.HealthTracker
+	// optional deps (nil-checked at use site)
+	forwarder     SPForwarder
+	// config
+	config        config.RoutingConfig
+	// infra
+	logger        *slog.Logger
+}
+```
+
+## Logging
+
+Use `log/slog` structured logging. Include contextual key-value pairs. Correlation
+fields use a single canonical snake_case name each — `resource_id`, `ce_id`,
+`ce_type`, `service_type`, `provider_id` — never camelCase variants:
+```go
+r.logger.Info("dispatching operation", "resource_id", resourceID, "service_type", serviceType)
+```

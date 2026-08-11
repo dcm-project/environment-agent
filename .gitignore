@@ -37,3 +37,6 @@ go.work.sum
 !.ai/specifications/
 !.ai/decisions/
 !.ai/tests/
+
+.cursor/*
+!.cursor/rules
