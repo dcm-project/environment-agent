@@ -160,6 +160,29 @@ Unless overridden, tests use:
 
 ---
 
+### IT-HTTP-110b: Strict handler JSON-decode failure is RFC 7807, not the SDK default
+
+- **Validates AC:** AC-HTTP-091
+- **Test Infrastructure:** Strict handler constructed exactly as the composition root
+  (`cmd/environment-agent/main.go`), invoked directly (bypassing chi routing and the
+  OpenAPI validator middleware) to isolate the `StrictHTTPServerOptions.RequestErrorHandlerFunc`
+  wiring choice
+- **Given** the strict handler is constructed with `RequestErrorHandlerFunc` set to
+  `httperror.WriteInvalidArgument`
+- **When** `CreateProvider` receives a body that is syntactically valid JSON but fails
+  Go's struct decode (`{"name":123}` — wrong type for a string field)
+- **Then** the response MUST be HTTP 400 with `Content-Type: application/problem+json`
+- **And** the body MUST be RFC 7807 with `type=INVALID_ARGUMENT`
+- **Note:** the oapi-codegen SDK default (unset `RequestErrorHandlerFunc`) instead
+  returns `http.Error` — plain text, `text/plain` — for this exact failure. This test
+  guards the composition-root wiring choice directly; today's `Provider` request
+  schema (all fields are unconstrained strings or readOnly/strictly-formatted, both
+  rejected upstream by the OpenAPI validator) does not have a live end-to-end HTTP
+  payload that reaches this code path, but any future field addition could make it
+  reachable again.
+
+---
+
 ### IT-HTTP-120: Per-request timeout enforcement
 
 - **Validates AC:** AC-HTTP-095
@@ -336,6 +359,9 @@ Unless overridden, tests use:
 - **Given** "db-provider" is registered for "database" and "other-provider" serves "analytics"
 - **When** "db-provider" re-registers with `service_type="analytics"`
 - **Then** the response MUST be HTTP 409 Conflict
+- **And** the error detail MUST name the conflicting holder ("other-provider"), not just the service
+  type — this disambiguating case has name != service type, unlike IT-SPR-060's
+  embedded-SP case where they coincide
 - **And** "db-provider" MUST still serve "database" (no partial state change)
 
 ---
@@ -415,6 +441,38 @@ Unless overridden, tests use:
 
 ---
 
+### IT-SPR-148: Cross-provider ID collision returns 409 naming the existing holder
+
+- **Validates AC:** AC-SPR-106c
+- **Test Infrastructure:** Real HTTP server
+- **Given** provider "collision-holder" is already registered with `?id=shared-id`
+- **When** a DIFFERENT, new provider name ("collision-challenger") registers with `?id=shared-id`
+- **Then** the response MUST be HTTP 409 Conflict with RFC 7807 body (`type=CONFLICT`)
+- **And** the error detail MUST name both the requested ID and "collision-holder"
+- **Regression for:** this branch of `assignProviderID` (distinct from IT-SPR-145's
+  same-name re-registration path) was reachable via a real HTTP request but had zero test coverage;
+  code inspection confirmed the behavior was already correct, so this closes a coverage gap rather
+  than fixing a bug
+
+---
+
+### IT-SPR-149/149b: Whitespace-padded name/service_type do not bypass idempotency or slot collision
+
+- **Validates AC:** AC-SPR-071
+- **Test Infrastructure:** Real HTTP server
+- **IT-SPR-149 — Given** "ws-provider" is registered, **When** a registration is submitted for
+  `name="  ws-provider  "` with the same `service_type`, **Then** the response MUST be 200 OK
+  (idempotent update of the same provider) and exactly one provider named (trimmed) "ws-provider"
+  MUST exist afterward
+- **IT-SPR-149b — Given** a provider holds service type "ws-database", **When** a different
+  provider registers with `service_type="  ws-database  "`, **Then** the response MUST be 409
+  Conflict (whitespace must not let the collision check be bypassed)
+- **Regression for:** `ValidateName`/`ValidateServiceType` rejected purely-empty
+  (post-trim) values but never trimmed the value actually used downstream for the
+  natural-key/slot lookups, so `"provider1"` and `"provider1 "` registered as distinct providers
+
+---
+
 ### IT-SPR-150: Provider schema_version required
 
 - **Validates AC:** AC-SPR-107
@@ -455,6 +513,53 @@ Unless overridden, tests use:
 - **When** the agent starts
 - **Then** the agent MUST log the error and exit immediately
 - **And** the HTTP server MUST NOT start
+- **Note:** this test only exercises `ProviderService.LoadPersisted()` directly via a hand-built
+  `startWithPersistence` helper — it does NOT go through `run()`/`main`, so it cannot prove the HTTP
+  server never serves. See IT-SPR-171 for the composition-root-level test that does.
+
+---
+
+### IT-SPR-171: `run()` fails fast on corrupt persisted data without ever serving HTTP
+
+- **Validates AC:** AC-SPR-109
+- **Test Infrastructure:** `cmd/environment-agent`'s `run(ctx)` called directly, with a corrupt
+  persistence file and a pre-reserved, known TCP address
+- **Given** `AGENT_SP_PERSISTENCE_PATH` points at a file containing invalid JSON
+- **When** `run(ctx)` is invoked (the actual composition-root entry point, not a hand-built partial
+  wiring)
+- **Then** `run` MUST return a non-zero exit code
+- **And** an HTTP GET to the exact address `run()` bound internally MUST fail to connect — proving
+  `Serve()` was never reached despite `net.Listen` executing before the fail-fast `LoadPersisted`
+  check
+- **Regression for:** fail-fast behavior was previously verified only at the
+  `LoadPersisted()` unit level (IT-SPR-170), never through `run()` itself, so a regression in the
+  ordering of checks within `run()` (e.g. an errant early `go srv.Serve(ln)`) would not have been
+  caught
+
+---
+
+### IT-SPR-172: `run()`'s composition-root wiring delivers an embedded SP's synchronous initialCheck transition
+
+- **Validates AC:** AC-SPR-015
+- **Test Infrastructure:** `cmd/environment-agent`'s `run(ctx)` called directly (real composition
+  root, not hand-built partial wiring), against a real embedded NATS/JetStream test server;
+  `AGENT_EMBEDDED_SPS=widget` + `AGENT_EMBEDDED_SP_WIDGET_HEALTH=unhealthy` +
+  `AGENT_HEALTH_FAILURE_THRESHOLD=1` force a synchronous Ready->Unhealthy transition during
+  `RegisterEmbedded`'s `initialCheck`; a raw NATS subscriber on `dcm.agents.health`
+  (`cloudevent.SubjectHealth`) independently observes what `run()` actually publishes
+- **Given** `run(ctx)` is invoked with the env above
+- **When** the embedded "widget" SP's initial health check synchronously reports Unhealthy during
+  `RegisterEmbedded`
+- **Then** a `dcm.agent.health.service-type-degraded` CloudEvent for service type "widget" MUST be
+  observed on `dcm.agents.health` within a few seconds
+- **Regression for:** `UT-SPR-100`/`UT-SPR-101` in
+  `internal/provider/service` prove the general ordering property (SetOnTransition must be wired
+  before RegisterEmbedded) by manually constructing `ProviderService`/`monitor.Monitor` directly;
+  they never touch `main.go`'s `run()` at all, so if `main.go`'s actual wiring order were reverted
+  to the pre-fix state, those unit tests would keep passing regardless. RED confirmed by
+  temporarily swapping `main.go`'s `RegisterEmbedded` call back to before the
+  `SetOnTransition`/`SetOnChange` wiring — the test timed out waiting for the health CE, as
+  expected — then reverting to GREEN
 
 ---
 
@@ -465,6 +570,8 @@ Unless overridden, tests use:
 - **Given** an SP is registered for service type "database" (any type)
 - **When** a different SP attempts to register for "database"
 - **Then** the response MUST be HTTP 409 Conflict
+- **And** the error detail MUST name the conflicting holder ("db-provider") in addition to the
+  service type
 
 ---
 
@@ -994,6 +1101,29 @@ Unless overridden, tests use:
 
 ---
 
+### IT-DCM-180: Registrar goroutine recovers from repeated panics and keeps retrying afterward
+
+- **Validates AC:** AC-DCM-055
+- **Test Infrastructure:** `panicNTimesLister` fake whose `AdvertisableServiceTypes` panics on its
+  first 3 calls, then returns a real service type
+- **Given** the registrar is started with this transiently-panicking lister
+- **When** `run`'s prerequisite-gate loop calls `AdvertisableServiceTypes`, panicking 3 times before
+  succeeding
+- **Then** registration MUST eventually succeed against the mock DCM server (proving the goroutine
+  survived all 3 panics and kept retrying, rather than exiting after the first one)
+- **And** `Registrar.Done()` MUST NOT close merely because a panic was recovered — the goroutine
+  MUST remain alive afterward (e.g. in its heartbeat loop)
+- **And** `Registrar.Done()` MUST still close promptly on an actual shutdown (context cancellation)
+- **Regression for:** a follow-up gap in the original version of this test: it used
+  an unconditionally-panicking lister and asserted `Registrar.Done()` closing as the *success*
+  condition — meaning it asserted exactly the bug it was meant to catch. Recovering a panic but
+  letting the goroutine exit anyway "fixes" the process-crash half of the bug while leaving DCM
+  registration silently, permanently stalled for the rest of the process lifetime — a regression
+  this version of the test would have missed entirely, since it treated goroutine exit as correct.
+  See `DD-360`
+
+---
+
 ## Topic 7: Messaging System Integration
 
 ### IT-MSG-010: Topic creation at startup
@@ -1100,6 +1230,77 @@ Unless overridden, tests use:
 
 ---
 
+### IT-MSG-140: In-flight handler finishes and acks before Stop closes the connection
+
+- **Validates AC:** none — no existing REQ/AC covers messaging-client shutdown quiescing
+  (REQ-HTTP-030/040 cover only the HTTP server's graceful shutdown); this hardening fix is
+  scoped directly to the bug described below
+- **Test Infrastructure:** `messaging.Client` with a main handler that sleeps to simulate
+  in-flight work; independent test connection to inspect consumer state directly
+- **Given** a create CE has been delivered and its handler is actively sleeping (in-flight)
+- **When** `Stop` is called while the handler is still running
+- **Then** `Stop` MUST wait for the handler to finish (bounded by `shutdownDrainTimeout`)
+  rather than returning immediately
+- **And** the message MUST have been acked before the NATS connection closes — the durable
+  consumer's `NumPending + NumAckPending` MUST be 0 afterward, not left ack-pending for
+  server-side redelivery
+- **Regression for:** `Stop` previously called `ConsumeContext.Stop()` (discards
+  buffered messages, no wait) and closed
+  the NATS connection immediately, so an in-flight handler's own `Ack`/`Nak` call could lose
+  the race against connection teardown, forcing redelivery (and duplicate side effects, e.g.
+  a second response CE) on the next restart. `Stop` now calls `ConsumeContext.Drain()` and
+  waits (bounded) for each consumer's `Closed()` channel before closing the connection.
+  Also fixes the shutdown *ordering* in `cmd/environment-agent/main.go`: `retry.Processor.
+  Stop()` previously ran before `messaging.Client.Stop()` under plain LIFO `defer` ordering
+  (deliberately reversed via a combined `defer` closure so messaging quiesces first).
+
+---
+
+### IT-MSG-130: DeferConsume holds live consumption until StartConsuming
+
+- **Validates AC:** AC-MSG-040 (extends the drain-ordering guarantee to the composition root's
+  restart-drain sequencing)
+- **Test Infrastructure:** `messaging.Client` constructed with `ClientConfig.DeferConsume: true`
+- **Given** the client has started (durable main/cancel consumers created, initial cancel-topic
+  drain complete) but `StartConsuming` has not yet been called
+- **When** a create CE is published to the main topic
+- **Then** the message MUST remain pending on the durable consumer (`NumPending` stays 1) —
+  no live `Consume()` loop may claim it
+- **When** `StartConsuming` is subsequently called
+- **Then** the previously-pending message MUST be delivered to the main handler
+- **Regression for:** without `DeferConsume`, `retry.Processor.ProcessOnRestart`'s
+  own `Fetch` calls against the same durable
+  consumers (called from `main.go` after `messaging.Client.Start`) could race an
+  already-running `Consume()` for the same messages, diverting them onto `routeMessage` and
+  bypassing `handleMainMessage`'s `MaxDeliver`/handler-timeout envelope. The composition root
+  (`cmd/environment-agent/main.go`) sets `DeferConsume: true` and calls `StartConsuming` only
+  after `ProcessOnRestart` completes, making the two Fetch-based drains (`ProcessOnRestart`) and
+  the live pull-consumers mutually exclusive by construction instead of by timing luck.
+
+---
+
+### IT-MSG-131: onSetupReady fires against real JetStream; StartConsuming from inside it begins live consumption
+
+- **Validates AC:** AC-RCM-047
+- **Test Infrastructure:** `messaging.Client` constructed with `ClientConfig.DeferConsume: true`,
+  real embedded NATS/JetStream server (same suite as IT-MSG-130)
+- **Given** `SetOnSetupReady` is registered with a callback that mirrors `main.go`'s real shape:
+  synchronously call `StartConsuming()` (standing in for `main.go`'s
+  `retryProcessor.ProcessOnRestart` + `StartConsuming` pair)
+- **When** `Start` is called
+- **Then** the `onSetupReady` callback MUST fire exactly once, after real JetStream
+  streams/durable consumers have been created
+- **And** the `StartConsuming()` call made from inside that callback MUST actually begin live
+  consumption — a message published to the main topic afterward MUST be delivered to the main
+  handler
+- **Regression for:** the only prior test coverage of `SetOnSetupReady`
+  (`client_onsetupready_test.go`'s `TestSetupStreamsAndConsume_...`) used fake
+  consumers and never exercised the real `setupStreamsAndConsume`/`finishSetup` code path against
+  an actual NATS connection; this closes that gap with the same real-NATS harness IT-MSG-130
+  already uses.
+
+---
+
 ### IT-MSG-100: Messaging failure does not block HTTP; reconnects
 
 - **Validates AC:** AC-MSG-050
@@ -1131,6 +1332,24 @@ Unless overridden, tests use:
 - **Then** it MUST conform to CloudEvents v1.0
 - **And** `data` MUST include `agentName` and `topicName`
 - **And** MUST be published to `dcm.agents.responses`
+
+---
+
+### IT-MSG-160: Nats-Msg-Id header set on the wire
+
+- **Validates AC:** AC-MSG-065
+- **Test Infrastructure:** Real embedded NATS/JetStream server; dedicated per-test stream/subject; raw JetStream consumer (bypassing `messaging.Client`'s own fakes/stubs)
+- **Given** `messaging.Client.PublishWithMsgID` is called with a subject, a msg ID, and a payload
+- **When** a raw JetStream consumer fetches the resulting message directly from the stream
+- **Then** the message's `Nats-Msg-Id` header MUST equal the caller's msg ID, confirming the header is set at the wire level and not just constructed in memory
+
+### IT-MSG-161: JetStream server-side dedup drops repeated Nats-Msg-Id
+
+- **Validates AC:** AC-MSG-065
+- **Test Infrastructure:** Real embedded NATS/JetStream server; dedicated per-test stream with an explicit `Duplicates` window
+- **Given** `PublishWithMsgID` is called twice with the same subject and msg ID but different payloads
+- **When** the stream's message count is inspected afterward
+- **Then** it MUST equal 1 (the second publish was deduplicated server-side by NATS), confirming the header round-trips correctly for real dedup, not just that no error is returned
 
 ---
 
@@ -1395,6 +1614,22 @@ Unless overridden, tests use:
 
 ---
 
+### IT-RCM-045: Stale Unavailable notification re-checks current health (health-toctou-guard)
+
+- **Validates AC:** AC-RCM-020, AC-RCM-030
+- **Test Infrastructure:** NATS; retry topic with 1 create; health tracker updated to
+  Ready *after* queuing but the transition is invoked with a stale `to=Unavailable`
+- **Given** the retry topic contains a create for "database"
+- **And** the SP for "database" is currently Ready (per the health tracker)
+- **When** `ProcessOnTransition` is invoked with `to=Unavailable` (a stale/delayed
+  notification — `RunTransition` backgrounds this call, so `to` can lag reality)
+- **Then** the item MUST be forwarded to the SP (not rejected with an error CE),
+  because `processTransitionItems` re-resolves the service type's CURRENT status
+  rather than trusting the stale `to` parameter
+- **Regression for:** the `health-toctou-guard` bug
+
+---
+
 ### IT-RCM-040: FIFO ordering per service type
 
 - **Validates AC:** AC-RCM-040
@@ -1438,6 +1673,26 @@ Unless overridden, tests use:
 - **When** the agent starts
 - **Then** both cancels MUST be consumed before creates are forwarded
 - **And** SP MUST NOT receive creates for `res-456` or `res-789`
+
+---
+
+### IT-RCM-085: Retry-topic MaxDeliver exceeded — terminal error, not silent loss
+
+- **Validates AC:** AC-RCM-071
+- **Test Infrastructure:** JetStream retry consumer with `MaxDeliver=2`, short `AckWait`;
+  `retry.Processor` constructed with matching `ProcessorConfig.MaxDeliver`
+- **Given** a create for `resourceId="res-exhausted"` is published to the retry topic
+- **And** the message has already been delivered once and its `AckWait` has expired
+  (genuine JetStream redelivery, `NumDelivered` now equals the configured `MaxDeliver`)
+- **When** `ProcessOnTransition` fetches it from the retry consumer
+- **Then** `dcm.agents.responses` MUST receive a `dcm.agent.error` CloudEvent with
+  `error: "MAX_DELIVERY_EXCEEDED"` and the correct `resourceId`
+- **And** the SP forwarder MUST NOT be called for this message
+- **And** the message MUST be terminated (no pending/ack-pending left on the consumer)
+- **Regression for:** the
+  main-topic path (`messaging/handlers.go`) already had this guard (IT-RCM-080); the
+  retry-topic path (`routing/retry/processor.go`) had none, so a retry-topic message that
+  exhausted server-side `MaxDeliver` used to vanish with no error CE and no `Term()`.
 
 ---
 
@@ -1536,22 +1791,29 @@ Unless overridden, tests use:
 ### IT-XC-CFG-020: Configuration file loading
 
 - **Validates AC:** AC-XC-CFG-011
-- **Test Infrastructure:** Configuration file, no env var override
-- **Given** a config file provides `server.address=:9090`
-- **And** `AGENT_SERVER_ADDRESS` is not set
-- **When** the agent starts
-- **Then** the server MUST listen on port 9090
+- **Test Infrastructure:** `config.Load()` called directly with `AGENT_CONFIG_FILE` pointing at a
+  temp `.env`-style file
+- **Given** the config file provides `AGENT_SERVER_ADDRESS=:9090`
+- **And** `AGENT_SERVER_ADDRESS` is not set in the real environment
+- **When** `config.Load()` is called
+- **Then** `cfg.Server.Address` MUST be `:9090`
+- **Note:** unit-tested directly against `config.Load()` (a pure function of its inputs) rather than
+  through a full agent-startup integration test — see `UT-XC-CFG-060` in `unit-tests.md`. This
+  AC/IT pair previously described intended behavior for a feature that was "entirely
+  unimplemented" — no backing Go test existed until this fix.
 
 ---
 
 ### IT-XC-CFG-030: Environment variable takes precedence over file
 
 - **Validates AC:** AC-XC-CFG-012
-- **Test Infrastructure:** Config file + env var both set
-- **Given** config file provides `server.address=:9090`
-- **And** `AGENT_SERVER_ADDRESS=:7070` is set
-- **When** the agent starts
-- **Then** the server MUST listen on port 7070
+- **Test Infrastructure:** `config.Load()` called directly
+- **Given** the config file provides `AGENT_SERVER_ADDRESS=:9090`
+- **And** `AGENT_SERVER_ADDRESS=:7070` is also set in the real environment
+- **When** `config.Load()` is called
+- **Then** `cfg.Server.Address` MUST be `:7070` (environment variable wins)
+- **Note:** unit-tested — see `UT-XC-CFG-061`. Same provenance as IT-XC-CFG-020 above: no
+  backing Go test existed until this fix.
 
 ---
 
@@ -1600,7 +1862,7 @@ Unless overridden, tests use:
 | AC-HTTP-070 | IT-HTTP-080 |
 | AC-HTTP-080 | IT-HTTP-030, IT-HTTP-090 |
 | AC-HTTP-090 | IT-HTTP-100 |
-| AC-HTTP-091 | IT-HTTP-110 |
+| AC-HTTP-091 | IT-HTTP-110, IT-HTTP-110b |
 | AC-HTTP-095 | IT-HTTP-120 |
 | AC-HLT-010 | IT-HLT-010 |
 | AC-HLT-020 | IT-HLT-020 |
@@ -1608,12 +1870,14 @@ Unless overridden, tests use:
 | AC-HLT-040 | IT-HLT-010 |
 | AC-HLT-050 | IT-HLT-040 |
 | AC-SPR-010 | IT-SPR-010 |
+| AC-SPR-015 | IT-SPR-172 — see also UT-SPR-100/101 in `.ai/test-plans/unit-tests.md` for the general (non-`main.go`) ordering property |
 | AC-SPR-020 | IT-SPR-020 |
 | AC-SPR-030 | IT-SPR-030 |
 | AC-SPR-040 | IT-SPR-040 |
 | AC-SPR-050 | IT-SPR-050 |
 | AC-SPR-060 | IT-SPR-060 |
 | AC-SPR-070 | IT-SPR-070 |
+| AC-SPR-071 | IT-SPR-149, IT-SPR-149b |
 | AC-SPR-090 | IT-SPR-080 |
 | AC-SPR-095 | IT-SPR-090 |
 | AC-SPR-096 | IT-SPR-100 |
@@ -1621,10 +1885,11 @@ Unless overridden, tests use:
 | AC-SPR-105 | IT-SPR-120 |
 | AC-SPR-106 | IT-SPR-130 |
 | AC-SPR-106b | IT-SPR-140 |
+| AC-SPR-106c | IT-SPR-148 |
 | AC-SPR-107 | IT-SPR-150 |
 | AC-SPR-108 | IT-SPR-160 |
 | AC-SPR-108b | IT-SPR-165 |
-| AC-SPR-109 | IT-SPR-170 |
+| AC-SPR-109 | IT-SPR-170, IT-SPR-171 |
 | AC-SPR-110 | IT-SPR-180 |
 | AC-STS-010 | IT-STS-010 |
 | AC-STS-020 | IT-STS-020 |
@@ -1663,6 +1928,7 @@ Unless overridden, tests use:
 | AC-DCM-035 | IT-DCM-060 |
 | AC-DCM-040 | IT-DCM-070 |
 | AC-DCM-050 | IT-DCM-080 |
+| AC-DCM-055 | IT-DCM-180 (now also covers survive-multiple-panics-and-keep-retrying, not just single-panic-recovery — see DD-360) |
 | AC-DCM-060 | IT-DCM-090 |
 | AC-DCM-061 | IT-DCM-100, IT-DCM-105 |
 | AC-DCM-070 | IT-DCM-110 |
@@ -1680,10 +1946,12 @@ Unless overridden, tests use:
 | AC-MSG-025 | IT-MSG-060 |
 | AC-MSG-030 | IT-MSG-070, IT-MSG-071 |
 | AC-MSG-035 | IT-MSG-080 |
-| AC-MSG-040 | IT-MSG-090 |
+| AC-MSG-040 | IT-MSG-090, IT-MSG-130 |
 | AC-MSG-050 | IT-MSG-100 |
+| AC-MSG-052 | UT-MSG-050, UT-MSG-051–053 (unit-tested: `reconnectDelay` is a pure function; see `.ai/test-plans/unit-tests.md`) |
 | AC-MSG-055 | IT-MSG-110, IT-MSG-073 |
 | AC-MSG-060 | IT-MSG-120, IT-MSG-072 |
+| AC-MSG-065 | IT-MSG-160, IT-MSG-161 |
 | AC-RTE-010 | IT-RTE-010, IT-RTE-015 |
 | AC-RTE-020 | IT-RTE-020 |
 | AC-RTE-030 | IT-RTE-030 |
@@ -1699,12 +1967,14 @@ Unless overridden, tests use:
 | AC-RTE-080 | IT-RTE-120 |
 | AC-RTE-090 | IT-RTE-130 |
 | AC-RCM-010 | IT-RCM-010 |
-| AC-RCM-020 | IT-RCM-020 |
-| AC-RCM-030 | IT-RCM-030 |
+| AC-RCM-020 | IT-RCM-020, IT-RCM-045 |
+| AC-RCM-030 | IT-RCM-030, IT-RCM-045 |
 | AC-RCM-040 | IT-RCM-040 |
 | AC-RCM-045 | IT-RCM-050 |
+| AC-RCM-047 | IT-MSG-131 exercises `SetOnSetupReady` end to end against a real NATS/JetStream server, wired the same way `main.go` wires it (drain-equivalent work then `StartConsuming`, both synchronously inside the callback) — see `internal/messaging/client_integration_test.go`. See also UT-MSG-080, UT-MSG-090, and UT-MSG-095 (`finishSetup` must not report success when `beginConsuming` fails after the callback runs) in `.ai/test-plans/unit-tests.md`. `main.go`'s own composition-root wiring of `SetOnSetupReady` specifically (as opposed to `messaging.Client`'s side of the contract) is still not exercised by an end-to-end test — a genuine "NATS unreachable at Start()" integration scenario would require controlling the test NATS server's startup ordering relative to the agent process, which the current test harness (shared `testNATSServer` started before any client) doesn't support |
 | AC-RCM-050 | IT-RCM-060 |
 | AC-RCM-060 | IT-RCM-070 |
+| AC-RCM-071 | IT-RCM-085 |
 | AC-XC-ERR-010 | IT-XC-ERR-010 |
 | AC-XC-ERR-020 | IT-XC-ERR-020 |
 | AC-XC-ERR-030 | IT-XC-ERR-030 |

@@ -43,8 +43,8 @@ agent; duplicate registrations are rejected.
                  +----------------+----------------+
                  ^                |                ^
                  |                |                |
-          Registration      Heartbeat       Messaging System
-        POST /api/v1/agents   PUT heartbeat   (NATS JetStream)
+          Registration           Heartbeat              Messaging System
+   POST /api/v1alpha1/agents  PUT .../heartbeat  (NATS JetStream; CP-owned streams)
                  |                |                |
                  |                |                |
 +----------------+----------------+----------------+-----------+
@@ -62,9 +62,10 @@ agent; duplicate registrations are rejected.
 |                                                               |
 |  +-----------------------------------------------------------+|
 |  | Messaging Integration                                      |
+|  |  CP stream: dcm-agent-requests (dcm.agent.>)               |
 |  | +-------------+ +-------------+ +---------------+          |
-|  | | Main Topic  | | Retry Topic | | Cancel Topic  |          |
-|  | | Consumer    | | Consumer    | | Consumer      |          |
+|  | | Main Subject| | Retry Stream| | Cancel Subject|          |
+|  | | Consumer    | | (agent-owned)| | Consumer      |          |
 |  | +------+------+ +------+------+ +-------+-------+          |
 |  |        |                |                |                  |
 |  | +------+----------------+----------------+-------+          |
@@ -355,6 +356,7 @@ service type with selection strategies.
 | REQ-SPR-076 | On re-registration with changed service type, if the new service type is occupied by another SP, the agent MUST reject with 409 Conflict | MUST | |
 | REQ-SPR-077 | On re-registration with changed service type, if the new service type is available, the agent MUST update the registration and free the old service type slot | MUST | |
 | REQ-SPR-080 | Registration MUST be idempotent using `name` as the natural key (create-or-update behavior) | MUST | |
+| REQ-SPR-081 | `name` and `service_type` MUST be trimmed of leading/trailing whitespace before use as idempotency/collision keys, so whitespace-only differences cannot bypass REQ-SPR-080 or REQ-SPR-200 | MUST | |
 | REQ-SPR-090 | When a `?id=` query parameter is provided on provider registration, the agent MUST use it as the provider ID | MUST | |
 | REQ-SPR-091 | When the `?id=` query parameter is absent on provider registration, the agent MUST generate a provider ID using UUID v4 (lowercase hyphenated format). User-supplied `?id=` values MUST be validated against the AEP-122 pattern: `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` (1–63 characters) | MUST | |
 | REQ-SPR-100 | Successful new registration MUST return 201 Created with the full Provider resource including server-set fields (`id`, `path`, `create_time`, `update_time`) | MUST | |
@@ -409,6 +411,16 @@ service type with selection strategies.
 - **Then** the embedded SPs for "container" and "cluster" service types MUST be registered internally
 - **And** embedded registration MUST NOT make outbound REST calls
 
+##### AC-SPR-015: Embedded SP initial health transition is not lost
+
+- **Validates:** REQ-SPR-030, REQ-HMN-100, REQ-HMN-120
+- **Given** an embedded SP's initial health check (performed synchronously during registration)
+  yields a status different from its initial assumed status (e.g. immediately Unhealthy)
+- **When** the agent completes startup composition
+- **Then** that transition MUST reach the same downstream handling as any later transition —
+  retry-topic reprocessing and health CloudEvent publication — not be silently dropped because
+  the transition callback was wired after embedded registration ran
+
 ##### AC-SPR-020: Embedded SPs not active by default
 
 - **Validates:** REQ-SPR-020
@@ -457,6 +469,17 @@ service type with selection strategies.
 - **When** "vm-provider" re-registers for service type "vm"
 - **Then** the response MUST be 200 OK (idempotent update, not conflict)
 
+##### AC-SPR-071: Whitespace-padded name/service_type does not bypass idempotency or slot collision
+
+- **Validates:** REQ-SPR-081
+- **Given** "ws-provider" is registered for service type "ws-svc"
+- **When** a registration is submitted with `name="  ws-provider  "` (leading/trailing whitespace)
+  and the same `service_type`
+- **Then** the response MUST be 200 OK, treated as an idempotent update of the SAME provider — not
+  a new registration
+- **And** symmetrically, a whitespace-padded `service_type` matching an already-claimed slot MUST
+  still be rejected with 409 Conflict
+
 ##### AC-SPR-090: Persistence across restart
 
 - **Validates:** REQ-SPR-170, REQ-SPR-180, REQ-SPR-190
@@ -464,6 +487,22 @@ service type with selection strategies.
 - **When** the agent restarts
 - **Then** "db-provider" MUST still hold the "database" service type slot
 - **And** the agent MUST load the persisted registration before processing new registrations
+
+##### AC-SPR-092: Persisted writes are fsync'd before and after rename
+
+- **Validates:** REQ-SPR-170
+- **Given** a provider registration is being persisted (`FileStore.Save`/`Delete`)
+- **When** the write completes
+- **Then** the temp file's contents MUST be fsync'd before the atomic rename into place
+- **And** the parent directory MUST be fsync'd after the rename, so the directory-entry update
+  itself survives a crash immediately following the write
+- **And** a failure to fsync the temp file MUST abort before the rename (the previous persisted
+  state remains intact, no partial/torn write is exposed)
+- **And** a failure to fsync the parent directory AFTER the rename has already succeeded MUST NOT
+  be reported as a `Save`/`Delete` failure — the rename already made the new data durable and
+  visible to readers; treating this as a failure would make `service.ProviderService` roll back
+  in-memory registry/health state to the pre-write state while the disk still reflects the
+  post-write state, desyncing the two (see AC-SPR-111's slot-ownership invariant)
 
 ##### AC-SPR-095: Re-registration with changed service type (available)
 
@@ -533,6 +572,14 @@ service type with selection strategies.
 - **When** the request is processed
 - **Then** the response MUST be 422 Unprocessable Entity with RFC 7807 error body (type=UNPROCESSABLE_ENTITY)
 
+##### AC-SPR-106c: Cross-provider ID collision rejected with the colliding holder's name
+
+- **Validates:** REQ-SPR-091
+- **Given** provider "collision-holder" is already registered with `?id=shared-id`
+- **When** a DIFFERENT, new provider name registers with `?id=shared-id`
+- **Then** the response MUST be 409 Conflict with RFC 7807 error body (type=CONFLICT)
+- **And** the error detail MUST name the requested ID and the existing holder ("collision-holder")
+
 ##### AC-SPR-109: Persistence load failure causes fail-fast
 
 - **Validates:** REQ-SPR-181
@@ -546,6 +593,18 @@ service type with selection strategies.
 - **Given** an SP is registered for service type "database"
 - **When** a different SP attempts to register for service type "database"
 - **Then** the registration MUST be rejected with 409 Conflict
+
+##### AC-SPR-111: Slot mutations verify current ownership before releasing a service type
+
+- **Validates:** REQ-SPR-200
+- **Given** the registry's in-memory slot map and the persisted store have desynced (e.g. a stale
+  embedded record survives after an external provider has since claimed that service type)
+- **When** any operation that releases or moves a service-type slot runs (a provider changing its
+  own service type, or stale-embedded cleanup during `RegisterEmbedded`)
+- **Then** the slot MUST only be released/reassigned if the current registry holder for that service
+  type matches the provider performing the operation
+- **And** a different provider's active slot MUST NOT be silently deleted or reassigned as a side
+  effect
 
 #### Dependencies
 
@@ -704,12 +763,12 @@ Out of scope: Metrics/observability integration.
 | REQ-HMN-110 | When an SP becomes Unhealthy, the agent MUST stop routing new requests to that SP | MUST | Requests are queued to the retry topic; see REQ-RTE-090 |
 | REQ-HMN-120 | When an SP becomes Unhealthy, the agent MUST publish a `dcm.agent.health.service-type-degraded` CloudEvent to `dcm.agents.health` | MUST | |
 | REQ-HMN-130 | When an SP becomes Unavailable, the agent MUST remove the service type from its advertised list | MUST | |
-| REQ-HMN-140 | When an SP becomes Unavailable, the agent MUST send a `POST /api/v1/agents` to DCM with the updated registration (service types without the affected type) | MUST | |
+| REQ-HMN-140 | When an SP becomes Unavailable, the agent MUST send a `POST /api/v1alpha1/agents` to DCM with the updated registration (service types without the affected type) | MUST | |
 | REQ-HMN-145 | When an SP becomes Unavailable, the agent MUST publish a `dcm.agent.health.service-type-unavailable` CloudEvent to `dcm.agents.health` | MUST | |
 | REQ-HMN-150 | When an SP becomes Unavailable, the agent MUST process the retry topic and reject all held requests for that service type with error CloudEvents | MUST | |
 | REQ-HMN-170 | When a previously unhealthy or unavailable SP recovers to Ready, the agent MUST process held requests from the retry topic for that service type | MUST | |
-| REQ-HMN-180 | When an SP recovers from Unavailable to Ready, the agent MUST re-add the service type to its list and send `POST /api/v1/agents` to DCM with the updated registration | MUST | |
-| REQ-HMN-185 | When an SP transitions from Unavailable to Unhealthy, the agent MUST re-add the service type to its advertised list and send `POST /api/v1/agents` to DCM with the updated registration. The retry topic MUST NOT be processed on this transition (only on transition to Ready per REQ-HMN-170) | MUST | |
+| REQ-HMN-180 | When an SP recovers from Unavailable to Ready, the agent MUST re-add the service type to its list and send `POST /api/v1alpha1/agents` to DCM with the updated registration | MUST | |
+| REQ-HMN-185 | When an SP transitions from Unavailable to Unhealthy, the agent MUST re-add the service type to its advertised list and send `POST /api/v1alpha1/agents` to DCM with the updated registration. The retry topic MUST NOT be processed on this transition (only on transition to Ready per REQ-HMN-170) | MUST | |
 
 #### Requirements — Pod Conditions (Kubernetes/OpenShift)
 
@@ -803,7 +862,7 @@ Out of scope: Metrics/observability integration.
 - **Given** the SP for service type "database" transitions to Unavailable
 - **When** the state change is detected
 - **Then** the agent MUST publish a CloudEvent to `dcm.agents.health` with type `dcm.agent.health.service-type-unavailable`
-- **And** the CE data MUST include `agentId`, `agentName`, `topicName`, `serviceType`, `reason`, and `affectedProvider`
+- **And** the CE data MUST include `agent_id`, `agent_name`, `topic_name`, `service_type`, `reason`, and `affected_provider`
 
 ##### AC-HMN-100: Pod conditions updated on state change
 
@@ -925,32 +984,32 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| REQ-DCM-010 | The agent MUST register with DCM via `POST /api/v1/agents` once at least one SP (embedded or external) is registered and not Unavailable | MUST | |
-| REQ-DCM-020 | The registration payload MUST include: `name`, `environment`, `serviceTypes`, `cost`, `topicName`. The initial registration MUST include a non-empty `serviceTypes` list. Subsequent updates MAY include an empty list (see REQ-DCM-115) | MUST | |
-| REQ-DCM-030 | The registration payload SHOULD include `resourcesAvailable` when available. Structure: `{total_cpu: string, total_memory: string (e.g., "1TB"), total_storage: string (e.g., "2TB"), total_node: integer}` — sourced from K8s node info or manual configuration | SHOULD | Aligned with OpenAPI `ResourceCapacity` schema (snake_case) |
+| REQ-DCM-010 | The agent MUST register with DCM via `POST /api/v1alpha1/agents` once at least one SP (embedded or external) is registered and not Unavailable | MUST | |
+| REQ-DCM-020 | The registration payload MUST include: `name`, `environment`, `service_types`, `cost`, `topic_name`. The `topic_name` value MUST be the prefixed main subject (`dcm.agent.{base}` per REQ-MSG-010). The initial registration MUST include a non-empty `service_types` list. Subsequent updates MAY include an empty list (see REQ-DCM-115) | MUST | |
+| REQ-DCM-030 | The registration payload SHOULD include `resources_available` when available. Structure: `{total_cpu: string, total_memory: string (e.g., "1TB"), total_storage: string (e.g., "2TB"), total_node: integer}` — sourced from K8s node info or manual configuration | SHOULD | Aligned with OpenAPI `ResourceCapacity` schema (snake_case) |
 | REQ-DCM-040 | Registration MUST execute asynchronously without blocking HTTP server startup | MUST | |
 | REQ-DCM-050 | Registration MUST retry with exponential backoff using formula: min(initialInterval × 2^attempt, maxInterval) with full jitter (uniform random in [0, calculated]) on failure | MUST | |
 | REQ-DCM-060 | Non-retryable errors (4xx client errors except 429 Too Many Requests) MUST stop retries immediately. On 429, the agent MUST respect the `Retry-After` header if present, or apply standard backoff | MUST | |
 | REQ-DCM-070 | Registration failures MUST be logged without causing the agent to exit | MUST | |
 | REQ-DCM-080 | Re-registration on restart MUST update the existing agent entry in DCM using `name` as the natural key (idempotent behavior) | MUST | |
-| REQ-DCM-090 | After successful registration, the agent MUST store the returned `agentId` exclusively in memory for use in heartbeats and updates. The `agentId` is assigned by DCM in the registration response; on restart the agent relies on DCM's idempotent registration to recover it | MUST | |
+| REQ-DCM-090 | After successful registration, the agent MUST store the returned `agent_id` exclusively in memory for use in heartbeats and updates. The `agent_id` is assigned by DCM in the registration response; on restart the agent relies on DCM's idempotent registration to recover it | MUST | |
 | REQ-DCM-100 | The agent MUST wait until at least one SP is registered and not Unavailable before registering to DCM (prerequisite gate) | MUST | |
 | REQ-DCM-110 | Each service type advertised to DCM MUST be backed by an SP in Ready or Unhealthy state (not Unavailable) | MUST | |
-| REQ-DCM-115 | When all SPs become Unavailable after initial registration, the agent MUST send `POST /api/v1/agents` with an empty `serviceTypes` list | MUST | |
+| REQ-DCM-115 | When all SPs become Unavailable after initial registration, the agent MUST send `POST /api/v1alpha1/agents` with an empty `service_types` list | MUST | |
 
 #### Requirements — Service Type Change Notification
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| REQ-DCM-120 | When the list of supported service types changes (SP registration or health-driven removal) and the agent is already registered to DCM, the agent MUST send `POST /api/v1/agents` with the full updated registration payload | MUST | |
+| REQ-DCM-120 | When the list of supported service types changes (SP registration or health-driven removal) and the agent is already registered to DCM, the agent MUST send `POST /api/v1alpha1/agents` with the full updated registration payload | MUST | |
 | REQ-DCM-130 | If the agent is not yet registered to DCM when the service type list changes, the agent MUST defer — the SP registration satisfies the prerequisite for initial DCM registration | MUST | |
 
 #### Requirements — Heartbeat
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| REQ-DCM-140 | After successful registration, the agent MUST send periodic heartbeats to DCM via `PUT /api/v1/agents/{agentId}/heartbeat` | MUST | |
-| REQ-DCM-150 | The heartbeat payload MUST include `timestamp` (ISO 8601) and `consumerLag` (number of unacknowledged messages on the main topic's durable consumer, excluding retry and cancel topics) | MUST | |
+| REQ-DCM-140 | After successful registration, the agent MUST send periodic heartbeats to DCM via `PUT /api/v1alpha1/agents/{agentId}/heartbeat` | MUST | |
+| REQ-DCM-150 | The heartbeat payload MUST include `timestamp` (ISO 8601) and `consumer_lag` (number of unacknowledged messages on the main topic's durable consumer, excluding retry and cancel topics). `timestamp` MUST be strictly greater than the previous heartbeat's `timestamp` | MUST | Generated fresh via `time.Now()` on every send; DCM rejects a heartbeat whose timestamp isn't strictly increasing (control-plane review item #8) |
 | REQ-DCM-160 | The heartbeat interval MUST be configurable | MUST | |
 | REQ-DCM-170 | Heartbeat failures MUST be logged and retried on the next interval without causing the agent to exit | MUST | |
 
@@ -973,8 +1032,8 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 - **Validates:** REQ-DCM-010, REQ-DCM-100, REQ-DCM-090
 - **Given** the agent starts with one embedded SP configured and not Unavailable
 - **When** the SP becomes Ready
-- **Then** the agent MUST send `POST /api/v1/agents` to DCM with the correct payload
-- **And** the agent MUST store the returned `agentId` in memory
+- **Then** the agent MUST send `POST /api/v1alpha1/agents` to DCM with the correct payload
+- **And** the agent MUST store the returned `agent_id` in memory
 
 ##### AC-DCM-020: Registration waits for non-Unavailable SP
 
@@ -986,10 +1045,10 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 ##### AC-DCM-030: Registration payload correctness
 
 - **Validates:** REQ-DCM-020
-- **Given** the agent is configured with `name="agent-prod-1"`, `environment="production"`, `cost="medium"`, `topicName="agent-prod-1"`
+- **Given** the agent is configured with `name="agent-prod-1"`, `environment="production"`, `cost="medium"`, `AGENT_TOPIC_NAME="agent-prod-1"`
 - **And** service types ["container", "database"] are available
 - **When** the agent registers to DCM
-- **Then** the payload MUST include all required fields with correct values
+- **Then** the payload MUST include all required fields with correct values (including `topic_name="dcm.agent.agent-prod-1"` and `service_types=["container","database"]`)
 
 ##### AC-DCM-040: Idempotent re-registration on restart
 
@@ -997,7 +1056,7 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 - **Given** the agent was previously registered to DCM with name "agent-prod-1"
 - **When** the agent restarts and re-registers with the same name
 - **Then** DCM MUST update the existing entry (not create a duplicate)
-- **And** the agent MUST receive the same `agentId`
+- **And** the agent MUST receive the same `agent_id`
 
 ##### AC-DCM-050: Registration retry with exponential backoff
 
@@ -1023,35 +1082,56 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 - **Then** the agent MUST wait at least the duration specified by `Retry-After` before the next attempt
 - **And** if no `Retry-After` header is present, the agent MUST apply standard exponential backoff
 
+##### AC-DCM-055: Registrar goroutine panic does not crash the agent, and registration keeps making forward progress
+
+- **Validates:** REQ-DCM-070
+- **Given** a dependency injected into the registrar (e.g. `ServiceTypeLister`) panics, whether once
+  or repeatedly
+- **When** the registrar's background goroutine invokes that dependency
+- **Then** each panic MUST be recovered and logged
+- **And** the agent process MUST continue running (HTTP server, routing, other background
+  goroutines unaffected)
+- **And** the registrar goroutine itself MUST NOT permanently exit after a recovered panic —
+  registration/heartbeating MUST keep being retried afterward, so DCM registration does not
+  silently stall forever for the remainder of the process lifetime just because one dependency
+  call panicked once
+
 ##### AC-DCM-070: Service type change triggers DCM update
 
 - **Validates:** REQ-DCM-120
 - **Given** the agent is registered to DCM with service types ["container"]
 - **And** an external SP registers for service type "database"
 - **When** the service type list changes to ["container", "database"]
-- **Then** the agent MUST send `POST /api/v1/agents` with the updated list
+- **Then** the agent MUST send `POST /api/v1alpha1/agents` with the updated list
 
 ##### AC-DCM-080: Periodic heartbeat
 
 - **Validates:** REQ-DCM-140, REQ-DCM-150
-- **Given** the agent is registered with `agentId="agent-123"`
+- **Given** the agent is registered and its DCM-assigned agent ID is `"agent-123"`
 - **When** the heartbeat interval elapses
-- **Then** the agent MUST send `PUT /api/v1/agents/agent-123/heartbeat` with `timestamp` and `consumerLag`
+- **Then** the agent MUST send `PUT /api/v1alpha1/agents/agent-123/heartbeat` with `timestamp` and `consumer_lag`
 
 ##### AC-DCM-090: Heartbeat includes consumer lag
 
 - **Validates:** REQ-DCM-150
 - **Given** the agent's main topic durable consumer has 5 unacknowledged messages
 - **When** a heartbeat is sent
-- **Then** `consumerLag` MUST be 5
+- **Then** `consumer_lag` MUST be 5
 
-##### AC-DCM-100: All SPs unavailable — empty serviceTypes sent to DCM
+##### AC-DCM-095: Heartbeat timestamps strictly increase
+
+- **Validates:** REQ-DCM-150
+- **Given** the registrar sends multiple heartbeats over time
+- **When** the payload `timestamp` of each is compared to the previous one
+- **Then** each MUST be strictly greater than the previous (`IT-DCM-135`)
+
+##### AC-DCM-100: All SPs unavailable — empty service_types sent to DCM
 
 - **Validates:** REQ-DCM-115
 - **Given** the agent is registered to DCM with service types ["container", "database"]
 - **And** both SPs become Unavailable
 - **When** the last SP transitions to Unavailable
-- **Then** the agent MUST send `POST /api/v1/agents` with `serviceTypes=[]`
+- **Then** the agent MUST send `POST /api/v1alpha1/agents` with `service_types=[]`
 - **And** the agent MUST remain registered (not de-register)
 
 ##### AC-DCM-015: Registration non-blocking to HTTP
@@ -1069,12 +1149,12 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 - **Then** the agent MUST NOT send a registration update to DCM
 - **And** MUST include the change in the initial registration
 
-##### AC-DCM-035: resourcesAvailable in registration
+##### AC-DCM-035: resources_available in registration
 
 - **Validates:** REQ-DCM-030
 - **Given** resource availability information is available
 - **When** the agent registers to DCM
-- **Then** the payload SHOULD include `resourcesAvailable`
+- **Then** the payload SHOULD include `resources_available`
 
 ##### AC-DCM-085: Configurable heartbeat interval
 
@@ -1096,7 +1176,7 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 - **Validates:** REQ-DCM-110
 - **Given** the agent has SPs in Ready, Unhealthy, and Unavailable states
 - **When** the agent sends a registration or update to DCM
-- **Then** `serviceTypes` MUST include only types backed by SPs in Ready or Unhealthy state
+- **Then** `service_types` MUST include only types backed by SPs in Ready or Unhealthy state
 - **And** MUST NOT include types whose SP is Unavailable
 
 #### Dependencies
@@ -1112,34 +1192,51 @@ Depends on Topic 3 (SP Registration) and Topic 5 (SP Health Monitoring).
 The agent uses **NATS with JetStream** as its messaging system for communication
 with DCM. This is consistent with other DCM components (e.g., the Control Plane).
 
-Three topics are created at startup: a main topic for resource operations, a
-retry topic for holding requests when SPs are unhealthy, and a cancel topic for
-filtering stale requests.
+At startup the agent derives three **subjects** from a deterministic **base name**
+(`AGENT_TOPIC_NAME` if set, otherwise `AGENT_NAME`):
 
-The topic name is deterministic — either derived from the agent's name or
-provided via configuration — ensuring that after a restart the agent reuses the
-same topic.
+| Subject role | NATS subject | Stream ownership |
+|--------------|--------------|------------------|
+| Main (create/delete requests from CP) | `dcm.agent.{base}` | Control-plane stream `dcm-agent-requests` (wildcard `dcm.agent.>`) |
+| Cancel (cancel requests from CP) | `dcm.agent.{base}.cancel` | Same CP stream |
+| Retry (agent-internal hold queue) | `{base}.retry` | Agent-owned stream `{base}-retry` |
+
+The control plane owns JetStream streams for all CP-facing subjects (`dcm-agent-requests`
+binding `dcm.agent.>`, and `dcm-agent-responses` binding `dcm.agents.responses`).
+The agent MUST NOT create competing streams on those subjects. It creates **durable
+consumers** filtered to its own main and cancel subjects on `dcm-agent-requests`,
+and **publishes** response CloudEvents directly to `dcm.agents.responses` (no
+response stream creation). The agent still creates and owns its internal retry
+stream and a health stream for `dcm.agents.health`.
+
+The prefixed main subject (`dcm.agent.{base}`) is advertised to DCM as `topic_name`
+during registration. The unprefixed retry subject is never CP-facing.
 
 > **Terminology mapping:** This spec uses "topic" as a logical abstraction.
-> In NATS JetStream terms: a *topic* maps to a JetStream **subject** backed
-> by a **stream**. Message consumers are JetStream **consumers** (durable).
+> In NATS JetStream terms: a *topic* maps to a JetStream **subject**. CP-facing
+> subjects share the control-plane-owned `dcm-agent-requests` stream; the agent
+> consumes via durable **consumers** with `FilterSubject`. Agent-internal retry
+> uses a dedicated agent-owned stream.
 
-Out of scope: Messaging system administration beyond ensuring required subjects
-and consumers exist. Infrastructure MAY pre-provision streams; the agent MUST
-create or bind to resources as needed (see REQ-MSG-045/046).
+Out of scope: Creating or administering control-plane JetStream streams. The agent
+MUST tolerate the CP not having created `dcm-agent-requests` yet at startup (see
+REQ-MSG-051).
 
 #### Requirements — Topic Management
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| REQ-MSG-010 | The agent MUST create a main topic at startup using a deterministic name: the value of `AGENT_TOPIC_NAME` if set, otherwise the value of `AGENT_NAME` used as-is. The name MUST conform to NATS subject token rules (alphanumeric, hyphens, dots; no spaces or wildcards; max 255 characters) | MUST | |
-| REQ-MSG-020 | The agent MUST create a retry topic at startup named `{topicName}.retry` | MUST | |
-| REQ-MSG-030 | The agent MUST create a cancel topic at startup named `{topicName}.cancel` | MUST | |
-| REQ-MSG-040 | If a topic already exists, the agent MUST reuse it | MUST | |
-| REQ-MSG-045 | The agent MUST create durable JetStream consumers on first startup | MUST | |
+| REQ-MSG-010 | The agent MUST derive a deterministic **base name** at startup: the value of `AGENT_TOPIC_NAME` if set, otherwise `AGENT_NAME`. The base name MUST conform to NATS subject token rules (alphanumeric, hyphens, dots, underscores; no spaces or wildcards; max 255 characters) and MUST NOT already start with the reserved `dcm.agent.` prefix. The control-plane-facing **main subject** MUST be `dcm.agent.{base}` | MUST | Prefix `dcm.agent.` is a static constant, not user input; rejecting a pre-prefixed base avoids double-prefixing and prevents the agent-owned retry subject from landing inside the CP's `dcm.agent.>` wildcard |
+| REQ-MSG-020 | The agent MUST create an agent-owned retry stream at startup backing subject `{base}.retry` (stream name `{base}-retry`) | MUST | Never published to by the control plane |
+| REQ-MSG-030 | The agent MUST derive the control-plane-facing **cancel subject** as `dcm.agent.{base}.cancel` | MUST | Part of the `dcm.agent.>` wildcard; consumed via durable consumer on `dcm-agent-requests`, not an agent-owned stream |
+| REQ-MSG-040 | If agent-owned streams or CP-stream durable consumers already exist, the agent MUST reuse them (`CreateOrUpdateStream` / `CreateOrUpdateConsumer`) | MUST | |
+| REQ-MSG-045 | The agent MUST create durable JetStream consumers on first startup | MUST | Main and cancel on `dcm-agent-requests`; retry on agent-owned retry stream |
 | REQ-MSG-046 | The agent MUST reuse (bind to) existing JetStream consumers on subsequent startups | MUST | |
-| REQ-MSG-047 | JetStream consumer names MUST be deterministic (derived from the topic name) to ensure resumption from the last acknowledged message position | MUST | |
-| REQ-MSG-050 | Only the main topic name is advertised to DCM during registration. The retry topic is agent-internal. The cancel topic name follows the `{topicName}.cancel` convention known to DCM (DCM publishes cancel requests to it) | MUST | |
+| REQ-MSG-047 | JetStream consumer names MUST be deterministic (derived from the base name: `{base}-consumer`, `{base}-cancel-consumer`, `{base}-retry-consumer`) to ensure resumption from the last acknowledged message position | MUST | |
+| REQ-MSG-048 | The agent MUST NOT create JetStream streams for control-plane-owned subjects (`dcm.agent.>` or `dcm.agents.responses`) | MUST | CP owns `dcm-agent-requests` and `dcm-agent-responses`; overlapping bindings are rejected by NATS |
+| REQ-MSG-049 | The agent MUST create durable consumers on the control-plane stream `dcm-agent-requests` with `FilterSubject` set to its main subject (`dcm.agent.{base}`) and cancel subject (`dcm.agent.{base}.cancel`) respectively | MUST | One consumer per subject; both bound to the same CP stream |
+| REQ-MSG-050 | Only the prefixed main subject (`dcm.agent.{base}`) is advertised to DCM as `topic_name` during registration. The retry subject is agent-internal. DCM publishes cancel requests to `dcm.agent.{base}.cancel` | MUST | |
+| REQ-MSG-051 | When creating durable consumers on `dcm-agent-requests`, if the stream does not exist yet (control plane not started), the agent MUST retry indefinitely in two phases: (1) an initial bounded attempt retrying every 2s for up to 30s, synchronous with agent startup; (2) if phase 1 fails, a background retry of the full setup attempt every 30s, indefinitely, until it succeeds or the agent shuts down. The agent MUST NOT permanently give up while running | MUST | The CP may take longer than 30s to create its stream (e.g. rolling restarts); giving up permanently would leave the agent silently consuming nothing. Logs WARN for the expected "stream not found" case, ERROR for any other consumer-creation failure (both still retried) |
 
 #### Requirements — Message Consumption
 
@@ -1151,7 +1248,7 @@ create or bind to resources as needed (see REQ-MSG-045/046).
 | REQ-MSG-090 | On startup, the agent MUST drain the cancel topic (consuming messages until the consumer reports no pending messages or a configurable drain timeout of 5s elapses) to populate the deny list before processing main and retry topics | MUST | |
 | REQ-MSG-100 | The agent MUST handle messaging system connection failures: log at WARN level, reconnect with exponential backoff (same formula as REQ-DCM-050), and continue operating. Messaging unavailability MUST NOT crash the agent | MUST | |
 | REQ-MSG-110 | Messaging system availability MUST NOT block agent HTTP server startup | MUST | |
-| REQ-MSG-115 | The agent MUST acknowledge a message only after the routing outcome is finalized — the request has been forwarded to the SP and the SP's HTTP response received, the message has been published to the retry topic, or the message has been resolved without forwarding (error CloudEvent published or deny list drop) | MUST | |
+| REQ-MSG-115 | The agent MUST acknowledge a message only after the routing outcome is finalized — the request has been forwarded to the SP and the SP's HTTP response received, the message has been published to the retry topic, or the message has been resolved without forwarding (error CloudEvent published or deny list drop). For the main-topic consume path, `MaxDeliver`-exceeded handling and per-message handler-timeout enforcement MUST occur in the messaging client before invoking the router handler (see REQ-RCM-160, REQ-RCM-180) | MUST | |
 | REQ-MSG-116 | Unacknowledged messages MUST be redelivered by JetStream on reconnection | MUST | |
 
 #### Requirements — CloudEvent Format
@@ -1159,37 +1256,45 @@ create or bind to resources as needed (see REQ-MSG-045/046).
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
 | REQ-MSG-120 | See REQ-XC-CE-010. All messages exchanged through the messaging system MUST conform to CloudEvents v1.0 | MUST | |
-| REQ-MSG-130 | All agent-originated CloudEvents MUST include `agentName` and `topicName` in the data payload for correlation | MUST | |
-| REQ-MSG-140 | Agent response CloudEvents MUST be published to the `dcm.agents.responses` subject | MUST | |
-| REQ-MSG-150 | Agent health warning CloudEvents MUST be published to the `dcm.agents.health` subject | MUST | |
+| REQ-MSG-130 | All agent-originated CloudEvents MUST include `agent_name` and `topic_name` in the data payload for correlation (`topic_name` is the prefixed main subject, e.g. `dcm.agent.{base}`) | MUST | AEP snake_case wire format |
+| REQ-MSG-135 | Agent response and health CloudEvents MUST be published via JetStream with a `Nats-Msg-Id` header set to the CloudEvent's own `id`, enabling server-side deduplication if publish is retried | MUST | See REQ-XC-CE-050 |
+| REQ-MSG-140 | Agent response CloudEvents MUST be published to the `dcm.agents.responses` subject without creating a response stream (JetStream routes to the CP-owned `dcm-agent-responses` stream) | MUST | |
+| REQ-MSG-150 | Agent health warning CloudEvents MUST be published to the `dcm.agents.health` subject | MUST | Agent creates `dcm-health` stream for this subject |
 
 #### Configuration Introduced
 
 | Config Key | Env Var | Default | Min | Max | Unit | Description |
 |------------|---------|---------|-----|-----|------|-------------|
 | messaging.url | AGENT_MESSAGING_URL | (required) | - | - | - | Messaging system URL |
-| messaging.topicName | AGENT_TOPIC_NAME | (derived from AGENT_NAME) | - | - | - | Main topic name |
+| messaging.topicName | AGENT_TOPIC_NAME | (derived from AGENT_NAME) | - | - | - | Unprefixed base name; main subject is `dcm.agent.{base}` |
+| messaging.ackWait | AGENT_MESSAGING_ACK_WAIT | 120s | 10s | 5m | duration | Main-topic durable consumer AckWait |
+| messaging.cancelAckWait | AGENT_MESSAGING_CANCEL_ACK_WAIT | 10s | 1s | 1m | duration | Cancel-topic durable consumer AckWait |
+| messaging.reconnectInitialBackoff | AGENT_MESSAGING_RECONNECT_INITIAL_BACKOFF | 1s | 100ms | messaging.reconnectMaxBackoff | duration | Initial NATS reconnect backoff (REQ-MSG-100) |
+| messaging.reconnectMaxBackoff | AGENT_MESSAGING_RECONNECT_MAX_BACKOFF | 30s | messaging.reconnectInitialBackoff | 5m | duration | Maximum NATS reconnect backoff (REQ-MSG-100) |
 
 #### Acceptance Criteria
 
-##### AC-MSG-010: Topic creation at startup
+##### AC-MSG-010: Subject and stream setup at startup
 
-- **Validates:** REQ-MSG-010, REQ-MSG-020, REQ-MSG-030
+- **Validates:** REQ-MSG-010, REQ-MSG-020, REQ-MSG-030, REQ-MSG-048, REQ-MSG-049
 - **Given** the agent is configured with `AGENT_TOPIC_NAME="agent-prod-1"`
+- **And** the control plane has created stream `dcm-agent-requests` binding `dcm.agent.>`
 - **When** the agent starts
-- **Then** topics "agent-prod-1", "agent-prod-1.retry", and "agent-prod-1.cancel" MUST be created (or reused if existing)
+- **Then** it MUST NOT create a stream on `dcm.agent.agent-prod-1` or `dcm.agents.responses`
+- **And** it MUST create durable consumers on `dcm-agent-requests` filtered to `dcm.agent.agent-prod-1` and `dcm.agent.agent-prod-1.cancel`
+- **And** it MUST create (or reuse) agent-owned retry stream `agent-prod-1-retry` backing subject `agent-prod-1.retry`
 
-##### AC-MSG-020: Topic reuse on restart
+##### AC-MSG-020: Stream and consumer reuse on restart
 
-- **Validates:** REQ-MSG-040
-- **Given** topics already exist from a prior agent session
+- **Validates:** REQ-MSG-040, REQ-MSG-046
+- **Given** durable consumers and the retry stream already exist from a prior agent session
 - **When** the agent restarts
-- **Then** the agent MUST reuse the existing topics without error
+- **Then** the agent MUST bind to the existing consumers and retry stream without error
 
-##### AC-MSG-030: Main topic consumption
+##### AC-MSG-030: Main subject consumption
 
 - **Validates:** REQ-MSG-060
-- **Given** DCM publishes a CloudEvent to the agent's main topic
+- **Given** DCM publishes a CloudEvent to subject `dcm.agent.agent-prod-1`
 - **When** the agent is running
 - **Then** the agent MUST consume the message
 
@@ -1200,6 +1305,9 @@ create or bind to resources as needed (see REQ-MSG-045/046).
 - **When** the agent starts
 - **Then** cancel messages MUST be processed first (populating the deny list)
 - **And** main topic messages MUST be processed after the deny list is populated
+- **And** a transient error from an individual drain `Fetch` call MUST NOT abort the drain early —
+  the drain MUST continue retrying until either it observes zero pending messages or the
+  configured drain timeout (5s) elapses, whichever comes first
 
 ##### AC-MSG-050: Messaging system failure handling
 
@@ -1209,21 +1317,50 @@ create or bind to resources as needed (see REQ-MSG-045/046).
 - **Then** the HTTP server MUST start normally
 - **And** the agent MUST retry messaging connection in the background
 
+##### AC-MSG-052: NATS reconnect uses exponential backoff with jitter
+
+- **Validates:** REQ-MSG-100
+- **Given** the NATS connection is lost after a successful initial connection
+- **When** the client computes successive reconnect delays
+- **Then** each delay MUST follow `min(initialInterval × 2^attempt, maxInterval)` with full jitter
+  (uniform random in `[0, calculated]`) — the same formula as REQ-DCM-050 — rather than a fixed
+  interval
+- **And** `initialInterval`/`maxInterval` MUST be configurable (`AGENT_MESSAGING_RECONNECT_INITIAL_BACKOFF`,
+  `AGENT_MESSAGING_RECONNECT_MAX_BACKOFF`)
+
 ##### AC-MSG-060: CloudEvent format compliance
 
 - **Validates:** REQ-MSG-120, REQ-MSG-130, REQ-MSG-140
 - **Given** the agent publishes a response CloudEvent
 - **When** the event is constructed
 - **Then** it MUST conform to CloudEvents v1.0
-- **And** the data payload MUST include `agentName` and `topicName`
+- **And** the data payload MUST include `agent_name` and `topic_name`
 - **And** the CE MUST be published to subject `dcm.agents.responses`
+
+##### AC-MSG-065: Nats-Msg-Id header set on the wire for dedup
+
+- **Validates:** REQ-MSG-135, REQ-XC-CE-050
+- **Given** the agent publishes an agent-originated CloudEvent (response or health) via `PublishWithMsgID`
+- **When** a raw NATS/JetStream consumer inspects the message as it appears on the wire
+- **Then** the message MUST carry a `Nats-Msg-Id` header equal to the CloudEvent's own `id`
+- **And** a second publish reusing the same `Nats-Msg-Id` within the stream's duplicate window MUST be
+  dropped by JetStream's server-side dedup (observable as no increase in the stream's message count)
+
+##### AC-MSG-012: Request-stream consumer creation retries when CP stream absent
+
+- **Validates:** REQ-MSG-051
+- **Given** the agent starts before the control plane has created `dcm-agent-requests`
+- **When** the agent attempts to create its main durable consumer
+- **Then** it MUST retry every 2s with WARN logs for up to 30s (phase 1)
+- **And**, if the stream still doesn't exist after 30s, it MUST keep retrying the full setup every 30s in the background indefinitely (phase 2), rather than giving up
+- **And** once the stream appears (in either phase) it MUST successfully create the consumer and begin consuming, with no further manual intervention required
 
 ##### AC-MSG-015: Durable consumer creation on first start
 
 - **Validates:** REQ-MSG-045, REQ-MSG-047
 - **Given** the agent starts for the first time (no existing consumers)
 - **When** the messaging system connection is established
-- **Then** the agent MUST create durable JetStream consumers with deterministic names derived from the topic name
+- **Then** the agent MUST create durable JetStream consumers named `agent-prod-1-consumer`, `agent-prod-1-cancel-consumer`, and `agent-prod-1-retry-consumer` (for base `agent-prod-1`)
 
 ##### AC-MSG-016: Consumer reuse on restart
 
@@ -1239,19 +1376,19 @@ create or bind to resources as needed (see REQ-MSG-045/046).
 - **When** the agent restarts
 - **Then** the unacknowledged message MUST be redelivered
 
-##### AC-MSG-025: Only main topic advertised to DCM
+##### AC-MSG-025: Only prefixed main subject advertised to DCM
 
 - **Validates:** REQ-MSG-050
-- **Given** the agent registers to DCM
+- **Given** the agent registers to DCM with base name `agent-prod-1`
 - **When** the registration payload is sent
-- **Then** `topicName` MUST be the main topic name only (not retry or cancel)
+- **Then** `topic_name` MUST be `dcm.agent.agent-prod-1` (not the unprefixed base, retry subject, or cancel subject)
 
 ##### AC-MSG-035: Continuous cancel consumption
 
 - **Validates:** REQ-MSG-070, REQ-RCM-120
 - **Given** the agent is running and the cancel topic receives a new cancel CE
 - **When** the CE is consumed
-- **Then** the deny list MUST be updated with the cancelled resourceId
+- **Then** the deny list MUST be updated with the cancelled resource ID
 
 ##### AC-MSG-055: Ack only after routing finalized
 
@@ -1290,17 +1427,17 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 |----|-------------|----------|-------|
 | REQ-RTE-030 | When the SP for the requested service type is Ready and embedded, the agent MUST forward the request via an in-process call | MUST | |
 | REQ-RTE-040 | When the SP for the requested service type is Ready and external, the agent MUST forward creation requests via `POST {endpoint}` where `{endpoint}` is the URL provided during SP registration | MUST | |
-| REQ-RTE-050 | When the SP for the requested service type is Ready and external, the agent MUST forward deletion requests via `DELETE {endpoint}/{resourceId}` | MUST | |
-| REQ-RTE-060 | On successful SP response (creation accepted), the agent MUST publish a `dcm.agent.creation-acknowledged` CloudEvent to `dcm.agents.responses` with `{resourceId, agentName, topicName, status: "PROVISIONING"}` | MUST | |
-| REQ-RTE-070 | On successful SP response (deletion accepted), the agent MUST publish a `dcm.agent.deletion-acknowledged` CloudEvent to `dcm.agents.responses` with `{resourceId, agentName, topicName, status: "DELETING"}` | MUST | |
-| REQ-RTE-080 | On SP error response, the agent MUST publish a `dcm.agent.error` CloudEvent to `dcm.agents.responses` with `{resourceId, agentName, topicName, error, details}` | MUST | |
+| REQ-RTE-050 | When the SP for the requested service type is Ready and external, the agent MUST forward deletion requests via `DELETE {endpoint}/{resource_id}` | MUST | |
+| REQ-RTE-060 | On successful SP response (creation accepted), the agent MUST publish a `dcm.agent.creation-acknowledged` CloudEvent to `dcm.agents.responses` with `{resource_id, agent_name, topic_name, status: "PROVISIONING"}` | MUST | |
+| REQ-RTE-070 | On successful SP response (deletion accepted), the agent MUST publish a `dcm.agent.deletion-acknowledged` CloudEvent to `dcm.agents.responses` with `{resource_id, agent_name, topic_name, status: "DELETING"}` | MUST | |
+| REQ-RTE-080 | On SP error response, the agent MUST publish a `dcm.agent.error` CloudEvent to `dcm.agents.responses` with `{resource_id, agent_name, topic_name, error, details}` | MUST | |
 
 #### Requirements — Request Routing (SP Unhealthy)
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| REQ-RTE-090 | When the SP for the requested service type is Unhealthy, the agent MUST publish the original request CloudEvent to the retry topic (`{topicName}.retry`) | MUST | |
-| REQ-RTE-100 | When a request is held in the retry topic, the agent MUST publish a `dcm.agent.request-queued` CloudEvent to `dcm.agents.responses` with `{resourceId, agentName, topicName, serviceType, status: "QUEUED"}` | MUST | |
+| REQ-RTE-090 | When the SP for the requested service type is Unhealthy, the agent MUST publish the original request CloudEvent to the retry subject (`{base}.retry`) | MUST | |
+| REQ-RTE-100 | When a request is held in the retry topic, the agent MUST publish a `dcm.agent.request-queued` CloudEvent to `dcm.agents.responses` with `{resource_id, agent_name, topic_name, service_type, status: "QUEUED"}` | MUST | |
 
 #### Requirements — Request Routing (SP Unavailable)
 
@@ -1322,11 +1459,11 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| REQ-RTE-140 | The agent MUST maintain an in-memory deny list of `resourceId` values from consumed cancel CloudEvents | MUST | |
-| REQ-RTE-150 | When processing creation requests from the main topic, the agent MUST check each `resourceId` against the deny list | MUST | |
-| REQ-RTE-160 | If a `resourceId` matches the deny list, the agent MUST drop the creation request without forwarding it to the SP | MUST | |
-| REQ-RTE-170 | If a cancel CloudEvent arrives for a `resourceId` that is already queued in the retry topic, the agent MUST immediately consume the retry topic, remove the matching message, re-publish any non-matching messages, and publish a `dcm.agent.cancel-acknowledged` CloudEvent to `dcm.agents.responses`. The cancelled resourceId MUST also be added to the deny list | MUST | |
-| REQ-RTE-180 | If a cancel CloudEvent arrives for a `resourceId` that has already been dispatched to the SP (request in-flight or SP response received), the agent MUST reject the cancellation by publishing a `dcm.agent.cancel-rejected` CloudEvent to `dcm.agents.responses` with `{resourceId, agentName, topicName, reason}`. The rejected cancel MUST NOT be added to the deny list | MUST | |
+| REQ-RTE-140 | The agent MUST maintain an in-memory deny list of `resource_id` values from consumed cancel CloudEvents | MUST | |
+| REQ-RTE-150 | When processing creation requests from the main topic, the agent MUST check each `resource_id` against the deny list | MUST | |
+| REQ-RTE-160 | If a `resource_id` matches the deny list, the agent MUST drop the creation request without forwarding it to the SP | MUST | |
+| REQ-RTE-170 | If a cancel CloudEvent arrives for a `resource_id` that is already queued in the retry topic, the agent MUST immediately consume the retry topic, remove the matching message, re-publish any non-matching messages, and publish a `dcm.agent.cancel-acknowledged` CloudEvent to `dcm.agents.responses`. The cancelled resource ID MUST also be added to the deny list | MUST | |
+| REQ-RTE-180 | If a cancel CloudEvent arrives for a `resource_id` that has already been dispatched to the SP (request in-flight or SP response received), the agent MUST reject the cancellation by publishing a `dcm.agent.cancel-rejected` CloudEvent to `dcm.agents.responses` with `{resource_id, agent_name, topic_name, reason}`. The rejected cancel MUST NOT be added to the deny list | MUST | |
 | REQ-RTE-190 | Deny list entries MUST be removed once consumed (used to filter a creation request from the main topic). If the deny list exceeds a configurable maximum size, the oldest entries MUST be evicted (LRU). On restart, the deny list is rebuilt from the cancel topic | MUST | |
 
 #### Configuration Introduced
@@ -1344,7 +1481,7 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 
 - **Validates:** REQ-RTE-010, REQ-RTE-030, REQ-RTE-060
 - **Given** an embedded SP is registered and Ready for service type "container"
-- **When** the agent consumes a `dcm.request.create` CloudEvent with `serviceType="container"`
+- **When** the agent consumes a `dcm.request.create` CloudEvent with `service_type="container"`
 - **Then** the agent MUST forward the request via in-process call
 - **And** on success, publish a `dcm.agent.creation-acknowledged` CloudEvent
 
@@ -1352,7 +1489,7 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 
 - **Validates:** REQ-RTE-010, REQ-RTE-040, REQ-RTE-060
 - **Given** an external SP at "https://sp.example.com:8080" is registered and Ready for service type "database"
-- **When** the agent consumes a `dcm.request.create` CloudEvent with `serviceType="database"`
+- **When** the agent consumes a `dcm.request.create` CloudEvent with `service_type="database"`
 - **Then** the agent MUST send `POST https://sp.example.com:8080` with the spec
 - **And** on success, publish a `dcm.agent.creation-acknowledged` CloudEvent
 
@@ -1360,7 +1497,7 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 
 - **Validates:** REQ-RTE-050, REQ-RTE-070
 - **Given** an external SP is registered and Ready for service type "database"
-- **When** the agent consumes a `dcm.request.delete` CloudEvent with `resourceId="res-123"` and `serviceType="database"`
+- **When** the agent consumes a `dcm.request.delete` CloudEvent with `resource_id="res-123"` and `service_type="database"`
 - **Then** the agent MUST send `DELETE https://sp.example.com:8080/res-123`
 - **And** on success, publish a `dcm.agent.deletion-acknowledged` CloudEvent
 
@@ -1368,14 +1505,14 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 
 - **Validates:** REQ-RTE-020
 - **Given** no SP is registered for service type "storage"
-- **When** the agent consumes a creation request with `serviceType="storage"`
-- **Then** the agent MUST publish a `dcm.agent.error` CloudEvent with `{resourceId, agentName, topicName, error: "UNSUPPORTED_SERVICE_TYPE", details}` to `dcm.agents.responses`
+- **When** the agent consumes a creation request with `service_type="storage"`
+- **Then** the agent MUST publish a `dcm.agent.error` CloudEvent with `{resource_id, agent_name, topic_name, error: "UNSUPPORTED_SERVICE_TYPE", details}` to `dcm.agents.responses`
 
 ##### AC-RTE-045: SP is Unavailable — request rejected immediately
 
 - **Validates:** REQ-RTE-105
 - **Given** the SP for "database" is Unavailable (registered but not reachable)
-- **When** the agent consumes a creation request with `serviceType="database"`
+- **When** the agent consumes a creation request with `service_type="database"`
 - **Then** the agent MUST publish a `dcm.agent.error` CloudEvent indicating the SP is unavailable
 - **And** the request MUST NOT be queued in the retry topic
 
@@ -1383,7 +1520,7 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 
 - **Validates:** REQ-RTE-090, REQ-RTE-100
 - **Given** the SP for "database" is Unhealthy
-- **When** the agent consumes a creation request with `serviceType="database"`
+- **When** the agent consumes a creation request with `service_type="database"`
 - **Then** the original CloudEvent MUST be published to the retry topic
 - **And** a `dcm.agent.request-queued` CloudEvent MUST be published to `dcm.agents.responses`
 
@@ -1405,44 +1542,44 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 ##### AC-RTE-070: Deny list filters cancelled request
 
 - **Validates:** REQ-RTE-140, REQ-RTE-150, REQ-RTE-160
-- **Given** the deny list contains `resourceId="res-456"`
-- **When** the agent processes a creation request for `resourceId="res-456"` from the main topic
+- **Given** the deny list contains `resource_id="res-456"`
+- **When** the agent processes a creation request for `resource_id="res-456"` from the main topic
 - **Then** the request MUST be dropped without forwarding to the SP
 
 ##### AC-RTE-080: Cancel for request in retry topic
 
 - **Validates:** REQ-RTE-170
-- **Given** a creation request for `resourceId="res-789"` is held in the retry topic
-- **And** a cancel CloudEvent arrives for `resourceId="res-789"`
+- **Given** a creation request for `resource_id="res-789"` is held in the retry topic
+- **And** a cancel CloudEvent arrives for `resource_id="res-789"`
 - **When** the cancel is consumed from the cancel topic
 - **Then** the agent MUST immediately consume the retry topic
-- **And** the message for `resourceId="res-789"` MUST be removed and acknowledged without forwarding to the SP
+- **And** the message for `resource_id="res-789"` MUST be removed and acknowledged without forwarding to the SP
 - **And** any non-matching messages MUST be re-published to the retry topic
 - **And** a `dcm.agent.cancel-acknowledged` CloudEvent MUST be published to `dcm.agents.responses`
-- **And** `resourceId="res-789"` MUST be added to the deny list
+- **And** `resource_id="res-789"` MUST be added to the deny list
 
 ##### AC-RTE-090: Cancel rejected for in-flight provisioning
 
 - **Validates:** REQ-RTE-180
-- **Given** the agent already forwarded a creation request for `resourceId="res-101"` and received a success response from the SP
-- **When** a cancel CloudEvent arrives for `resourceId="res-101"`
+- **Given** the agent already forwarded a creation request for `resource_id="res-101"` and received a success response from the SP
+- **When** a cancel CloudEvent arrives for `resource_id="res-101"`
 - **Then** the agent MUST publish a `dcm.agent.cancel-rejected` CloudEvent
 
 ##### AC-RTE-075: Deny list LRU eviction
 
 - **Validates:** REQ-RTE-190
 - **Given** the deny list is at its configured maximum size (`AGENT_DENY_LIST_MAX_SIZE=1000`)
-- **And** a new cancel CloudEvent arrives for a previously unseen `resourceId`
+- **And** a new cancel CloudEvent arrives for a previously unseen `resource_id`
 - **When** the deny list entry is added
 - **Then** the oldest entry MUST be evicted to make room
 
 ##### AC-RTE-076: Deny list consume-on-use
 
 - **Validates:** REQ-RTE-190
-- **Given** the deny list contains `resourceId="res-456"`
-- **When** a creation request for `resourceId="res-456"` is consumed from the main topic and filtered
+- **Given** the deny list contains `resource_id="res-456"`
+- **When** a creation request for `resource_id="res-456"` is consumed from the main topic and filtered
 - **Then** the deny list entry for `"res-456"` MUST be removed
-- **And** a subsequent creation request for `resourceId="res-456"` MUST NOT be filtered
+- **And** a subsequent creation request for `resource_id="res-456"` MUST NOT be filtered
 - **And** the new entry MUST be present in the deny list
 
 ##### AC-RTE-055: Configurable retry policy
@@ -1464,12 +1601,23 @@ Topic 7 (Messaging System Integration).
 
 #### Overview
 
-The retry topic holds requests when SPs are unhealthy. Consumption is
-event-driven (triggered by SP health state transitions to Ready or Unavailable,
-or by agent restart — not periodic). The cancel topic provides a mechanism for
-DCM to signal that a request has been re-routed.
+The retry subject (`{base}.retry`) holds requests when SPs are unhealthy.
+Consumption is event-driven (triggered by SP health state transitions to Ready or
+Unavailable, or by agent restart — not periodic). The cancel subject
+(`dcm.agent.{base}.cancel`) provides a mechanism for DCM to signal that a request
+has been re-routed.
+
+The `retry.Processor` handles retry-subject reprocessing (`ProcessOnTransition`
+and `ProcessOnRestart`), including its own `MaxDeliver`-exceeded termination
+guard mirroring the main-subject one (REQ-RCM-165). Main-subject consumption,
+cancel-subject consumption, main-path `MaxDeliver`-exceeded termination, and
+main-path handler timeouts are owned by `messaging.Client` (see REQ-MSG-115,
+REQ-RCM-160, REQ-RCM-180).
 
 Out of scope: Message TTL/expiry (handled by messaging system configuration).
+`MaxDeliver` (REQ-RCM-150) is a distinct mechanism from the out-of-scope
+TTL/expiry item above: it bounds the number of delivery *attempts* for a
+message, not elapsed time.
 
 #### Requirements — Retry Topic
 
@@ -1498,7 +1646,39 @@ Out of scope: Message TTL/expiry (handled by messaging system configuration).
 |----|-------------|----------|-------|
 | REQ-RCM-120 | See REQ-MSG-070. The cancel topic MUST have an active JetStream consumer subscription | MUST | |
 | REQ-RCM-130 | See REQ-MSG-090. The cancel topic MUST be drained on startup (until no pending messages or drain timeout elapses) before main/retry processing | MUST | |
-| REQ-RCM-140 | Cancel CloudEvents MUST contain `resourceId` and `serviceType` in their data payload | MUST | |
+| REQ-RCM-140 | Cancel CloudEvents MUST contain `resource_id` and `service_type` in their data payload | MUST | |
+
+#### Requirements — Delivery Safety Net (Poison Messages)
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-RCM-150 | JetStream consumers for the main and retry subjects MUST configure a `MaxDeliver` limit, bounding the number of delivery attempts for a message before it is treated as a poison message. The cancel consumer MUST NOT set `MaxDeliver` (cancels must not be dropped by delivery-count exhaustion) | MUST | `MaxDeliver` counts delivery attempts, not elapsed time — distinct from the out-of-scope TTL/expiry mechanism |
+| REQ-RCM-160 | When a main-subject message's delivery attempts reach the configured `MaxDeliver` without the routing outcome being finalized (per REQ-MSG-115), the messaging client MUST publish a `dcm.agent.error` CloudEvent to `dcm.agents.responses` with `error: "MAX_DELIVERY_EXCEEDED"`, then terminate the message so it is not redelivered again | MUST | Enforced in `messaging.Client.handleMainMessage` before router invocation |
+| REQ-RCM-165 | When a retry-subject message's delivery attempts reach the configured `MaxDeliver` without the routing outcome being finalized, `retry.Processor` MUST publish a `dcm.agent.error` CloudEvent to `dcm.agents.responses` with `error: "MAX_DELIVERY_EXCEEDED"`, then terminate the message so it is not redelivered again — mirroring REQ-RCM-160 for the retry topic, since a retry-subject message can be redelivered just as indefinitely as a main-subject one if its target SP never recovers | MUST | Enforced in `retry.Processor.terminalOnMaxDeliver`, called from `parseMessages` before item processing; see DD-410 |
+| REQ-RCM-170 | The `MaxDeliver` limit MUST be configurable | MUST | |
+
+#### Requirements — Handler Processing Deadline
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-RCM-180 | The agent MUST bound the processing time of each consumed message with a configurable per-message handler deadline, covering forwarding to the SP and awaiting its response. For main-subject messages, enforcement MUST occur in the messaging client before invoking the router; for retry-subject messages, enforcement MUST occur in the retry processor | MUST | Prevents a hung SP call from blocking the consumer indefinitely |
+| REQ-RCM-190 | If the handler deadline elapses before the routing outcome is finalized, the agent MUST cancel the in-flight SP call, treat the outcome as a retryable error (per REQ-RTE-110), and MUST NOT acknowledge the message | MUST | Main path: messaging client NAK; retry path: retry processor NAK/re-publish |
+| REQ-RCM-200 | The handler deadline MUST be configurable | MUST | |
+
+#### Requirements — SP-Side Idempotency (Event ID Forwarding)
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-RCM-210 | When forwarding a creation or deletion request to an external SP (per REQ-RTE-040, REQ-RTE-050), the agent MUST set an `Idempotency-Key` HTTP header on the request equal to the inbound CloudEvent's `id` attribute | MUST | Enables SP-side event-level dedup; per DD-190, SPs remain responsible for enforcing idempotency — the agent's obligation is limited to forwarding the key |
+| REQ-RCM-220 | The `Idempotency-Key` value forwarded for a given inbound CloudEvent MUST be identical across every delivery attempt of that event — in-line retries (REQ-RTE-110), retry-topic reprocessing (REQ-RCM-030), and JetStream redelivery (REQ-MSG-116) | MUST | Without a stable key, an SP cannot distinguish "same event, retried" from "new event", defeating the purpose of event-level dedup |
+| REQ-RCM-230 | For embedded SPs, the agent MUST make the inbound CloudEvent's `id` available to the in-process call (e.g., via request context or a typed request field) | MUST | Keeps idempotency semantics consistent between embedded and external SPs; embedded SPs are not exempt from REQ-RCM-220 |
+
+#### Configuration — Topic 9
+
+| Config Key | Env Var | Default | Min | Max | Unit | Description |
+|------------|---------|---------|-----|-----|------|-------------|
+| messaging.maxDeliver | AGENT_MESSAGING_MAX_DELIVER | 10 | 1 | 100 | integer | Maximum JetStream delivery attempts for a message before terminal error CE and termination (REQ-RCM-150) |
+| routing.handlerTimeout | AGENT_ROUTING_HANDLER_TIMEOUT | 60s | 1s | 10m | duration | Maximum time allowed to process a single consumed message, including the SP call (REQ-RCM-180) |
 
 #### Acceptance Criteria
 
@@ -1539,7 +1719,7 @@ Out of scope: Message TTL/expiry (handled by messaging system configuration).
 ##### AC-RCM-050: Creation-deletion dedup
 
 - **Validates:** REQ-RCM-090, REQ-RCM-100, REQ-RCM-110
-- **Given** the retry topic contains a creation request for `resourceId="res-123"` and a deletion request for `resourceId="res-123"`
+- **Given** the retry topic contains a creation request for `resource_id="res-123"` and a deletion request for `resource_id="res-123"`
 - **When** the retry topic is processed
 - **Then** both messages MUST be removed
 - **And** the deletion acknowledgment MUST be published as a `dcm.agent.deletion-acknowledged` CloudEvent with `status: "DELETED"`
@@ -1548,10 +1728,10 @@ Out of scope: Message TTL/expiry (handled by messaging system configuration).
 ##### AC-RCM-060: Cancel topic drained at startup
 
 - **Validates:** REQ-RCM-130, REQ-RTE-190, REQ-RCM-140
-- **Given** the cancel topic has messages for `resourceId="res-456"` and `resourceId="res-789"`
+- **Given** the cancel topic has messages for `resource_id="res-456"` and `resource_id="res-789"`
 - **When** the agent starts
 - **Then** the deny list MUST contain both resource IDs before main topic processing begins
-- **And** each cancel CE MUST contain `resourceId` and `serviceType`
+- **And** each cancel CE MUST contain `resource_id` and `service_type`
 
 ##### AC-RCM-045: Restart re-reads topics without extra CEs
 
@@ -1559,6 +1739,83 @@ Out of scope: Message TTL/expiry (handled by messaging system configuration).
 - **Given** the retry topic contains messages from a prior session
 - **When** the agent restarts and re-reads the retry topic
 - **Then** messages for still-Unhealthy SPs MUST be re-published without triggering additional `request-queued` CloudEvents
+
+##### AC-RCM-047: Restart-drain is not skipped when messaging isn't immediately ready
+
+- **Validates:** REQ-RCM-080, REQ-MSG-100
+- **Given** the messaging system is unreachable at the instant the agent calls
+  `messaging.Client.Start` (per AC-MSG-050 — `Start` is non-blocking and returns
+  before NATS/JetStream is confirmed ready)
+- **When** NATS/JetStream subsequently becomes reachable, whether moments later or
+  after a longer outage
+- **Then** the agent MUST still perform the restart-drain of the main/retry/cancel
+  durable consumers (per REQ-RCM-080) before beginning live main/cancel consumption
+- **And** this MUST NOT depend on the restart-drain call happening to run only once,
+  synchronously, immediately after `Start` returns — restart-drain has no retry of
+  its own, so triggering it too early (before JetStream is ready) must not silently
+  skip it permanently
+
+##### AC-RCM-070: MaxDeliver exceeded — terminal error CE and termination
+
+- **Validates:** REQ-RCM-150, REQ-RCM-160
+- **Given** `AGENT_MESSAGING_MAX_DELIVER=5` and a creation request for `resource_id="res-999"` that repeatedly fails to reach a finalized routing outcome (e.g. the handler crashes before acking)
+- **When** the message has been delivered 5 times without acknowledgment
+- **Then** the agent MUST publish a `dcm.agent.error` CloudEvent for `resource_id="res-999"` with `error: "MAX_DELIVERY_EXCEEDED"`
+- **And** the message MUST be acknowledged/terminated so a 6th delivery does not occur
+
+##### AC-RCM-071: MaxDeliver exceeded on the retry topic — terminal error CE and termination
+
+- **Validates:** REQ-RCM-150, REQ-RCM-165
+- **Given** `AGENT_MESSAGING_MAX_DELIVER=N` and a retry-subject message for some `resource_id` whose target SP never becomes healthy again, so the message is never Ack'd
+- **When** the message has been delivered `N` times on the retry topic without acknowledgment
+- **Then** `retry.Processor` MUST publish a `dcm.agent.error` CloudEvent for that `resource_id` with `error: "MAX_DELIVERY_EXCEEDED"`, mirroring AC-RCM-070 for the retry topic
+- **And** the message MUST be terminated so a further delivery does not occur
+
+##### AC-RCM-080: MaxDeliver is configurable
+
+- **Validates:** REQ-RCM-170
+- **Given** `AGENT_MESSAGING_MAX_DELIVER=10`
+- **When** the agent creates the main and retry topic durable consumers at startup
+- **Then** both consumers MUST be configured with a maximum of 10 delivery attempts
+
+##### AC-RCM-090: Handler deadline aborts a hung SP call
+
+- **Validates:** REQ-RCM-180, REQ-RCM-190
+- **Given** `AGENT_ROUTING_HANDLER_TIMEOUT=30s`
+- **And** an external SP accepts the connection but never responds to a forwarded creation request
+- **When** 30s elapses without a response
+- **Then** the agent MUST cancel the in-flight call
+- **And** MUST treat the outcome as a retryable error per REQ-RTE-110
+- **And** MUST NOT acknowledge the message
+
+##### AC-RCM-100: Handler deadline is configurable
+
+- **Validates:** REQ-RCM-200
+- **Given** `AGENT_ROUTING_HANDLER_TIMEOUT=45s`
+- **When** the agent begins processing a message consumed from the main topic
+- **Then** the context passed to the SP call MUST carry a deadline no later than 45s from consumption
+
+##### AC-RCM-110: Idempotency-Key forwarded to external SP
+
+- **Validates:** REQ-RCM-210
+- **Given** an inbound `dcm.request.create` CloudEvent with `id="evt-abc-123"` and `resource_id="res-1"`
+- **When** the agent forwards the request via `POST {endpoint}`
+- **Then** the HTTP request MUST include the header `Idempotency-Key: evt-abc-123`
+
+##### AC-RCM-120: Idempotency-Key stable across redelivery and retries
+
+- **Validates:** REQ-RCM-220
+- **Given** an inbound CloudEvent with `id="evt-abc-123"` initially triggers a retryable SP error
+- **When** the agent retries the forward in-line per REQ-RTE-110, and separately when the same message is later redelivered by JetStream or reprocessed from the retry topic
+- **Then** every attempt MUST forward the same `Idempotency-Key: evt-abc-123` header
+
+##### AC-RCM-130: Idempotency-Key available to embedded SPs
+
+- **Validates:** REQ-RCM-230
+- **Given** an embedded SP is registered and Ready for service type "container"
+- **And** an inbound CloudEvent with `id="evt-xyz-789"` requests creation of a "container" resource
+- **When** the agent forwards the request via in-process call
+- **Then** the embedded SP call MUST receive `"evt-xyz-789"` as the CE id
 
 #### Dependencies
 
@@ -1627,24 +1884,25 @@ Integration), and Topic 8 (Resource Operation Routing).
 |----|-------------|----------|-------|
 | REQ-XC-CE-010 | All messages exchanged through the messaging system MUST use CloudEvents v1.0 specification | MUST | |
 | REQ-XC-CE-020 | All agent-originated CloudEvents MUST include: `id` (unique), `source`, `type`, `specversion`, and `time` (RFC 3339 timestamp) | MUST | |
-| REQ-XC-CE-030 | The `source` attribute for agent-originated CloudEvents MUST be `dcm/agents/{agentId}` | MUST | |
+| REQ-XC-CE-030 | The `source` attribute for agent-originated CloudEvents MUST be `dcm/agents/{agentName}` (see DD-200; not the DCM-assigned agent ID) | MUST | |
 | REQ-XC-CE-040 | The `specversion` MUST be `"1.0"` | MUST | |
+| REQ-XC-CE-050 | Agent-originated CloudEvents published to JetStream (responses and health) MUST set the JetStream `Nats-Msg-Id` header to the CloudEvent's own `id` attribute for server-side deduplication | MUST | See REQ-MSG-135 |
 
 **CloudEvent message definitions:**
 
 | Message | `type` | `source` | NATS destination | `data` |
 |---------|--------|----------|------------------|--------|
-| Creation Request (inbound) | `dcm.request.create` | `dcm/control-plane` | `{agentTopicName}` | `{resourceId, serviceType, spec}` |
-| Deletion Request (inbound) | `dcm.request.delete` | `dcm/control-plane` | `{agentTopicName}` | `{resourceId, serviceType}` |
-| Cancel Request (inbound) | `dcm.request.cancel` | `dcm/control-plane` | `{agentTopicName}.cancel` | `{resourceId, serviceType}` |
-| Creation Acknowledged | `dcm.agent.creation-acknowledged` | `dcm/agents/{agentId}` | `dcm.agents.responses` | `{resourceId, agentName, topicName, status: "PROVISIONING"}` |
-| Deletion Acknowledged | `dcm.agent.deletion-acknowledged` | `dcm/agents/{agentId}` | `dcm.agents.responses` | `{resourceId, agentName, topicName, status: "DELETING"}`. When dedup occurs (create+delete both in retry topic, per REQ-RCM-110), use `status: "DELETED"` (terminal). Normal SP-accepted deletes use `status: "DELETING"` |
-| Cancel Acknowledged | `dcm.agent.cancel-acknowledged` | `dcm/agents/{agentId}` | `dcm.agents.responses` | `{resourceId, agentName, topicName, serviceType}` |
-| Cancel Rejected | `dcm.agent.cancel-rejected` | `dcm/agents/{agentId}` | `dcm.agents.responses` | `{resourceId, agentName, topicName, reason}` |
-| Request Queued | `dcm.agent.request-queued` | `dcm/agents/{agentId}` | `dcm.agents.responses` | `{resourceId, agentName, topicName, serviceType, status: "QUEUED"}` |
-| Error | `dcm.agent.error` | `dcm/agents/{agentId}` | `dcm.agents.responses` | `{resourceId, agentName, topicName, error, details}` |
-| Health Degraded | `dcm.agent.health.service-type-degraded` | `dcm/agents/{agentId}` | `dcm.agents.health` | `{agentId, agentName, topicName, serviceType, reason, affectedProvider}` |
-| Health Unavailable | `dcm.agent.health.service-type-unavailable` | `dcm/agents/{agentId}` | `dcm.agents.health` | `{agentId, agentName, topicName, serviceType, reason, affectedProvider}` |
+| Creation Request (inbound) | `dcm.request.create` | `dcm/control-plane` | `dcm.agent.{base}` | `{resource_id, service_type, spec}` |
+| Deletion Request (inbound) | `dcm.request.delete` | `dcm/control-plane` | `dcm.agent.{base}` | `{resource_id, service_type}` |
+| Cancel Request (inbound) | `dcm.request.cancel` | `dcm/control-plane` | `dcm.agent.{base}.cancel` | `{resource_id, service_type}` |
+| Creation Acknowledged | `dcm.agent.creation-acknowledged` | `dcm/agents/{agentName}` | `dcm.agents.responses` | `{resource_id, agent_name, topic_name, status: "PROVISIONING"}` |
+| Deletion Acknowledged | `dcm.agent.deletion-acknowledged` | `dcm/agents/{agentName}` | `dcm.agents.responses` | `{resource_id, agent_name, topic_name, status: "DELETING"}`. When dedup occurs (create+delete both in retry topic, per REQ-RCM-110), use `status: "DELETED"` (terminal). Normal SP-accepted deletes use `status: "DELETING"` |
+| Cancel Acknowledged | `dcm.agent.cancel-acknowledged` | `dcm/agents/{agentName}` | `dcm.agents.responses` | `{resource_id, agent_name, topic_name, service_type}` |
+| Cancel Rejected | `dcm.agent.cancel-rejected` | `dcm/agents/{agentName}` | `dcm.agents.responses` | `{resource_id, agent_name, topic_name, reason}` |
+| Request Queued | `dcm.agent.request-queued` | `dcm/agents/{agentName}` | `dcm.agents.responses` | `{resource_id, agent_name, topic_name, service_type, status: "QUEUED"}` |
+| Error | `dcm.agent.error` | `dcm/agents/{agentName}` | `dcm.agents.responses` | `{resource_id, agent_name, topic_name, error, details}` |
+| Health Degraded | `dcm.agent.health.service-type-degraded` | `dcm/agents/{agentName}` | `dcm.agents.health` | `{agent_id, agent_name, topic_name, service_type, reason, affected_provider}` — `agent_id` uses `agent_name` until DCM registration completes (DD-200) |
+| Health Unavailable | `dcm.agent.health.service-type-unavailable` | `dcm/agents/{agentName}` | `dcm.agents.health` | `{agent_id, agent_name, topic_name, service_type, reason, affected_provider}` — same `agent_id` convention as Health Degraded |
 
 #### Acceptance Criteria
 
@@ -1658,9 +1916,9 @@ Integration), and Topic 8 (Resource Operation Routing).
 ##### AC-XC-CE-020: Source attribute format
 
 - **Validates:** REQ-XC-CE-030
-- **Given** the agent has `agentId="agent-123"`
+- **Given** the agent is configured with `AGENT_NAME="agent-prod-1"`
 - **When** a CloudEvent is published
-- **Then** the `source` attribute MUST be `"dcm/agents/agent-123"`
+- **Then** the `source` attribute MUST be `"dcm/agents/agent-prod-1"`
 
 ### 5.3 Logging
 
@@ -1723,7 +1981,9 @@ Integration), and Topic 8 (Resource Operation Routing).
 ##### AC-XC-CFG-011: Configuration file loading
 
 - **Validates:** REQ-XC-CFG-010
-- **Given** a configuration file provides a value (e.g., `server.address=:9090`)
+- **Given** `AGENT_CONFIG_FILE` points at a `.env`-style file (one `KEY=VALUE` pair per line, using
+  the same environment variable names as the corresponding config struct tags, e.g.
+  `AGENT_SERVER_ADDRESS=:9090`) providing a value
 - **And** the corresponding environment variable is not set
 - **When** the agent starts
 - **Then** the agent MUST use the value from the configuration file
@@ -1731,10 +1991,22 @@ Integration), and Topic 8 (Resource Operation Routing).
 ##### AC-XC-CFG-012: Environment variable takes precedence over file
 
 - **Validates:** REQ-XC-CFG-010
-- **Given** a configuration file provides `server.address=:9090`
+- **Given** the config file (referenced by `AGENT_CONFIG_FILE`) provides `AGENT_SERVER_ADDRESS=:9090`
 - **And** the environment variable `AGENT_SERVER_ADDRESS=:7070` is also set
 - **When** the agent starts
 - **Then** the agent MUST use `:7070` (environment variable wins)
+
+##### AC-XC-CFG-013: Config file format details
+
+- **Validates:** REQ-XC-CFG-010
+- **Given** a config file referenced by `AGENT_CONFIG_FILE`
+- **Then** blank lines and lines starting with `#` MUST be ignored
+- **And** a line without an `=` separator MUST cause the agent to fail fast with an error
+  identifying `AGENT_CONFIG_FILE` and the offending line
+- **And** a nonexistent or unreadable file referenced by `AGENT_CONFIG_FILE` MUST cause the agent
+  to fail fast with an error identifying `AGENT_CONFIG_FILE`
+- **And** loading MUST NOT mutate the process's real environment variables (`os.Setenv`) as a side
+  effect — merging happens in an isolated map so `Load()` remains safe to call repeatedly
 
 ##### AC-XC-CFG-020: Fail-fast on missing required config
 
@@ -1767,6 +2039,7 @@ All configuration is loadable from environment variables. Configuration files ar
 
 | Config Key | Env Var | Default | Required | Min | Max | Unit | Topic |
 |------------|---------|---------|----------|-----|-----|------|-------|
+| config.file | AGENT_CONFIG_FILE | (unset — no file loaded) | No | - | - | - | XC |
 | server.address | AGENT_SERVER_ADDRESS | :8080 | No | - | - | - | 1 |
 | server.shutdownTimeout | AGENT_SERVER_SHUTDOWN_TIMEOUT | 15s | No | 1s | 5m | duration | 1 |
 | server.requestTimeout | AGENT_SERVER_REQUEST_TIMEOUT | 30s | No | 1s | 10m | duration | 1 |
@@ -1784,7 +2057,7 @@ All configuration is loadable from environment variables. Configuration files ar
 | dcm.maxBackoff | DCM_REGISTRATION_MAX_BACKOFF | 5m | No | dcm.initialBackoff | 1h | duration | 6 |
 | heartbeat.interval | AGENT_HEARTBEAT_INTERVAL | 30s | No | 5s | 10m | duration | 6 |
 | messaging.url | AGENT_MESSAGING_URL | - | Yes | - | - | - | 7 |
-| messaging.topicName | AGENT_TOPIC_NAME | (derived from AGENT_NAME) | No | - | - | - | 7 |
+| messaging.topicName | AGENT_TOPIC_NAME | (derived from AGENT_NAME) | No | - | - | Unprefixed base name; CP-facing main subject is `dcm.agent.{base}` | 7 |
 | routing.retryMaxAttempts | AGENT_ROUTING_RETRY_MAX | 3 | No | 0 | 20 | integer | 8 |
 | routing.retryBackoff | AGENT_ROUTING_RETRY_BACKOFF | 2s | No | 100ms | routing.retryMaxBackoff | duration | 8 |
 | routing.retryMaxBackoff | AGENT_ROUTING_RETRY_MAX_BACKOFF | 30s | No | routing.retryBackoff | 5m | duration | 8 |
@@ -1801,7 +2074,9 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
 ## 8. Assumptions
 
 - NATS with JetStream is deployed and accessible to both DCM and the agent
-  (consistent with other DCM components)
+  (consistent with other DCM components). The control plane pre-provisions
+  `dcm-agent-requests` and `dcm-agent-responses` streams; the agent creates
+  durable consumers and its own internal retry stream
 - The agent has outbound network connectivity to DCM's REST API (for
   registration and heartbeats)
 - External SPs have network connectivity to the agent's REST API (for
@@ -1813,7 +2088,7 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
 - SP idempotent creation behavior is the final safety net for duplicate requests
   (see DD-060)
 - ASM-RTE-010: Service Providers MUST implement idempotent create and delete
-  operations with respect to `resourceId`. Duplicate invocations (from JetStream
+  operations with respect to resource ID (`resource_id`). Duplicate invocations (from JetStream
   redelivery or retry) MUST NOT produce side effects beyond the first successful
   execution.
 - NATS JetStream provides durable persistence for streams using file-based
@@ -1829,13 +2104,13 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
 | REQ-HLT-NNN | 4.2: Health Service | 7 |
 | REQ-SPR-NNN | 4.3: SP Registration & Management | 26 |
 | REQ-STS-NNN | 4.4: Provider Query Endpoints | 7 |
-| REQ-HMN-NNN | 4.5: SP Health Monitoring | 29 |
+| REQ-HMN-NNN | 4.5: SP Health Monitoring | 31 |
 | REQ-DCM-NNN | 4.6: DCM Registration & Heartbeat | 18 |
-| REQ-MSG-NNN | 4.7: Messaging System Integration | 20 |
+| REQ-MSG-NNN | 4.7: Messaging System Integration | 24 |
 | REQ-RTE-NNN | 4.8: Resource Operation Routing | 22 |
-| REQ-RCM-NNN | 4.9: Retry & Cancel Mechanisms | 14 |
+| REQ-RCM-NNN | 4.9: Retry & Cancel Mechanisms | 23 |
 | REQ-XC-ERR-NNN | 5.1: Error Handling | 4 |
-| REQ-XC-CE-NNN | 5.2: CloudEvent Definitions | 4 |
+| REQ-XC-CE-NNN | 5.2: CloudEvent Definitions | 5 |
 | REQ-XC-LOG-NNN | 5.3: Logging | 2 |
 | REQ-XC-CFG-NNN | 5.4: Configuration Management | 6 |
-| **Total** | | **171** |
+| **Total** | | **187** |
