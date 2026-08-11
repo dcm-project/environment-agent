@@ -1134,6 +1134,37 @@ Unless overridden, tests use:
 
 ---
 
+### IT-MSG-071: Nested CE payload — resourceId extracted correctly
+
+- **Validates AC:** AC-MSG-030
+- **Test Infrastructure:** NATS JetStream; nested JSON payload with `spec` object
+- **Given** a CloudEvent with nested payload `{"resourceId":"res-nested","spec":{"replicas":3}}`
+- **When** the message is consumed on the main topic
+- **Then** `resourceId` MUST be extracted correctly (struct ignores nested fields)
+- **And** the response CE MUST include the extracted `resourceId`
+- **And** a nested cancel payload MUST correctly populate the deny list
+
+### IT-MSG-072: Delete request produces deletion-acknowledged response
+
+- **Validates AC:** AC-MSG-060
+- **Test Infrastructure:** NATS JetStream; responses subscriber
+- **Given** a `dcm.request.delete` CloudEvent is published to the main topic
+- **When** the handler returns nil (success)
+- **Then** the response CE type MUST be `dcm.agent.deletion-acknowledged`
+- **And** the response CE data MUST include `status: "DELETING"`
+
+### IT-MSG-073: publishResponseCE failure causes nak and redelivery
+
+- **Validates AC:** AC-MSG-055
+- **Test Infrastructure:** NATS JetStream; client with empty AgentName
+- **Given** a client created with empty `AgentName` (FormatSource will fail)
+- **When** a valid message is consumed and handler returns nil
+- **Then** `publishResponseCE` MUST fail (FormatSource error)
+- **And** the message MUST be nak'd
+- **And** JetStream MUST redeliver the message (delivery count >= 2)
+
+---
+
 ## Topic 8: Resource Operation Routing
 
 ### IT-RTE-010: Route creation to Ready embedded SP
@@ -1647,12 +1678,12 @@ Unless overridden, tests use:
 | AC-MSG-018 | IT-MSG-040 |
 | AC-MSG-020 | IT-MSG-050 |
 | AC-MSG-025 | IT-MSG-060 |
-| AC-MSG-030 | IT-MSG-070 |
+| AC-MSG-030 | IT-MSG-070, IT-MSG-071 |
 | AC-MSG-035 | IT-MSG-080 |
 | AC-MSG-040 | IT-MSG-090 |
 | AC-MSG-050 | IT-MSG-100 |
-| AC-MSG-055 | IT-MSG-110 |
-| AC-MSG-060 | IT-MSG-120 |
+| AC-MSG-055 | IT-MSG-110, IT-MSG-073 |
+| AC-MSG-060 | IT-MSG-120, IT-MSG-072 |
 | AC-RTE-010 | IT-RTE-010, IT-RTE-015 |
 | AC-RTE-020 | IT-RTE-020 |
 | AC-RTE-030 | IT-RTE-030 |
