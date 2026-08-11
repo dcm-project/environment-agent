@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/dcm-project/environment-agent/internal/cloudevent"
 	"github.com/dcm-project/environment-agent/internal/dcm"
 	"github.com/dcm-project/environment-agent/internal/health"
 )
@@ -27,11 +28,6 @@ const (
 	// SentinelConsumerLag is a clearly impossible value used by the stub.
 	SentinelConsumerLag = math.MinInt64
 
-	SubjectResponses  = "dcm.agents.responses"
-	TypeCreationAcked = "dcm.agent.creation-acknowledged"
-	TypeDeletionAcked = "dcm.agent.deletion-acknowledged"
-	TypeAcked         = "dcm.agent.acknowledged"
-
 	drainTimeout   = 5 * time.Second
 	drainBatchWait = 200 * time.Millisecond
 	drainBatchSize = 100
@@ -44,9 +40,11 @@ type MessageHandler func(ctx context.Context, msg []byte) error
 // TopicName, if set, must be a pre-validated topic name (via ValidateTopicName).
 // If empty, the agent name is used as the base for topic derivation.
 type ClientConfig struct {
-	URL       string
-	TopicName string
-	AgentName string
+	URL           string
+	TopicName     string
+	AgentName     string
+	AckWait       time.Duration
+	CancelAckWait time.Duration
 }
 
 // Client manages NATS/JetStream connectivity and topic consumption.
@@ -68,7 +66,6 @@ type Client struct {
 	mainHandler   MessageHandler
 	cancelHandler MessageHandler
 
-	denyList  sync.Map
 	setupOnce sync.Once
 	stopOnce  sync.Once
 }
@@ -85,6 +82,9 @@ func NewClient(cfg ClientConfig, logger *slog.Logger) *Client {
 // Start connects to NATS, creates streams/consumers, and begins consuming.
 // Non-blocking: returns nil immediately even if NATS is unreachable.
 func (c *Client) Start(_ context.Context) error {
+	if c.mainHandler == nil || c.cancelHandler == nil {
+		return fmt.Errorf("handlers must be set before Start")
+	}
 	setupCtx := context.Background()
 
 	conn, err := nats.Connect(c.cfg.URL,
@@ -158,7 +158,6 @@ func (c *Client) setupStreamsAndConsume(ctx context.Context, conn *nats.Conn) {
 
 	cc, err := cancelCons.Consume(func(msg jetstream.Msg) {
 		c.handleCancelMessage(msg)
-		_ = msg.Ack()
 	})
 	if err != nil {
 		c.logger.Error("failed to start cancel consumer", "error", err)
@@ -199,12 +198,18 @@ func (c *Client) initStreams(ctx context.Context, js jetstream.JetStream) (jetst
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create cancel stream: %w", err)
 	}
+	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name: "dcm-responses", Subjects: []string{cloudevent.SubjectResponses},
+	}); err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to create responses stream: %w", err)
+	}
 	return mainS, retryS, cancelS, nil
 }
 
 func (c *Client) initConsumers(ctx context.Context, mainS, retryS, cancelS jetstream.Stream) (jetstream.Consumer, jetstream.Consumer, error) {
 	mainCons, err := mainS.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 		Durable: c.topics.Main + "-consumer", AckPolicy: jetstream.AckExplicitPolicy,
+		AckWait: c.cfg.AckWait,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create main consumer: %w", err)
@@ -212,11 +217,13 @@ func (c *Client) initConsumers(ctx context.Context, mainS, retryS, cancelS jetst
 	// ponytail: retry consumer created for Topic 9; not consumed yet
 	if _, err := retryS.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 		Durable: c.topics.Main + "-retry-consumer", AckPolicy: jetstream.AckExplicitPolicy,
+		AckWait: c.cfg.AckWait,
 	}); err != nil {
 		return nil, nil, fmt.Errorf("failed to create retry consumer: %w", err)
 	}
 	cancelCons, err := cancelS.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 		Durable: c.topics.Main + "-cancel-consumer", AckPolicy: jetstream.AckExplicitPolicy,
+		AckWait: c.cfg.CancelAckWait,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create cancel consumer: %w", err)
@@ -241,7 +248,6 @@ func (c *Client) drainCancelTopic(_ context.Context, cancelCons jetstream.Consum
 		count := 0
 		for msg := range batch.Messages() {
 			c.handleCancelMessage(msg)
-			_ = msg.Ack()
 			count++
 		}
 		if count == 0 {
@@ -263,6 +269,17 @@ func (c *Client) Stop() {
 
 		for _, cc := range consumers {
 			cc.Stop()
+		}
+		// Wait for any in-flight handler invocation (and its Ack/Nak) to
+		// finish before closing the connection, otherwise a concurrent
+		// Ack/Nak publish can race with conn.Close() and be lost, leaving
+		// the message stuck until the full AckWait timeout instead of
+		// being promptly redelivered.
+		for _, cc := range consumers {
+			select {
+			case <-cc.Closed():
+			case <-time.After(drainTimeout):
+			}
 		}
 		if conn != nil {
 			conn.Close()

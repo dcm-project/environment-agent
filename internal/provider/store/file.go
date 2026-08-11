@@ -26,6 +26,10 @@ func NewFileStore(path string) (*FileStore, error) {
 }
 
 func (f *FileStore) Save(_ context.Context, p StoredProvider) error {
+	if err := validateStoredProvider(&p); err != nil {
+		return fmt.Errorf("invalid provider record: %w", err)
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

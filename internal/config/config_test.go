@@ -94,6 +94,99 @@ func setValidEnv() {
 	GinkgoT().Setenv("AGENT_MESSAGING_URL", "nats://localhost:4222")
 }
 
+var _ = Describe("Topic 8 Messaging AckWait Config", Label("unit"), func() {
+	Describe("Load", func() {
+		It("parses AckWait and CancelAckWait from env", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_MESSAGING_ACK_WAIT", "90s")
+			GinkgoT().Setenv("AGENT_MESSAGING_CANCEL_ACK_WAIT", "15s")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Messaging.AckWait).To(Equal(90 * time.Second))
+			Expect(cfg.Messaging.CancelAckWait).To(Equal(15 * time.Second))
+		})
+
+		It("defaults AckWait to 120s and CancelAckWait to 10s", func() {
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Messaging.AckWait).To(Equal(120 * time.Second))
+			Expect(cfg.Messaging.CancelAckWait).To(Equal(10 * time.Second))
+		})
+	})
+
+	Describe("Validate", func() {
+		It("rejects AckWait below 10s", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_MESSAGING_ACK_WAIT", "5s")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AGENT_MESSAGING_ACK_WAIT"))
+		})
+
+		It("rejects AckWait above 5m", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_MESSAGING_ACK_WAIT", "6m")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AGENT_MESSAGING_ACK_WAIT"))
+		})
+
+		It("accepts AckWait at lower boundary 10s", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_MESSAGING_ACK_WAIT", "10s")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Validate()).To(Succeed())
+		})
+
+		It("accepts AckWait at upper boundary 5m", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_MESSAGING_ACK_WAIT", "5m")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Validate()).To(Succeed())
+		})
+
+		It("rejects CancelAckWait below 1s", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_MESSAGING_CANCEL_ACK_WAIT", "500ms")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AGENT_MESSAGING_CANCEL_ACK_WAIT"))
+		})
+
+		It("rejects CancelAckWait above 1m", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_MESSAGING_CANCEL_ACK_WAIT", "2m")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AGENT_MESSAGING_CANCEL_ACK_WAIT"))
+		})
+
+		It("accepts CancelAckWait at boundaries", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_MESSAGING_CANCEL_ACK_WAIT", "1s")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Validate()).To(Succeed())
+
+			GinkgoT().Setenv("AGENT_MESSAGING_CANCEL_ACK_WAIT", "1m")
+			cfg, err = config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Validate()).To(Succeed())
+		})
+	})
+})
+
 var _ = Describe("Topic 6 Config", Label("unit"), func() {
 	Describe("Load", func() {
 		It("parses Topic 6 config fields from env (UT-XC-CFG-040)", func() {

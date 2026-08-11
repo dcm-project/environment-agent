@@ -17,6 +17,15 @@ type Config struct {
 	DCM       DCMConfig       `envPrefix:"DCM_"`
 	Heartbeat HeartbeatConfig `envPrefix:"AGENT_"`
 	Messaging MessagingConfig `envPrefix:"AGENT_"`
+	Routing   RoutingConfig   `envPrefix:"AGENT_"`
+}
+
+// RoutingConfig holds resource operation routing configuration.
+type RoutingConfig struct {
+	RetryMaxAttempts int           `env:"ROUTING_RETRY_MAX" envDefault:"3"`
+	RetryBackoff     time.Duration `env:"ROUTING_RETRY_BACKOFF" envDefault:"2s"`
+	RetryMaxBackoff  time.Duration `env:"ROUTING_RETRY_MAX_BACKOFF" envDefault:"30s"`
+	DenyListMaxSize  int           `env:"DENY_LIST_MAX_SIZE" envDefault:"100000"`
 }
 
 // HealthConfig holds SP health monitoring configuration.
@@ -55,8 +64,10 @@ type HeartbeatConfig struct {
 
 // MessagingConfig holds messaging bus configuration.
 type MessagingConfig struct {
-	URL       string `env:"MESSAGING_URL"`
-	TopicName string `env:"TOPIC_NAME"`
+	URL           string        `env:"MESSAGING_URL"`
+	TopicName     string        `env:"TOPIC_NAME"`
+	AckWait       time.Duration `env:"MESSAGING_ACK_WAIT" envDefault:"120s"`
+	CancelAckWait time.Duration `env:"MESSAGING_CANCEL_ACK_WAIT" envDefault:"10s"`
 }
 
 // ServerConfig holds HTTP server configuration.
@@ -125,6 +136,26 @@ func (c *Config) Validate() error {
 	// Topic 7: Messaging Integration — append-only below this line
 	if err := validateRequired("AGENT_MESSAGING_URL", c.Messaging.URL); err != nil {
 		return err
+	}
+	if err := validateDurationRange("AGENT_MESSAGING_ACK_WAIT", c.Messaging.AckWait, 10*time.Second, 5*time.Minute); err != nil {
+		return err
+	}
+	if err := validateDurationRange("AGENT_MESSAGING_CANCEL_ACK_WAIT", c.Messaging.CancelAckWait, time.Second, time.Minute); err != nil {
+		return err
+	}
+
+	// Topic 8: Resource Operation Routing — append-only below this line
+	if c.Routing.RetryMaxAttempts < 0 || c.Routing.RetryMaxAttempts > 20 {
+		return fmt.Errorf("AGENT_ROUTING_RETRY_MAX: value %d is outside valid range [0, 20]", c.Routing.RetryMaxAttempts)
+	}
+	if err := validateDurationRange("AGENT_ROUTING_RETRY_BACKOFF", c.Routing.RetryBackoff, 100*time.Millisecond, c.Routing.RetryMaxBackoff); err != nil {
+		return err
+	}
+	if err := validateDurationRange("AGENT_ROUTING_RETRY_MAX_BACKOFF", c.Routing.RetryMaxBackoff, c.Routing.RetryBackoff, 5*time.Minute); err != nil {
+		return err
+	}
+	if c.Routing.DenyListMaxSize < 1000 || c.Routing.DenyListMaxSize > 10000000 {
+		return fmt.Errorf("AGENT_DENY_LIST_MAX_SIZE: value %d is outside valid range [1000, 10000000]", c.Routing.DenyListMaxSize)
 	}
 	return nil
 }

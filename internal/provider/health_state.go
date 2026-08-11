@@ -41,6 +41,9 @@ func (t *InMemoryHealthTracker) GetState(providerID string) (HealthState, bool) 
 }
 
 func (t *InMemoryHealthTracker) SetState(providerID string, status v1alpha1.ProviderStatus, lastCheckTime time.Time) {
+	if providerID == "" {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.states[providerID] = HealthState{Status: status, LastCheckTime: lastCheckTime}
