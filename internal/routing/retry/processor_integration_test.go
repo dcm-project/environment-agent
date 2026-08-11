@@ -322,7 +322,7 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 		Expect(logged).NotTo(ContainSubstring("sensitive backend detail"))
 	})
 
-	It("Naks the retry-topic message in place on forward failure, instead of resetting its delivery count (REQ-RCM-270)", func() {
+	It("Naks the retry-topic message in place on forward failure, instead of acking and republishing", func() {
 		providerID := routingtest.RegisterSP(ctx, registry, healthTracker, st, "db-provider", "database", v1alpha1.Unhealthy)
 		fwdr.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "still failing"}
 
@@ -340,11 +340,9 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 		Eventually(func() int { return fwdr.CreateCallCount() }, 5*time.Second).Should(Equal(1))
 
 		// A failed forward must Nak the EXISTING retry-topic message, not ack
-		// it and publish a fresh replacement: the old ack+republish behavior
-		// reset JetStream's delivery count to 1 on every failed attempt,
-		// making the MaxDeliver guard (terminalOnMaxDeliver) unreachable for
-		// a persistently-failing SP. A fixed implementation leaves the
-		// stream's message count/LastSeq unchanged.
+		// it and publish a fresh replacement — the message already lives on
+		// this stream and doesn't need to move. Stream message count/LastSeq
+		// must be unchanged.
 		streamAfter, err := testJS.Stream(ctx, topicName+"-retry")
 		Expect(err).NotTo(HaveOccurred())
 		infoAfter, err := streamAfter.Info(ctx)
@@ -367,69 +365,7 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 		}, 5*time.Second).Should(BeNumerically(">", 0), "message must remain pending for redelivery, not be acked away")
 	})
 
-	It("publishes terminal error CE and Terms when a retry message exceeds MaxDeliver (IT-RCM-085)", func() {
-		// Give the retry consumer a real MaxDeliver + short AckWait so we can
-		// force genuine JetStream-level redelivery of the SAME message
-		// (rather than the processor's own republish-a-fresh-message path,
-		// which always resets delivery count).
-		const maxDeliver = 2
-		_, err := testJS.CreateOrUpdateConsumer(ctx, topicName+"-retry", jetstream.ConsumerConfig{
-			Durable: topics.RetryConsumer(), AckPolicy: jetstream.AckExplicitPolicy,
-			MaxDeliver: maxDeliver, AckWait: 200 * time.Millisecond,
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		mdProcessor := retry.NewProcessor(retry.ProcessorDeps{
-			Registry: registry, HealthTracker: healthTracker, Store: st,
-			Forwarder: fwdr, Publisher: pub, JSProvider: func() jetstream.JetStream { return testJS },
-			DenyList: denyList, Config: retry.ProcessorConfig{MaxDeliver: maxDeliver},
-			Logger: slog.New(slog.NewTextHandler(logBuf, nil)), AgentName: "agent-prod-1", Topics: topics,
-		})
-
-		providerID := routingtest.RegisterSP(ctx, registry, healthTracker, st, "db-provider", "database", v1alpha1.Ready)
-
-		_, err = testJS.Publish(ctx, topicName+".retry", routingtest.BuildCreateCE("res-exhausted", "database"))
-		Expect(err).NotTo(HaveOccurred())
-
-		// First delivery: fetch and let AckWait expire without acking, so
-		// JetStream redelivers the identical message (NumDelivered: 1 -> 2).
-		cons, err := testJS.Consumer(ctx, topicName+"-retry", topics.RetryConsumer())
-		Expect(err).NotTo(HaveOccurred())
-		batch, err := cons.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
-		Expect(err).NotTo(HaveOccurred())
-		firstMsgs := 0
-		for range batch.Messages() {
-			firstMsgs++
-		}
-		Expect(firstMsgs).To(Equal(1))
-		time.Sleep(400 * time.Millisecond) // AckWait (200ms) expires; message becomes redeliverable
-
-		// Second delivery (NumDelivered == MaxDeliver) is picked up by the
-		// processor's own fetch — must be terminated, not forwarded.
-		Expect(mdProcessor.ProcessOnTransition(ctx, providerID, v1alpha1.Ready, v1alpha1.Ready)).To(Succeed())
-
-		ce := routingtest.ExpectResponseCE(responseSub)
-		Expect(ce.Type()).To(Equal("dcm.agent.error"))
-		var errData routing.ErrorData
-		Expect(json.Unmarshal(ce.Data(), &errData)).To(Succeed())
-		Expect(errData.ResourceID).To(Equal("res-exhausted"))
-		Expect(errData.Error).To(Equal("MAX_DELIVERY_EXCEEDED"))
-
-		Expect(fwdr.CreateCallCount()).To(Equal(0), "message must not be forwarded once MaxDeliver is exhausted")
-
-		// Retry-topic MaxDeliver logging has main-topic parity (IT-RCM-086, AC-RCM-270).
-		logged := logBuf.String()
-		Expect(logged).To(ContainSubstring("max delivery exceeded, terminating retry message"))
-		Expect(logged).To(ContainSubstring("resource_id=res-exhausted"))
-		Expect(logged).To(ContainSubstring("stream_seq="))
-		Expect(logged).To(ContainSubstring("consumer_seq="))
-
-		Eventually(func() uint64 {
-			info, infoErr := cons.Info(ctx)
-			if infoErr != nil {
-				return 1
-			}
-			return info.NumPending + uint64(info.NumAckPending)
-		}, 5*time.Second).Should(Equal(uint64(0)), "message must be terminated, not left pending/redeliverable")
-	})
+	// IT-RCM-085/IT-RCM-086 (retry-topic MaxDeliver-exceeded termination and its
+	// logging parity) were retired: the retry-subject consumer no longer sets
+	// MaxDeliver at all (DD-410), so this guard no longer applies.
 })

@@ -1697,11 +1697,11 @@ Unavailable, or by agent restart — not periodic). The cancel subject
 has been re-routed.
 
 The `retry.Processor` handles retry-subject reprocessing (`ProcessOnTransition`
-and `ProcessOnRestart`), including its own `MaxDeliver`-exceeded termination
-guard mirroring the main-subject one (REQ-RCM-165). Main-subject consumption,
-cancel-subject consumption, main-path `MaxDeliver`-exceeded termination, and
-main-path handler timeouts are owned by `messaging.Client` (see REQ-MSG-115,
-REQ-RCM-160, REQ-RCM-180).
+and `ProcessOnRestart`). Unlike the main and cancel subjects, the retry-subject
+consumer does not set `MaxDeliver` (REQ-RCM-150) — see DD-410 for why. Main-subject
+consumption, cancel-subject consumption, main-path `MaxDeliver`-exceeded
+termination, and main-path handler timeouts are owned by `messaging.Client`
+(see REQ-MSG-115, REQ-RCM-160, REQ-RCM-180).
 
 Out of scope: Message TTL/expiry (handled by messaging system configuration).
 `MaxDeliver` (REQ-RCM-150) is a distinct mechanism from the out-of-scope
@@ -1741,10 +1741,9 @@ message, not elapsed time.
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| REQ-RCM-150 | JetStream consumers for the main and retry subjects MUST configure a `MaxDeliver` limit, bounding the number of delivery attempts for a message before it is treated as a poison message. The cancel consumer MUST NOT set `MaxDeliver` (cancels must not be dropped by delivery-count exhaustion) | MUST | `MaxDeliver` counts delivery attempts, not elapsed time — distinct from the out-of-scope TTL/expiry mechanism |
+| REQ-RCM-150 | The JetStream consumer for the main subject MUST configure a `MaxDeliver` limit, bounding the number of delivery attempts for a message before it is treated as a poison message. The cancel consumer and the retry-subject consumer MUST NOT set `MaxDeliver` — cancels must not be dropped by delivery-count exhaustion, and retry-subject residency is bounded by SP health-state transitions (REQ-HMN-150), not by delivery count; see DD-410 | MUST | `MaxDeliver` counts delivery attempts, not elapsed time — distinct from the out-of-scope TTL/expiry mechanism |
 | REQ-RCM-160 | When a main-subject message's delivery attempts reach the configured `MaxDeliver` without the routing outcome being finalized (per REQ-MSG-115), the messaging client MUST publish a `dcm.agent.error` CloudEvent to `dcm.agents.responses` with `error: "MAX_DELIVERY_EXCEEDED"`, then terminate the message so it is not redelivered again | MUST | Enforced in `messaging.Client.handleMainMessage` before router invocation |
-| REQ-RCM-165 | When a retry-subject message's delivery attempts reach the configured `MaxDeliver` without the routing outcome being finalized, `retry.Processor` MUST publish a `dcm.agent.error` CloudEvent to `dcm.agents.responses` with `error: "MAX_DELIVERY_EXCEEDED"`, then terminate the message so it is not redelivered again — mirroring REQ-RCM-160 for the retry topic, since a retry-subject message can be redelivered just as indefinitely as a main-subject one if its target SP never recovers | MUST | Enforced in `retry.Processor.terminalOnMaxDeliver`, called from `parseMessages` before item processing; see DD-410 |
-| REQ-RCM-170 | The `MaxDeliver` limit MUST be configurable | MUST | |
+| REQ-RCM-170 | The main-subject `MaxDeliver` limit MUST be configurable | MUST | |
 
 #### Requirements — Handler Processing Deadline
 
@@ -1764,13 +1763,12 @@ message, not elapsed time.
 | REQ-RCM-240 | Every CloudEvent publish attempt (success and failure) MUST be logged with `ce_type` and `resource_id` | MUST | Today only publish *failures* are logged, and without `resource_id` |
 | REQ-RCM-250 | Every SP dispatch (create or delete, embedded or external) MUST be logged at INFO on completion with `resource_id`, `service_type`, provider kind (embedded/external), `operation`, and `duration`; failed external dispatches MUST additionally include `http_status`. Request/response bodies MUST NOT be logged | MUST | The forwarder had zero logging; this is the largest blind spot for auditing SP interaction |
 | REQ-RCM-260 | Deny-list drops (create requests for a cancelled resource) and cancel-topic purge/republish actions MUST be logged at INFO with `resource_id` and, for purge, matched/republished counts | MUST | |
-| REQ-RCM-270 | Retry-topic MaxDeliver-exceeded handling MUST log the same structured WARN fields (`resource_id`, `ce_id`, `ce_type`, `subject`, `stream_seq`, `consumer_seq`) that main-topic MaxDeliver handling (REQ-RCM-160) already logs, before terminating the message | MUST | Parity fix — retry-topic terminal handling (REQ-RCM-165) is otherwise less observable than the main-topic path |
 
 #### Configuration — Topic 9
 
 | Config Key | Env Var | Default | Min | Max | Unit | Description |
 |------------|---------|---------|-----|-----|------|-------------|
-| messaging.maxDeliver | AGENT_MESSAGING_MAX_DELIVER | 10 | 1 | 100 | integer | Maximum JetStream delivery attempts for a message before terminal error CE and termination (REQ-RCM-150) |
+| messaging.maxDeliver | AGENT_MESSAGING_MAX_DELIVER | 10 | 1 | 100 | integer | Maximum JetStream delivery attempts for a **main-subject** message before terminal error CE and termination (REQ-RCM-150). Does not apply to the retry-subject or cancel consumers — see DD-410 |
 | routing.handlerTimeout | AGENT_ROUTING_HANDLER_TIMEOUT | 60s | 1s | 10m | duration | Maximum time allowed to process a single consumed message, including the SP call (REQ-RCM-180) |
 
 #### Acceptance Criteria
@@ -1856,20 +1854,13 @@ message, not elapsed time.
 - **Then** the agent MUST publish a `dcm.agent.error` CloudEvent for `resource_id="res-999"` with `error: "MAX_DELIVERY_EXCEEDED"`
 - **And** the message MUST be acknowledged/terminated so a 6th delivery does not occur
 
-##### AC-RCM-071: MaxDeliver exceeded on the retry topic — terminal error CE and termination
-
-- **Validates:** REQ-RCM-150, REQ-RCM-165
-- **Given** `AGENT_MESSAGING_MAX_DELIVER=N` and a retry-subject message for some `resource_id` whose target SP never becomes healthy again, so the message is never Ack'd
-- **When** the message has been delivered `N` times on the retry topic without acknowledgment
-- **Then** `retry.Processor` MUST publish a `dcm.agent.error` CloudEvent for that `resource_id` with `error: "MAX_DELIVERY_EXCEEDED"`, mirroring AC-RCM-070 for the retry topic
-- **And** the message MUST be terminated so a further delivery does not occur
-
 ##### AC-RCM-080: MaxDeliver is configurable
 
 - **Validates:** REQ-RCM-170
 - **Given** `AGENT_MESSAGING_MAX_DELIVER=10`
-- **When** the agent creates the main and retry topic durable consumers at startup
-- **Then** both consumers MUST be configured with a maximum of 10 delivery attempts
+- **When** the agent creates the main-subject durable consumer at startup
+- **Then** the main consumer MUST be configured with a maximum of 10 delivery attempts
+- **And** the retry-subject consumer MUST be configured with no `MaxDeliver` limit (see DD-410)
 
 ##### AC-RCM-090: Handler deadline aborts a hung SP call
 
@@ -1939,13 +1930,6 @@ message, not elapsed time.
 - **Given** `purgeFromRetryTopic` completes
 - **When** it returns
 - **Then** an INFO log MUST be emitted with `resource_id`, `matched`, `republished`
-
-##### AC-RCM-270: Retry-topic MaxDeliver logging parity
-
-- **Validates:** REQ-RCM-270
-- **Given** a retry-topic message exceeds `MaxDeliver`
-- **When** it is about to be terminated
-- **Then** a WARN log MUST be emitted with `resource_id`, `ce_id`, `ce_type`, `subject`, `stream_seq`, `consumer_seq`
 
 #### Dependencies
 
@@ -2247,9 +2231,9 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
 | REQ-DCM-NNN | 4.6: DCM Registration & Heartbeat | 18 |
 | REQ-MSG-NNN | 4.7: Messaging System Integration | 24 |
 | REQ-RTE-NNN | 4.8: Resource Operation Routing | 22 |
-| REQ-RCM-NNN | 4.9: Retry & Cancel Mechanisms | 23 |
+| REQ-RCM-NNN | 4.9: Retry & Cancel Mechanisms | 26 |
 | REQ-XC-ERR-NNN | 5.1: Error Handling | 4 |
 | REQ-XC-CE-NNN | 5.2: CloudEvent Definitions | 5 |
 | REQ-XC-LOG-NNN | 5.3: Logging | 2 |
 | REQ-XC-CFG-NNN | 5.4: Configuration Management | 6 |
-| **Total** | | **187** |
+| **Total** | | **190** |

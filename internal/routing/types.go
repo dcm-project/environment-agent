@@ -51,10 +51,11 @@ type RetryMessage struct {
 	ServiceType string
 	AckFunc     func() error
 	// NakFunc negatively acknowledges this message in place (same JetStream
-	// message, incrementing its delivery count) so it's redelivered later.
-	// MUST be used instead of ack+republish for messages that aren't
-	// cancelled — republishing a fresh copy resets the delivery count and
-	// defeats the MaxDeliver guard (REQ-RCM-270).
+	// message) so it's redelivered later. Used instead of ack+republish for
+	// non-cancelled messages, since they already live on this stream and
+	// don't need to move. The retry-subject consumer has no MaxDeliver limit
+	// (DD-410), so this choice is about simplicity, not delivery-count
+	// preservation.
 	NakFunc func() error
 }
 

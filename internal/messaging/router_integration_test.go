@@ -158,7 +158,7 @@ var _ = Describe("Main-Topic Delivery Safety Net", Label("integration"), func() 
 		}, 5*time.Second).Should(Equal(uint64(0)))
 	})
 
-	It("creates main and retry consumers with configured MaxDeliver limit (IT-RCM-090)", func() {
+	It("creates the main consumer with the configured MaxDeliver limit, and cancel/retry consumers with none (IT-RCM-090)", func() {
 		configuredMaxDeliver := 7
 
 		client := messaging.NewClient(messaging.ClientConfig{
@@ -177,15 +177,17 @@ var _ = Describe("Main-Topic Delivery Safety Net", Label("integration"), func() 
 		Expect(err).NotTo(HaveOccurred())
 		Expect(mainInfo.Config.MaxDeliver).To(Equal(configuredMaxDeliver))
 
+		// Retry consumer intentionally has NO MaxDeliver limit (DD-410):
+		// retry-topic residency is bounded by SP health-state transitions, not
+		// by delivery count. JetStream normalizes "unlimited" to -1 server-side.
 		retryCons, err := testJS.Consumer(ctx, topics.RetryStream(), topics.RetryConsumer())
 		Expect(err).NotTo(HaveOccurred())
 		retryInfo, err := retryCons.Info(ctx)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(retryInfo.Config.MaxDeliver).To(Equal(configuredMaxDeliver))
+		Expect(retryInfo.Config.MaxDeliver).To(Equal(-1))
 
 		// Cancel consumer intentionally has NO MaxDeliver limit — cancels must
-		// never be dropped by delivery-count exhaustion. JetStream normalizes
-		// "unlimited" to -1 server-side.
+		// never be dropped by delivery-count exhaustion.
 		cancelCons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.CancelConsumer())
 		Expect(err).NotTo(HaveOccurred())
 		cancelInfo, err := cancelCons.Info(ctx)

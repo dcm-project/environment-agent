@@ -693,25 +693,31 @@ downstream parsing.
 **Related requirements:** REQ-XC-CFG-010 — this is a disposition of an audit finding against the
 existing file-config-loading requirement, not a new requirement.
 
-### DD-410: Retry-topic MaxDeliver guard given its own requirement/AC (MEDIUM)
+### DD-410: Retry-subject consumer has no `MaxDeliver` limit (MEDIUM)
 
-**Decision:** Added `REQ-RCM-165` and `AC-RCM-071`, mirroring `REQ-RCM-160`/`AC-RCM-070` for the
-retry-subject path, and updated §4.9's overview paragraph to describe `retry.Processor` as also
-owning `MaxDeliver`-exceeded termination for its own topic. Added the missing `IT-RCM-085`
-traceability entry to `.ai/test-plans/integration-tests.md`.
+**Decision:** The retry-subject JetStream consumer does not set `MaxDeliver`, mirroring the
+existing cancel-consumer exemption. `retry.Processor` has no `MaxDeliver`-exceeded termination
+guard for the retry topic. `REQ-RCM-150` scopes `MaxDeliver` to the main-subject consumer only.
 
-**Rationale:** The original rollout's fix added `terminalOnMaxDeliver` to
-`retry.Processor`, mirroring `messaging.Client.handleMainMessage`'s main-topic guard so retry-topic
-poison messages also get a terminal error CE + `Term()` instead of redelivering forever. The fix
-itself was correct and well-tested (`IT-RCM-085`), but unlike every other fix in this rollout,
-it got no decision-doc entry, and — worse —
-the spec's own §4.9 overview and `REQ-RCM-160`'s Notes column still described `MaxDeliver`-exceeded
-handling as owned *solely* by `messaging.Client`, directly contradicting the shipped code. A future
-engineer reading only the requirements (not the code) would have concluded retry-topic poison
-messages are unhandled, and could regress `terminalOnMaxDeliver` without violating any written
-requirement.
+**Rationale:** `purgeFromRetryTopic` (cancel handling) Naks every non-matching retry-topic
+message in place on every cancel, which increments JetStream's delivery count for messages
+unrelated to the cancelled resource. A `MaxDeliver` limit on this consumer would let a burst of
+cancels for *other* resources push an otherwise-healthy retry-topic message toward premature
+termination — a false-positive poison-message classification driven by unrelated traffic, not by
+actual SP failures. Not setting `MaxDeliver` on this consumer avoids that risk entirely, since
+delivery count no longer gates anything.
 
-**Related requirements:** REQ-RCM-150, REQ-RCM-160, REQ-RCM-165
+**Accepted trade-off:** Retry-topic residency is bounded only by SP health-state transitions
+(`REQ-HMN-150`/`REQ-RCM-040`: drained and rejected once the SP reaches `Unavailable`), not by a
+delivery-count ceiling. `REQ-HMN-090` means an SP that is reachable and consistently reports
+itself unhealthy (`200 OK`, `status: "unhealthy"`) never increments the failure counter that
+leads to `Unavailable` — only genuine connectivity failures do (`REQ-HMN-070`). Such an SP can
+therefore remain `Unhealthy` indefinitely, and its queued resource requests can sit in the retry
+topic indefinitely with no error CloudEvent ever published for them. No time-based
+Unhealthy-to-Unavailable escalation was added to close this gap; it is accepted as a known
+limitation for v1alpha1.
+
+**Related requirements:** REQ-RCM-150, REQ-HMN-070, REQ-HMN-090, REQ-HMN-150, REQ-RCM-040
 
 ### DD-420: `finishSetup` no longer latches `setupDone` on a failed post-callback `beginConsuming` (HIGH)
 
@@ -793,4 +799,4 @@ the primary `Eventually(healthCh, ...)` assertion, so a failure of that assertio
 `localhost:8080`, messaging reconnect loop) running for the remainder of the test binary's
 lifetime.
 
-**Related requirements:** none (test-infrastructure hygiene only, no behavioral requirement).
+**Related requirements:** none (test-infrastructure hygiene only, no behavioral requirement)..

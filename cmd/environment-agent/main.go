@@ -149,7 +149,6 @@ func run(ctx context.Context) int {
 		ClaimedResourcesSet: router.ClaimedResourcesSet(),
 		Config: retry.ProcessorConfig{
 			HandlerTimeout: cfg.Routing.HandlerTimeout,
-			MaxDeliver:     cfg.Messaging.MaxDeliver,
 		},
 		Logger:    logger,
 		AgentName: cfg.Agent.Name,

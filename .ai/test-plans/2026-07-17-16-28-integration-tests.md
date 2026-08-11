@@ -1807,31 +1807,10 @@ Unless overridden, tests use:
 
 ---
 
-### IT-RCM-085: Retry-topic MaxDeliver exceeded — terminal error, not silent loss
-
-- **Validates AC:** AC-RCM-071
-- **Test Infrastructure:** JetStream retry consumer with `MaxDeliver=2`, short `AckWait`;
-  `retry.Processor` constructed with matching `ProcessorConfig.MaxDeliver`
-- **Given** a create for `resourceId="res-exhausted"` is published to the retry topic
-- **And** the message has already been delivered once and its `AckWait` has expired
-  (genuine JetStream redelivery, `NumDelivered` now equals the configured `MaxDeliver`)
-- **When** `ProcessOnTransition` fetches it from the retry consumer
-- **Then** `dcm.agents.responses` MUST receive a `dcm.agent.error` CloudEvent with
-  `error: "MAX_DELIVERY_EXCEEDED"` and the correct `resourceId`
-- **And** the SP forwarder MUST NOT be called for this message
-- **And** the message MUST be terminated (no pending/ack-pending left on the consumer)
-- **Regression for:** the
-  main-topic path (`messaging/handlers.go`) already had this guard (IT-RCM-080); the
-  retry-topic path (`routing/retry/processor.go`) had none, so a retry-topic message that
-  exhausted server-side `MaxDeliver` used to vanish with no error CE and no `Term()`.
-
-### IT-RCM-086: Retry-topic MaxDeliver logging has main-topic parity
-
-- **Validates AC:** AC-RCM-270
-- **Test Infrastructure:** Same setup as IT-RCM-085, extended with `slog.Handler` capture
-- **Given** a retry-topic message exceeds `MaxDeliver`
-- **When** it is about to be terminated
-- **Then** a WARN log MUST be emitted with `resource_id`, `ce_id`, `ce_type`, `subject`, `stream_seq`, `consumer_seq` — the same fields the main-topic guard (IT-RCM-080) already logs
+> **Retired (DD-410):** `IT-RCM-085`/`IT-RCM-086` (retry-topic `MaxDeliver`-exceeded
+> termination and its logging parity) were removed — the retry-subject consumer no
+> longer sets `MaxDeliver` at all, so this guard is no longer applicable. See DD-410
+> and REQ-RCM-150.
 
 ---
 
@@ -2124,7 +2103,6 @@ Unless overridden, tests use:
 | AC-RCM-047 | IT-MSG-131 exercises `SetOnSetupReady` end to end against a real NATS/JetStream server, wired the same way `main.go` wires it (drain-equivalent work then `StartConsuming`, both synchronously inside the callback) — see `internal/messaging/client_integration_test.go`. See also UT-MSG-080, UT-MSG-090, and UT-MSG-095 (`finishSetup` must not report success when `beginConsuming` fails after the callback runs) in `.ai/test-plans/unit-tests.md`. `main.go`'s own composition-root wiring of `SetOnSetupReady` specifically (as opposed to `messaging.Client`'s side of the contract) is still not exercised by an end-to-end test — a genuine "NATS unreachable at Start()" integration scenario would require controlling the test NATS server's startup ordering relative to the agent process, which the current test harness (shared `testNATSServer` started before any client) doesn't support |
 | AC-RCM-050 | IT-RCM-060 |
 | AC-RCM-060 | IT-RCM-070 |
-| AC-RCM-071 | IT-RCM-085 |
 | AC-XC-ERR-010 | IT-XC-ERR-010 |
 | AC-XC-ERR-020 | IT-XC-ERR-020 |
 | AC-XC-ERR-030 | IT-XC-ERR-030 |

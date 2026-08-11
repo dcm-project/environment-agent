@@ -458,7 +458,7 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(acked).To(BeTrue())
 		Expect(nakked).To(BeTrue(),
-			"non-matching retry message must be Nak'd in place, not acked+republished (would reset MaxDeliver count, REQ-RCM-270)")
+			"non-matching retry message must be Nak'd in place, not acked+republished")
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
 		Expect(denyList.Contains("res-789")).To(BeTrue())
 

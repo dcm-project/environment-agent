@@ -79,7 +79,9 @@ type MessagingConfig struct {
 	TopicName     string        `env:"TOPIC_NAME"`
 	AckWait       time.Duration `env:"MESSAGING_ACK_WAIT" envDefault:"120s"`
 	CancelAckWait time.Duration `env:"MESSAGING_CANCEL_ACK_WAIT" envDefault:"10s"`
-	MaxDeliver    int           `env:"MESSAGING_MAX_DELIVER" envDefault:"10"`
+	// MaxDeliver applies only to the main-subject consumer. The cancel and
+	// retry-subject consumers intentionally have no MaxDeliver limit (DD-410).
+	MaxDeliver int `env:"MESSAGING_MAX_DELIVER" envDefault:"10"`
 	// ReconnectInitialBackoff/ReconnectMaxBackoff bound the NATS reconnect
 	// exponential-backoff-with-jitter formula (REQ-MSG-100, same formula as
 	// REQ-DCM-050). Distinct from DCM's own registration backoff — NATS

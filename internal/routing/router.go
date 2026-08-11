@@ -397,13 +397,11 @@ func (r *Router) HandleCancel(ctx context.Context, msg []byte) error {
 }
 
 // purgeFromRetryTopic drains all retry messages, acking those matching the
-// cancelled resourceID and Nak'ing the rest back in place.
-//
-// Non-matching messages MUST be Nak'd on the same JetStream message rather
-// than acked-and-republished: a fresh republish resets JetStream's delivery
-// count to 1, silently defeating the MaxDeliver guard for any OTHER
-// in-flight retry item every time an unrelated resource is cancelled
-// (REQ-RCM-270).
+// cancelled resourceID and Nak'ing the rest back in place. Non-matching
+// messages are Nak'd on the same JetStream message rather than
+// acked-and-republished, since they already live on this stream and don't
+// need to move. The retry-subject consumer has no MaxDeliver limit
+// (DD-410), so this choice doesn't affect delivery-count accounting.
 func (r *Router) purgeFromRetryTopic(ctx context.Context, rc RetryTopicConsumer, resourceID string) error {
 	messages, err := rc.FetchRetryMessages(ctx)
 	if err != nil {

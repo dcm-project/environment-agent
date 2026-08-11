@@ -418,10 +418,14 @@ func (c *Client) initConsumers(ctx context.Context, js jetstream.JetStream, retr
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create cancel consumer: %w", err)
 	}
-	// Retry consumer: agent-owned stream, used by retry.Processor via JetStream Consumer binding
+	// Retry consumer: agent-owned stream, used by retry.Processor via JetStream Consumer binding.
+	// Intentionally has no MaxDeliver limit — see DD-410. Retry-topic residency is bounded by
+	// SP health-state transitions (REQ-HMN-150), not by delivery count: a MaxDeliver ceiling
+	// here would let cancel-purge Naks for unrelated resources (router.purgeFromRetryTopic)
+	// prematurely exhaust a message that was never actually offered to its SP that many times.
 	if _, err := retryS.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 		Durable: c.topics.RetryConsumer(), AckPolicy: jetstream.AckExplicitPolicy,
-		AckWait: c.cfg.AckWait, MaxDeliver: c.cfg.MaxDeliver,
+		AckWait: c.cfg.AckWait,
 	}); err != nil {
 		return nil, nil, fmt.Errorf("failed to create retry consumer: %w", err)
 	}

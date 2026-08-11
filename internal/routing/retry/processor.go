@@ -24,26 +24,16 @@ const (
 	fetchMaxWait   = 200 * time.Millisecond
 	// storeErrorRetryDelay is the NakWithDelay backoff used whenever a
 	// retry-topic message can't be resolved yet (transient store error,
-	// forward failure, provider not found/not ready). It MUST be applied via
+	// forward failure, provider not found/not ready). Applied via
 	// NakWithDelay on the SAME JetStream message rather than a fresh
-	// ack+republish, so JetStream's own delivery count increments and the
-	// terminalOnMaxDeliver guard can eventually trigger (REQ-RCM-270).
+	// ack+republish, since the message already lives on this stream and
+	// doesn't need to move.
 	storeErrorRetryDelay = 10 * time.Second
 )
 
 // ProcessorConfig holds retry processor tuning knobs.
-//
-// MaxDeliver-exceeded handling is split by topic: messaging.Client
-// (handleMainMessage) owns it for the main topic, and Processor
-// (terminalOnMaxDeliver) owns the mirrored guard for the retry topic.
 type ProcessorConfig struct {
 	HandlerTimeout time.Duration
-	// MaxDeliver mirrors messaging.ClientConfig.MaxDeliver: the same value is
-	// used to create the retry-topic JetStream consumer (messaging.Client.
-	// initConsumers), so the retry path enforces the identical terminal-path
-	// guard the main-topic path already has (see terminalOnMaxDeliver).
-	// Zero/negative disables the guard (unlimited redelivery).
-	MaxDeliver int
 }
 
 // JSProvider returns the current JetStream context. Resolved at call time so
@@ -162,7 +152,7 @@ func (p *Processor) ProcessOnTransition(ctx context.Context, providerID string, 
 		return err
 	}
 
-	items := p.parseMessages(ctx, msgs)
+	items := p.parseMessages(msgs)
 	items = p.dedupCreateDeletePairs(ctx, items)
 	p.processTransitionItems(ctx, sp, items)
 	p.deps.Logger.Info("processed retry topic for transition", "provider_id", providerID, "to", to, "items", len(items))
@@ -283,7 +273,7 @@ func (p *Processor) drainRetryTopicWithDedup(ctx context.Context) error {
 		return err
 	}
 
-	items := p.parseMessages(ctx, retryMsgs)
+	items := p.parseMessages(retryMsgs)
 	items = p.dedupCreateDeletePairs(ctx, items)
 	heartbeatAll(items)
 	for _, item := range items {
@@ -362,14 +352,13 @@ type parsedMessage struct {
 }
 
 // parseMessages unmarshals CEs from raw JetStream messages, terminating any
-// that fail to parse or have exceeded MaxDeliver, and returning the
-// successfully parsed, still-live ones.
-func (p *Processor) parseMessages(ctx context.Context, msgs []jetstream.Msg) []parsedMessage {
+// that fail to parse, and returning the successfully parsed, still-live ones.
+// The retry-subject consumer has no MaxDeliver limit (DD-410), so there is no
+// delivery-count guard here — unlike messaging.Client.handleMainMessage's
+// main-topic path.
+func (p *Processor) parseMessages(msgs []jetstream.Msg) []parsedMessage {
 	var items []parsedMessage
 	for _, m := range msgs {
-		if p.terminalOnMaxDeliver(ctx, m) {
-			continue
-		}
 		res, ok := p.parseCE(m.Data())
 		if !ok {
 			_ = m.Term()
@@ -378,56 +367,6 @@ func (p *Processor) parseMessages(ctx context.Context, msgs []jetstream.Msg) []p
 		items = append(items, parsedMessage{msg: m, ceResult: res})
 	}
 	return items
-}
-
-// terminalOnMaxDeliver mirrors messaging.Client.handleMainMessage's MaxDeliver
-// guard (internal/messaging/handlers.go) for the retry-topic path, so a
-// message that exhausts JetStream's MaxDeliver gets an error CE and a Term()
-// instead of silently vanishing (REQ-RCM-160).
-//
-// Returns true if the message was terminally handled here (caller must not
-// process it further).
-func (p *Processor) terminalOnMaxDeliver(ctx context.Context, m jetstream.Msg) bool {
-	if p.deps.Config.MaxDeliver <= 0 {
-		return false
-	}
-	meta, err := m.Metadata()
-	if err != nil {
-		p.deps.Logger.Warn("failed to get message metadata for MaxDeliver guard", "error", err)
-		_ = m.Nak()
-		return true
-	}
-	if meta.NumDelivered < uint64(p.deps.Config.MaxDeliver) {
-		return false
-	}
-
-	resourceID, ceID, ceType := "", "unknown", "unknown"
-	if res, ok := p.parseCE(m.Data()); ok {
-		resourceID, ceID, ceType = res.resourceID, res.eventID, res.ceType
-	}
-	if ceID == "" {
-		ceID = "unknown"
-	}
-	// Parity with messaging.Client.publishMaxDeliverError (main-topic path):
-	// log the same structured fields before terminating so the retry-topic
-	// path is equally observable (REQ-RCM-270).
-	p.deps.Logger.Warn("max delivery exceeded, terminating retry message",
-		"resource_id", resourceID, "ce_id", ceID, "ce_type", ceType, "subject", m.Subject(),
-		"stream_seq", meta.Sequence.Stream, "consumer_seq", meta.Sequence.Consumer,
-	)
-	p.publishCE(ctx, cloudevent.TypeError, resourceID, ceID, routing.ErrorData{
-		ResponseContext: p.responseCtx(resourceID),
-		Error:           routing.ErrorMaxDeliveryExceeded, Details: "max delivery attempts exceeded",
-	})
-	// If Term fails (e.g. a transient connection drop), JetStream will
-	// redeliver this message and this guard fires again on the next attempt,
-	// publishing a duplicate terminal error CE — same documented trade-off as
-	// messaging.Client.publishMaxDeliverError.
-	if err := m.Term(); err != nil {
-		p.deps.Logger.Warn("failed to terminate max-delivery retry message, may be redelivered",
-			"error", err, "resource_id", resourceID, "ce_id", ceID, "ce_type", ceType)
-	}
-	return true
 }
 
 // dedupCreateDeletePairs identifies resourceIDs that have both create and delete
@@ -626,17 +565,10 @@ func (p *Processor) routeMessage(ctx context.Context, msg jetstream.Msg, res ceR
 }
 
 // requeueToRetryTopic re-queues a message that isn't ready to forward yet.
-//
-// If msg already lives on the retry topic (fromRetryTopic), it is Nak'd in
-// place so JetStream's own delivery count increments across attempts —
-// required for terminalOnMaxDeliver to ever trigger (REQ-RCM-270). Acking it
-// and publishing a fresh copy instead would reset that count to 1 on every
-// attempt, defeating the MaxDeliver guard for a persistently-failing SP.
-//
-// If msg is still on the main topic (!fromRetryTopic), it must move across
-// streams to enter the retry flow for the first time: publishing a fresh copy
-// to the retry topic and acking the original is the only way to do that, and
-// correctly starts the retry-topic delivery count at 1.
+// If msg already lives on the retry topic (fromRetryTopic), it's Nak'd in
+// place — no stream move needed. Otherwise it's still on the main topic and
+// must move across streams for the first time: publish a fresh copy to the
+// retry topic, then ack the original.
 func (p *Processor) requeueToRetryTopic(ctx context.Context, msg jetstream.Msg, fromRetryTopic bool) {
 	if fromRetryTopic {
 		_ = msg.NakWithDelay(storeErrorRetryDelay)
