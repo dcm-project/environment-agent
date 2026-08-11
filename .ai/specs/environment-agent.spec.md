@@ -814,7 +814,7 @@ Out of scope: Metrics/observability integration.
 | health.checkInterval | AGENT_HEALTH_CHECK_INTERVAL | 10s | 1s | 5m | duration | Interval between health checks for external SPs |
 | health.checkTimeout | AGENT_HEALTH_CHECK_TIMEOUT | 5s | 500ms | health.checkInterval | duration | Timeout per health check call |
 | health.failureThreshold | AGENT_HEALTH_FAILURE_THRESHOLD | 3 | 1 | 100 | integer | Consecutive failures before marking SP as Unavailable |
-| health.podConditionsEnabled | AGENT_POD_CONDITIONS_ENABLED | auto | - | - | - | Enable/disable K8s pod condition updates. `auto` enables when running inside Kubernetes (detected via `KUBERNETES_SERVICE_HOST`), `true` forces on, `false` forces off |
+| health.podConditionsEnabled | AGENT_POD_CONDITIONS_ENABLED | auto | - | - | - | Parsed and validated (`auto`/`true`/`false`) but never read past config loading — pod-condition updates are unimplemented in v1alpha1. See DD-270 |
 
 #### Acceptance Criteria
 
