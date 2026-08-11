@@ -24,6 +24,7 @@ var _ = Describe("run", Label("unit"), func() {
 		GinkgoT().Setenv("AGENT_ENVIRONMENT", "test")
 		GinkgoT().Setenv("AGENT_COST", "medium")
 		GinkgoT().Setenv("DCM_REGISTRATION_URL", "http://localhost:8080")
+		GinkgoT().Setenv("AGENT_MESSAGING_URL", "nats://localhost:4222")
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()

@@ -123,6 +123,8 @@ func (c *Config) Validate() error {
 	}
 
 	// Topic 7: Messaging Integration — append-only below this line
-	// AGENT_MESSAGING_URL validated when messaging subsystem is wired.
+	if err := validateRequired("AGENT_MESSAGING_URL", c.Messaging.URL); err != nil {
+		return err
+	}
 	return nil
 }
