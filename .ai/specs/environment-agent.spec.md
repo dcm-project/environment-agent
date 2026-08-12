@@ -2385,15 +2385,15 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
 |--------|-------|-------|
 | REQ-HTTP-NNN | 4.1: HTTP Server | 12 |
 | REQ-HLT-NNN | 4.2: Health Service | 7 |
-| REQ-SPR-NNN | 4.3: SP Registration & Management | 31 |
+| REQ-SPR-NNN | 4.3: SP Registration & Management | 35 |
 | REQ-STS-NNN | 4.4: Provider Query Endpoints | 7 |
 | REQ-HMN-NNN | 4.5: SP Health Monitoring | 33 |
 | REQ-DCM-NNN | 4.6: DCM Registration & Heartbeat | 19 |
-| REQ-MSG-NNN | 4.7: Messaging System Integration | 27 |
+| REQ-MSG-NNN | 4.7: Messaging System Integration | 28 |
 | REQ-RTE-NNN | 4.8: Resource Operation Routing | 28 |
 | REQ-RCM-NNN | 4.9: Retry & Cancel Mechanisms | 26 |
 | REQ-XC-ERR-NNN | 5.1: Error Handling | 4 |
 | REQ-XC-CE-NNN | 5.2: CloudEvent Definitions | 5 |
 | REQ-XC-LOG-NNN | 5.3: Logging | 3 |
 | REQ-XC-CFG-NNN | 5.4: Configuration Management | 6 |
-| **Total** | | **208** |
+| **Total** | | **213** |

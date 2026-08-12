@@ -2415,10 +2415,10 @@ Unless overridden, tests use:
 | AC-SPR-015 | IT-SPR-172 — see also UT-SPR-100/101 in `.ai/test-plans/unit-tests.md` for the general (non-`main.go`) ordering property |
 | AC-SPR-020 | IT-SPR-020 |
 | AC-SPR-030 | IT-SPR-030 |
-| AC-SPR-040 | IT-SPR-040 |
+| AC-SPR-040 | IT-SPR-040, IT-SPR-191 |
 | AC-SPR-051 | IT-SPR-197, IT-SPR-198 |
-| AC-SPR-050 | IT-SPR-050 |
-| AC-SPR-060 | IT-SPR-060 |
+| AC-SPR-050 | IT-SPR-050, IT-SPR-145, IT-SPR-146, IT-SPR-147 |
+| AC-SPR-060 | IT-SPR-060, IT-SPR-192 |
 | AC-SPR-070 | IT-SPR-070 |
 | AC-SPR-071 | IT-SPR-149, IT-SPR-149b |
 | AC-SPR-052 | IT-SPR-085 |
@@ -2426,6 +2426,7 @@ Unless overridden, tests use:
 | AC-SPR-221 | IT-SPR-194 |
 | AC-SPR-222 | IT-SPR-195, IT-SPR-196 |
 | AC-SPR-090 | IT-SPR-080 |
+| AC-SPR-250 | IT-SPR-193 |
 | AC-SPR-095 | IT-SPR-090, IT-SPR-199 |
 | AC-SPR-096 | IT-SPR-100 |
 | AC-SPR-100 | IT-SPR-110 |
@@ -2467,7 +2468,9 @@ Unless overridden, tests use:
 | AC-HMN-110 | IT-HMN-150 |
 | AC-HMN-120 | IT-HMN-160 |
 | AC-HMN-185 | IT-HMN-170 |
-| AC-DCM-010 | IT-DCM-010 |
+| AC-HMN-280 | IT-HMN-190 |
+| AC-HMN-290 | IT-HMN-191 |
+| AC-DCM-010 | IT-DCM-010, IT-DCM-015 |
 | AC-DCM-015 | IT-DCM-020 |
 | AC-DCM-020 | IT-DCM-030, IT-DCM-035 |
 | AC-DCM-025 | IT-DCM-040 |
@@ -2486,6 +2489,7 @@ Unless overridden, tests use:
 | AC-DCM-095 | IT-DCM-150 |
 | AC-DCM-100 | IT-DCM-160 |
 | AC-DCM-105 | IT-DCM-170 |
+| AC-DCM-180 | IT-DCM-190 |
 | AC-MSG-010 | IT-MSG-010 |
 | AC-MSG-011 | IT-MSG-011, IT-MSG-012 |
 | AC-MSG-015 | IT-MSG-020 |
@@ -2495,13 +2499,16 @@ Unless overridden, tests use:
 | AC-MSG-025 | IT-MSG-060 |
 | AC-MSG-030 | IT-MSG-070, IT-MSG-071 |
 | AC-MSG-035 | IT-MSG-080 |
-| AC-MSG-040 | IT-MSG-090, IT-MSG-130 |
+| AC-MSG-040 | IT-MSG-090, IT-MSG-095, IT-MSG-130 |
 | AC-MSG-050 | IT-MSG-100, IT-MSG-105 |
 | AC-MSG-012 | IT-MSG-107 |
 | AC-MSG-052 | UT-MSG-050, UT-MSG-051–053 (unit-tested: `reconnectDelay` is a pure function; see `.ai/test-plans/unit-tests.md`) |
 | AC-MSG-055 | IT-MSG-110, IT-MSG-073 |
 | AC-MSG-060 | IT-MSG-120, IT-MSG-072 |
 | AC-MSG-065 | IT-MSG-160, IT-MSG-161 |
+| AC-MSG-160 | IT-MSG-170 |
+| AC-MSG-170 | IT-MSG-171 |
+| AC-MSG-180 | IT-MSG-172 |
 | AC-RTE-010 | IT-RTE-010, IT-RTE-015 |
 | AC-RTE-020 | IT-RTE-020 |
 | AC-RTE-030 | IT-RTE-030 |
@@ -2548,6 +2555,7 @@ Unless overridden, tests use:
 | AC-XC-CE-020 | IT-XC-CE-020 |
 | AC-XC-LOG-010 | IT-XC-LOG-010 |
 | AC-XC-LOG-020 | IT-XC-LOG-020 |
+| AC-XC-LOG-030 | IT-XC-LOG-030 |
 | AC-XC-CFG-010 | IT-XC-CFG-010 |
 | AC-XC-CFG-011 | IT-XC-CFG-020 |
 | AC-XC-CFG-012 | IT-XC-CFG-030 |
