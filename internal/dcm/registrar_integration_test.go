@@ -617,9 +617,10 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 
 		// A fixed 429 response never succeeds, so the count over a fixed
 		// window is a direct measure of retry pacing. Full jitter over
-		// [0, 200ms] averages ~5 attempts/sec; the pre-fix bug (treating a
-		// non-positive Retry-After as an immediate-retry signal, returning
-		// 0 backoff) produced 1000+ attempts/sec in this same window when
+		// [0, 200ms] draws a mean wait of 100ms, so this averages ~10
+		// attempts/sec; the pre-fix bug (treating a non-positive
+		// Retry-After as an immediate-retry signal, returning 0 backoff)
+		// produced 900-1100+ attempts/sec in this same window when
 		// verified against the pre-fix code — 40 leaves a wide, non-flaky
 		// margin between the two.
 		count := len(mock.getRegistrations())
