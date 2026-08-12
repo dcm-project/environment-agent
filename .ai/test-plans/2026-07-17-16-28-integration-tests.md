@@ -1926,6 +1926,18 @@ Unless overridden, tests use:
 
 ---
 
+### IT-RCM-095: Retry-topic Nak-in-place increments JetStream delivery count
+
+- **Validates AC:** AC-RTE-080
+- **Test Infrastructure:** Real JetStream retry stream/consumer; `retry.Processor.FetchRetryMessages` (production code path, not a fake consumer)
+- **Given** a create request for a resourceId is published to the real retry-topic stream
+- **And** it is fetched once via `FetchRetryMessages` (`NumDelivered` == 1)
+- **When** the returned `NakFunc` is invoked (Nak-in-place, not ack+republish) and the message is redelivered
+- **Then** the redelivered message MUST report `NumDelivered` == 2, not reset to 1
+- **And** the message MUST be the same retry-topic message (not a duplicate republished copy)
+
+---
+
 ### IT-RCM-100: Hung SP call aborted after handler deadline elapses
 
 - **Validates AC:** AC-RCM-090

@@ -232,6 +232,47 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(data.Error).To(Equal("SP_UNAVAILABLE"))
 	})
 
+	It("treats an empty provider ID as Unavailable and logs the anomaly (IT-RTE-150)", func() {
+		Expect(registry.Claim("corrupt-sp", "database")).To(Succeed())
+		Expect(st.Save(ctx, store.StoredProvider{
+			ID:            "", // simulated store/registry data corruption (REQ-RTE-026)
+			Name:          "corrupt-sp",
+			Endpoint:      "http://mock:8080",
+			ServiceType:   "database",
+			SchemaVersion: "v1alpha1",
+			Type:          "external",
+			CreateTime:    time.Now(),
+			UpdateTime:    time.Now(),
+		})).To(Succeed())
+
+		ch := &captureLogHandler{}
+		router = routing.NewRouter(routing.RouterDeps{
+			Registry: registry, HealthTracker: healthTracker, Store: st,
+			Forwarder: fakeForwarder, Publisher: publisher, RetryConsumer: fakeRetry,
+			DenyList: denyList, Config: routingCfg, Logger: slog.New(ch),
+			AgentName: "agent-prod-1", TopicName: topics.Main, RetryTopic: topics.Retry,
+		})
+
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-corrupt", "database"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fakeForwarder.CreateCallCount()).To(Equal(0), "SP must not be called for a corrupted provider record")
+
+		ce := routingtest.ExpectResponseCE(responseSub)
+		Expect(ce.Type()).To(Equal("dcm.agent.error"))
+		var data routing.ErrorData
+		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
+		Expect(data.ResourceID).To(Equal("res-corrupt"))
+		Expect(data.Error).To(Equal("SP_UNAVAILABLE"))
+
+		found := false
+		for _, rec := range ch.all() {
+			if rec.Message == "provider has empty ID (data corruption)" && rec.Level == slog.LevelError {
+				found = true
+			}
+		}
+		Expect(found).To(BeTrue(), "empty-ID anomaly must be logged at ERROR")
+	})
+
 	It("queues creation when SP is Unhealthy (IT-RTE-060)", func() {
 		registerProvider("unhealthy-sp", "database", "http://mock:8080", "external", v1alpha1.Unhealthy)
 		setupDefaultRouter()
