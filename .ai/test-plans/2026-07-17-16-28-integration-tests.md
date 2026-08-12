@@ -1077,11 +1077,30 @@ Unless overridden, tests use:
 ### IT-DCM-106: Standard backoff on 429 with a past HTTP-date Retry-After
 
 - **Validates AC:** AC-DCM-061 (second clause)
-- **Test Infrastructure:** Mock DCM returning 429 with a `Retry-After` HTTP-date one hour in the past, then 201
-- **Given** DCM returns 429 with a stale/expired `Retry-After` HTTP-date on first attempt
-- **When** the agent retries
-- **Then** the gap between attempts MUST be bounded by MaxBackoff + tolerance (the unusable Retry-After is discarded, standard backoff applied — not a near-zero immediate-retry loop)
-- **And** the gap MUST be greater than 0
+- **Test Infrastructure:** Mock DCM always returning 429 with a `Retry-After` HTTP-date one hour in the past (never succeeds, so retry count over a fixed window directly measures pacing)
+- **Given** DCM always returns 429 with a stale/expired `Retry-After` HTTP-date
+- **When** the agent retries for a fixed 1s window with InitialBackoff = MaxBackoff = 200ms
+- **Then** the registrar MUST still be attempting registration (count > 0)
+- **And** the attempt count MUST be well below what a near-zero immediate-retry loop would produce
+  (< 40; verified directly against the pre-fix code, which produced 1000+ attempts/sec in the
+  same window — an earlier version of this test asserted only `gap > 0` and `gap <= MaxBackoff`
+  between the first two attempts, which the pre-fix immediate-retry bug also satisfied by
+  accident, since real wall-clock time always elapses even for an "immediate" retry; the fixed
+  attempt-count-over-a-window assertion actually discriminates the two behaviors)
+
+---
+
+### IT-DCM-107: Standard backoff on 429 with a literal "0" Retry-After
+
+- **Validates AC:** AC-DCM-061 (second clause)
+- **Test Infrastructure:** Mock DCM always returning 429 with `Retry-After: 0`
+- **Given** DCM always returns 429 with a well-formed but non-positive (`"0"`) `Retry-After`
+- **When** the agent retries for a fixed 1s window with InitialBackoff = MaxBackoff = 200ms
+- **Then** the registrar MUST still be attempting registration (count > 0)
+- **And** the attempt count MUST be well below what a near-zero immediate-retry loop would produce
+  (< 40) — `ParseRetryAfter("0", ...)` legitimately returns `(0, true)` (distinct from the
+  unparseable/past-date/negative cases, which return `(0, false)`), so this exercises
+  `computeBackoff`'s own `RetryAfter > 0` guard specifically, not `ParseRetryAfter`'s rejection
 
 ---
 
@@ -2302,7 +2321,7 @@ Unless overridden, tests use:
 | AC-DCM-050 | IT-DCM-080 |
 | AC-DCM-055 | IT-DCM-180 (now also covers survive-multiple-panics-and-keep-retrying, not just single-panic-recovery — see DD-360) |
 | AC-DCM-060 | IT-DCM-090 |
-| AC-DCM-061 | IT-DCM-100, IT-DCM-105, IT-DCM-106 |
+| AC-DCM-061 | IT-DCM-100, IT-DCM-105, IT-DCM-106, IT-DCM-107 |
 | AC-DCM-070 | IT-DCM-110 |
 | AC-DCM-080 | IT-DCM-120 |
 | AC-DCM-085 | IT-DCM-130 |

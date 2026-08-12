@@ -1,6 +1,7 @@
 package backoff_test
 
 import (
+	"math"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -19,7 +20,22 @@ var _ = Describe("CalculateBackoff", Label("unit"), func() {
 		Entry("attempt 3 → 8s (UT-DCM-010)", time.Second, 5*time.Minute, 3, 8*time.Second),
 		Entry("attempt 9 → capped at 300s (UT-DCM-013)", time.Second, 5*time.Minute, 9, 5*time.Minute),
 		Entry("attempt 20 → still capped, overflow-safe (UT-DCM-014)", time.Second, 5*time.Minute, 20, 5*time.Minute),
+		// This attempt magnitude, against a small max, terminates within a
+		// handful of loop iterations regardless (d exceeds max long before
+		// attempt is exhausted) — it proves there's no O(attempt) hang, but
+		// on its own doesn't exercise the overflow guard near its actual
+		// int64 boundary. See UT-DCM-016/017 below for that.
 		Entry("attempt 1_000_000 → still capped, no float/overflow (UT-DCM-015)", time.Second, 5*time.Minute, 1_000_000, 5*time.Minute),
+		Entry("non-positive initial → returns max directly (UT-DCM-016)", time.Duration(0), 5*time.Minute, 3, 5*time.Minute),
+		Entry("negative initial → returns max directly (UT-DCM-016b)", -time.Second, 5*time.Minute, 3, 5*time.Minute),
+		// Exercises the d > max/2 overflow guard at actual int64-Duration
+		// scale (max ≈ 146 years) rather than a small toy value: 2^61 is
+		// the first power of two exceeding max/2, so the guard must fire
+		// at exactly that doubling to avoid d ever reaching 2^62 (which
+		// would still fit in int64, but the point is to prove the guard's
+		// boundary math holds at real magnitudes, not just small ones).
+		Entry("many doublings against a near-int64-max cap → guard fires before overflow (UT-DCM-017)",
+			time.Nanosecond, time.Duration(math.MaxInt64/2), 1000, time.Duration(math.MaxInt64/2)),
 	)
 })
 

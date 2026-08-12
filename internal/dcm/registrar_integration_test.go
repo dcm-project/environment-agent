@@ -597,14 +597,15 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 		Expect(gap).To(BeNumerically(">", 0))
 	})
 
-	It("falls back to standard backoff on 429 with a past HTTP-date Retry-After (IT-DCM-106)", func() {
+	It("paces retries with real backoff on 429 with a past HTTP-date Retry-After, instead of the "+
+		"pre-fix immediate-retry bug (IT-DCM-106)", func() {
 		mock.mu.Lock()
-		mock.regSequence = []int{429, 201}
+		mock.regStatus = http.StatusTooManyRequests
 		mock.retryAfter = time.Now().UTC().Add(-1 * time.Hour).Format(http.TimeFormat)
 		mock.mu.Unlock()
 
 		cfg := defaultRegistrarConfig(mock.server.URL)
-		cfg.InitialBackoff = 50 * time.Millisecond
+		cfg.InitialBackoff = 200 * time.Millisecond
 		cfg.MaxBackoff = 200 * time.Millisecond
 
 		lister := &stubServiceTypeLister{types: []string{"container"}}
@@ -612,15 +613,48 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		r.Start(ctx)
+		time.Sleep(1 * time.Second)
 
-		Eventually(func() int {
-			return len(mock.getRegistrations())
-		}, 5*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 2))
+		// A fixed 429 response never succeeds, so the count over a fixed
+		// window is a direct measure of retry pacing. Full jitter over
+		// [0, 200ms] averages ~5 attempts/sec; the pre-fix bug (treating a
+		// non-positive Retry-After as an immediate-retry signal, returning
+		// 0 backoff) produced 1000+ attempts/sec in this same window when
+		// verified against the pre-fix code — 40 leaves a wide, non-flaky
+		// margin between the two.
+		count := len(mock.getRegistrations())
+		Expect(count).To(BeNumerically(">", 0), "registrar must still be attempting registration")
+		Expect(count).To(BeNumerically("<", 40),
+			"registrations must be paced by standard backoff, not hot-looping at ~0 delay")
+	})
 
-		regs := mock.getRegistrations()
-		gap := regs[1].Timestamp.Sub(regs[0].Timestamp)
-		Expect(gap).To(BeNumerically("<=", cfg.MaxBackoff+50*time.Millisecond))
-		Expect(gap).To(BeNumerically(">", 0))
+	It("paces retries with real backoff on 429 with a literal \"0\" Retry-After, "+
+		"instead of treating it as an immediate-retry signal (IT-DCM-107)", func() {
+		mock.mu.Lock()
+		mock.regStatus = http.StatusTooManyRequests
+		mock.retryAfter = "0"
+		mock.mu.Unlock()
+
+		cfg := defaultRegistrarConfig(mock.server.URL)
+		cfg.InitialBackoff = 200 * time.Millisecond
+		cfg.MaxBackoff = 200 * time.Millisecond
+
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+		time.Sleep(1 * time.Second)
+
+		// ParseRetryAfter("0", ...) legitimately returns (0, true) — a
+		// well-formed but non-positive Retry-After, distinct from the
+		// unparseable/past-date cases IT-DCM-106 covers. computeBackoff
+		// must treat this the same way (fall back to standard backoff,
+		// not RetryAfter<=0 => immediate retry as pre-fix code did).
+		count := len(mock.getRegistrations())
+		Expect(count).To(BeNumerically(">", 0), "registrar must still be attempting registration")
+		Expect(count).To(BeNumerically("<", 40),
+			"registrations must be paced by standard backoff, not hot-looping at ~0 delay")
 	})
 
 	It("rejects invalid registration URL (constructor)", func() {
