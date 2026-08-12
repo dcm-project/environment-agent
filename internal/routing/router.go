@@ -52,7 +52,7 @@ type Router struct {
 	retryConsumer       RetryTopicConsumer // set after construction via SetRetryConsumer
 	denyList            *ResourceSet
 	claimedResourcesSet *ResourceSet
-	inFlight            *ResourceSet
+	inFlight            *KeyLock
 	config              config.RoutingConfig
 	logger              *slog.Logger
 	agentName           string
@@ -112,7 +112,7 @@ func NewRouter(deps RouterDeps) *Router {
 		retryConsumer:       deps.RetryConsumer,
 		denyList:            deps.DenyList,
 		claimedResourcesSet: NewResourceSet(claimedResourcesSetMaxSize),
-		inFlight:            NewUnboundedResourceSet(),
+		inFlight:            NewKeyLock(),
 		config:              deps.Config,
 		logger:              deps.Logger,
 		agentName:           deps.AgentName,
@@ -150,7 +150,7 @@ func (r *Router) ClaimedResourcesSet() *ResourceSet { return r.claimedResourcesS
 // InFlightSet returns the transient in-flight lock for sharing with the
 // retry Processor, so a main-topic forward and a retry-topic forward for the
 // same resourceId can't race each other into a double dispatch.
-func (r *Router) InFlightSet() *ResourceSet { return r.inFlight }
+func (r *Router) InFlightSet() *KeyLock { return r.inFlight }
 
 // HandleRequest routes a creation or deletion CE to the appropriate SP.
 func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {

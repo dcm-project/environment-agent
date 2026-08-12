@@ -48,7 +48,7 @@ type ProcessorDeps struct {
 	JSProvider          JSProvider
 	DenyList            *routing.ResourceSet
 	ClaimedResourcesSet *routing.ResourceSet // nil-safe; shared with Router for REQ-RTE-180
-	InFlightSet         *routing.ResourceSet // nil-safe; shared with Router, blocks concurrent double-dispatch (F13)
+	InFlightSet         *routing.KeyLock     // nil-safe; shared with Router, blocks concurrent double-dispatch (F13)
 	Config              ProcessorConfig
 	Logger              *slog.Logger
 	AgentName           string

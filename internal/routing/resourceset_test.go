@@ -1,8 +1,6 @@
 package routing_test
 
 import (
-	"fmt"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -68,21 +66,6 @@ var _ = Describe("ResourceSet", Label("unit"), func() {
 			Expect(dl.Contains("res-002")).To(BeFalse())
 			Expect(dl.Contains("res-003")).To(BeTrue())
 			Expect(dl.Contains("res-004")).To(BeTrue())
-		})
-	})
-
-	Describe("Unbounded set never evicts", func() {
-		BeforeEach(func() {
-			dl = routing.NewUnboundedResourceSet()
-		})
-
-		It("retains all entries regardless of insertion count (UT-RTE-050)", func() {
-			for i := 0; i < 5000; i++ {
-				dl.Add(fmt.Sprintf("res-%d", i))
-			}
-			Expect(dl.Contains("res-0")).To(BeTrue())
-			Expect(dl.Contains("res-4999")).To(BeTrue())
-			Expect(dl.Len()).To(Equal(5000))
 		})
 	})
 })

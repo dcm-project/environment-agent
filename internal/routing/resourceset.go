@@ -5,22 +5,19 @@ import (
 	"sync"
 )
 
-// ResourceSet is a concurrent set of resource IDs. By default it is
-// LRU-evicting (bounded); see NewUnboundedResourceSet for the non-evicting
-// variant.
+// ResourceSet is a concurrent, bounded, LRU-evicting set of resource IDs.
+// Only appropriate for ledgers that can tolerate graceful degradation under
+// eviction (e.g. a cancel-rejection ledger); never use this for a mutual-
+// exclusion lock — see KeyLock for that.
 type ResourceSet struct {
-	maxSize   int
-	unbounded bool
-	mu        sync.Mutex
-	items     map[string]*list.Element
-	order     *list.List
+	maxSize int
+	mu      sync.Mutex
+	items   map[string]*list.Element
+	order   *list.List
 }
 
 // NewResourceSet creates an LRU-evicting resource set with the given maximum
 // capacity. If maxSize <= 0, it defaults to 1 to guarantee safe LRU operation.
-// Only appropriate for ledgers that can tolerate graceful degradation under
-// eviction (e.g. a cancel-rejection ledger); never use this for a mutual-
-// exclusion lock — see NewUnboundedResourceSet.
 func NewResourceSet(maxSize int) *ResourceSet {
 	if maxSize <= 0 {
 		maxSize = 1
@@ -29,21 +26,6 @@ func NewResourceSet(maxSize int) *ResourceSet {
 		maxSize: maxSize,
 		items:   make(map[string]*list.Element),
 		order:   list.New(),
-	}
-}
-
-// NewUnboundedResourceSet creates a resource set that never evicts entries.
-// Required for mutual-exclusion use cases (e.g. the transient in-flight
-// forward lock, F13) where entries are always explicitly removed by the
-// holder and eviction would silently release a lock still in use, allowing
-// double-dispatch. Safe to leave unbounded because such sets are naturally
-// bounded by the number of concurrently in-progress operations, not by total
-// resource cardinality.
-func NewUnboundedResourceSet() *ResourceSet {
-	return &ResourceSet{
-		unbounded: true,
-		items:     make(map[string]*list.Element),
-		order:     list.New(),
 	}
 }
 
@@ -69,7 +51,7 @@ func (d *ResourceSet) insert(resourceID string) bool {
 		d.order.MoveToFront(elem)
 		return false
 	}
-	if !d.unbounded && len(d.items) >= d.maxSize {
+	if len(d.items) >= d.maxSize {
 		back := d.order.Back()
 		d.order.Remove(back)
 		delete(d.items, back.Value.(string))
