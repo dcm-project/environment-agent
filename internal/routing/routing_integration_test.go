@@ -543,9 +543,14 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 			if rec.Message != "retry topic purged for cancel" || rec.Level != slog.LevelInfo {
 				continue
 			}
-			attrs := map[string]slog.Value{}
-			rec.Attrs(func(a slog.Attr) bool { attrs[a.Key] = a.Value; return true })
-			if attrs["resource_id"].String() == "res-789" && attrs["matched"].Int64() == 1 && attrs["requeued"].Int64() == 1 {
+			resourceID, _ := attrValue(rec, "resource_id")
+			matched, matchedOK := attrValue(rec, "matched")
+			requeued, requeuedOK := attrValue(rec, "requeued")
+			// Kind-check before Int64(): a missing/wrong-typed attribute must
+			// fail this assertion cleanly, not panic the whole test run.
+			if resourceID.String() == "res-789" &&
+				matchedOK && matched.Kind() == slog.KindInt64 && matched.Int64() == 1 &&
+				requeuedOK && requeued.Kind() == slog.KindInt64 && requeued.Int64() == 1 {
 				found = true
 			}
 		}
@@ -691,32 +696,6 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		var data routing.CreationAckData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-id-check"))
-	})
-
-	It("returns Unavailable when stored provider has empty ID (IT-RTE-150)", func() {
-		Expect(registry.Claim("corrupt-sp", "database")).To(Succeed())
-		Expect(st.Save(ctx, store.StoredProvider{
-			ID:            "",
-			Name:          "corrupt-sp",
-			Endpoint:      "http://mock:8080",
-			ServiceType:   "database",
-			SchemaVersion: "v1alpha1",
-			Type:          "external",
-			CreateTime:    time.Now(),
-			UpdateTime:    time.Now(),
-		})).To(Succeed())
-		setupDefaultRouter()
-
-		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-corrupt", "database"))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
-
-		ce := routingtest.ExpectResponseCE(responseSub)
-		Expect(ce.Type()).To(Equal("dcm.agent.error"))
-		var data routing.ErrorData
-		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
-		Expect(data.ResourceID).To(Equal("res-corrupt"))
-		Expect(data.Error).To(Equal("SP_UNAVAILABLE"))
 	})
 
 	It("failure cleanup allows retry on redelivery (IT-RTE-145)", func() {

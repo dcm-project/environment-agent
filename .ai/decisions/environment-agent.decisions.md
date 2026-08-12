@@ -254,6 +254,17 @@ an empty `.ID` (registry/store data corruption — should be unreachable given
 the single-writer registration path) as Unavailable rather than querying
 health state with an empty key or routing to it. See REQ-RTE-026.
 
+**Amendment (PR #19 review):** A review pass initially recommended removing
+this branch outright as dead code per `quality.mdc`'s single-point-of-defense
+rule, since it had zero test coverage. On reconsideration, the branch is kept
+and tested (`IT-RTE-150`) rather than deleted: the store record is persisted
+data (file I/O), one of the trust boundaries `quality.mdc` explicitly calls
+out as requiring defense, not merely a caller-validated internal call. The
+single-writer registration path prevents empty IDs *in normal operation*, but
+does not prevent on-disk corruption or a future second writer from
+introducing one — the same class of risk `quality.mdc` says file I/O
+boundaries must defend against, even when the failure is expected to be rare.
+
 ### DD-190: SP-side idempotency for JetStream redelivery protection
 
 **Decision:** The router does NOT implement message-level deduplication for

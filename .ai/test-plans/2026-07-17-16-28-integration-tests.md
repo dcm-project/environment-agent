@@ -1929,13 +1929,16 @@ Unless overridden, tests use:
 
 ### IT-RCM-095: Retry-topic Nak-in-place increments JetStream delivery count
 
-- **Validates AC:** AC-RTE-080
+- **Validates AC:** AC-RCM-080 (the retry-subject consumer's no-`MaxDeliver` config, asserted by
+  IT-RCM-090, is only safe because Nak-in-place actually preserves delivery count instead of
+  resetting it — this test proves that underlying, load-bearing behavior; see DD-410)
 - **Test Infrastructure:** Real JetStream retry stream/consumer; the production retry-fetch path (not a fake consumer)
 - **Given** a create request for a resourceId is published to the real retry-topic stream
 - **And** it is fetched once through the retry-topic consumer (delivery count == 1)
 - **When** the fetched message is Nak'd in place (not acked-and-republished) and redelivered
 - **Then** the redelivered message MUST report delivery count == 2, not reset to 1
-- **And** the message MUST be the same retry-topic message (not a duplicate republished copy)
+- **And** the message MUST be the same retry-topic message (same stream sequence number), not a
+  duplicate republished copy
 
 ---
 
@@ -2328,7 +2331,7 @@ Unless overridden, tests use:
 | AC-RCM-050 | IT-RCM-060 |
 | AC-RCM-060 | IT-RCM-070 |
 | AC-RCM-070 | IT-RCM-080 |
-| AC-RCM-080 | IT-RCM-090 |
+| AC-RCM-080 | IT-RCM-090, IT-RCM-095 |
 | AC-RCM-090 | IT-RCM-100, IT-RCM-115 |
 | AC-RCM-100 | IT-RCM-110 |
 | AC-RCM-110 | IT-RCM-120 |

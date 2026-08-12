@@ -21,10 +21,10 @@ import (
 )
 
 // Verifies the real-JetStream property a fake-consumer test cannot: that
-// FetchRetryMessages' NakFunc (Nak-in-place, per AC-RTE-080) actually causes
-// real redelivery with an incrementing NumDelivered, rather than losing the
-// message or resetting it to a fresh delivery. This is the load-bearing
-// assumption behind DD-410's decision not to cap the retry-subject
+// FetchRetryMessages' NakFunc (Nak-in-place) actually causes real redelivery
+// with an incrementing NumDelivered, rather than losing the message or
+// resetting it to a fresh delivery. This is the load-bearing assumption
+// behind DD-410/AC-RCM-080's decision not to cap the retry-subject
 // consumer's MaxDeliver.
 var _ = Describe("Retry-Topic Nak-In-Place Semantics", Label("integration"), func() {
 	var (
@@ -113,7 +113,12 @@ var _ = Describe("Retry-Topic Nak-In-Place Semantics", Label("integration"), fun
 		Expect(err).NotTo(HaveOccurred())
 		Expect(meta.NumDelivered).To(Equal(uint64(2)),
 			"Nak-in-place must increment delivery count, not reset it to 1 (DD-410's load-bearing assumption)")
-		Expect(redelivered.Data()).To(Equal(ceBytes), "redelivery must be the same message, not a republished duplicate")
+		// Byte-equality alone would also pass for an ack+republish of an
+		// identical CE; stream sequence 1 (this test's only-ever Publish
+		// call) proves it's literally the same JetStream message, not a
+		// same-content duplicate.
+		Expect(meta.Sequence.Stream).To(Equal(uint64(1)), "redelivery must be the same JetStream message, not a republished duplicate")
+		Expect(redelivered.Data()).To(Equal(ceBytes), "redelivery must carry the original, unmodified CE bytes")
 
 		Expect(redelivered.Ack()).To(Succeed())
 	})

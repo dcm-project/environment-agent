@@ -900,6 +900,7 @@ Out of scope: Metrics/observability integration.
 
 ##### AC-HMN-110: Pod conditions non-fatal when unavailable
 
+- **Status:** Deferred — unimplemented in v1alpha1, see DD-270
 - **Validates:** REQ-HMN-270
 - **Given** the agent runs outside Kubernetes or lacks RBAC permissions
 - **When** a pod condition update fails
