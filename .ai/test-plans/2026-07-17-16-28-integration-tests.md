@@ -1210,6 +1210,22 @@ Unless overridden, tests use:
 
 ---
 
+### IT-MSG-011: Dotted topic name fails startup fast, not via indefinite JetStream retry
+
+- **Validates AC:** AC-MSG-011
+- **Test Infrastructure:** No real NATS server needed — the failure is a startup-time validation
+  error raised before any messaging connection is attempted; `AGENT_NAME="agent-prod.1"`
+- **Given** the agent is configured with a base name containing a dot
+- **When** the agent starts (`run(ctx)`)
+- **Then** `run` MUST return a non-zero exit code within ~2s
+- **And** it MUST NOT ever reach `createRequestConsumer`'s 30s startup retry loop (REQ-MSG-051),
+  which is what happened before `ValidateJetStreamSafeName` was wired into `setupMessaging` — the
+  agent would pass `ValidateTopicName` (dots are valid subject tokens) and then hang, retrying
+  stream/consumer creation forever without ever succeeding, since NATS rejects dots in
+  stream/consumer names regardless of how long it retries
+
+---
+
 ### IT-MSG-020: Durable consumer creation on first start
 
 - **Validates AC:** AC-MSG-015
@@ -2295,6 +2311,7 @@ Unless overridden, tests use:
 | AC-DCM-100 | IT-DCM-160 |
 | AC-DCM-105 | IT-DCM-170 |
 | AC-MSG-010 | IT-MSG-010 |
+| AC-MSG-011 | IT-MSG-011 |
 | AC-MSG-015 | IT-MSG-020 |
 | AC-MSG-016 | IT-MSG-030 |
 | AC-MSG-018 | IT-MSG-040 |

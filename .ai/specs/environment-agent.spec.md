@@ -1283,7 +1283,8 @@ REQ-MSG-051).
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| REQ-MSG-010 | The agent MUST derive a deterministic **base name** at startup: the value of `AGENT_TOPIC_NAME` if set, otherwise `AGENT_NAME`. The base name MUST conform to NATS subject token rules (alphanumeric, hyphens, dots, underscores; no spaces or wildcards; max 255 characters) and MUST NOT already start with the reserved `dcm.agent.` prefix. The control-plane-facing **main subject** MUST be `dcm.agent.{base}` | MUST | Prefix `dcm.agent.` is a static constant, not user input; rejecting a pre-prefixed base avoids double-prefixing and prevents the agent-owned retry subject from landing inside the CP's `dcm.agent.>` wildcard |
+| REQ-MSG-010 | The agent MUST derive a deterministic **base name** at startup: the value of `AGENT_TOPIC_NAME` if set, otherwise `AGENT_NAME`. The base name MUST conform to NATS subject token rules (alphanumeric, hyphens, dots, underscores; no spaces or wildcards; max 255 characters) and MUST NOT already start with the reserved `dcm.agent.` prefix. The control-plane-facing **main subject** MUST be `dcm.agent.{base}` | MUST | Prefix `dcm.agent.` is a static constant, not user input; rejecting a pre-prefixed base avoids double-prefixing and prevents the agent-owned retry subject from landing inside the CP's `dcm.agent.>` wildcard. See REQ-MSG-011 for an additional constraint on dots specifically |
+| REQ-MSG-011 | In addition to REQ-MSG-010, the base name MUST NOT contain dots (`.`). Dots are valid in NATS *subject* tokens, but the base name is also used to derive JetStream *stream and durable-consumer* names (REQ-MSG-020, REQ-MSG-047), and the NATS client rejects dots there. The agent MUST validate this at startup and fail fast with a clear error, rather than retrying stream/consumer creation indefinitely per REQ-MSG-051 without ever succeeding | MUST | Discovered via review: a base name with a dot passes REQ-MSG-010's subject-token check but breaks stream/consumer name derivation client-side (`nats.go`'s `validateStreamName`/`validateConsumerName`), which the agent would otherwise only discover as an unbounded retry loop at startup |
 | REQ-MSG-020 | The agent MUST create an agent-owned retry stream at startup backing subject `{base}.retry` (stream name `{base}-retry`) | MUST | Never published to by the control plane |
 | REQ-MSG-030 | The agent MUST derive the control-plane-facing **cancel subject** as `dcm.agent.{base}.cancel` | MUST | Part of the `dcm.agent.>` wildcard; consumed via durable consumer on `dcm-agent-requests`, not an agent-owned stream |
 | REQ-MSG-040 | If agent-owned streams or CP-stream durable consumers already exist, the agent MUST reuse them (`CreateOrUpdateStream` / `CreateOrUpdateConsumer`) | MUST | |
@@ -1348,6 +1349,15 @@ REQ-MSG-051).
 - **Then** it MUST NOT create a stream on `dcm.agent.agent-prod-1` or `dcm.agents.responses`
 - **And** it MUST create durable consumers on `dcm-agent-requests` filtered to `dcm.agent.agent-prod-1` and `dcm.agent.agent-prod-1.cancel`
 - **And** it MUST create (or reuse) agent-owned retry stream `agent-prod-1-retry` backing subject `agent-prod-1.retry`
+
+##### AC-MSG-011: Base name with a dot fails startup fast
+
+- **Validates:** REQ-MSG-011
+- **Given** the agent is configured with a base name containing a dot (e.g. `AGENT_TOPIC_NAME="agent-prod.1"`)
+- **When** the agent starts
+- **Then** the agent MUST fail startup immediately with a clear validation error
+- **And** it MUST NOT attempt to create the derived JetStream stream/consumer names, which would
+  otherwise retry indefinitely per REQ-MSG-051 without ever succeeding
 
 ##### AC-MSG-020: Stream and consumer reuse on restart
 

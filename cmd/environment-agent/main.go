@@ -265,6 +265,12 @@ func setupMessaging(cfg *config.Config, logger *slog.Logger) (*messaging.Client,
 	if err := messaging.ValidateTopicName(topics.Base); err != nil {
 		return nil, messaging.TopicNames{}, fmt.Errorf("invalid topic name: %w", err)
 	}
+	// Base is also used to derive JetStream stream/consumer names below
+	// (via messaging.NewClient), which have stricter naming rules than
+	// subjects — see REQ-MSG-011.
+	if err := messaging.ValidateJetStreamSafeName(topics.Base); err != nil {
+		return nil, messaging.TopicNames{}, fmt.Errorf("invalid topic name: %w", err)
+	}
 	// TopicName is the raw override (or empty), not the derived/prefixed Main
 	// subject — messaging.NewClient calls DeriveTopicNames itself, so passing
 	// the already-prefixed value here would double-prefix it.

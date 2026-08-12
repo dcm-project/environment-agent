@@ -60,5 +60,28 @@ var _ = Describe("ValidateTopicName", Label("unit"), func() {
 		Entry("rejects leading dot (UT-MSG-044)", ".agent-prod", "empty dot-separated tokens"),
 		Entry("rejects trailing dot (UT-MSG-045)", "agent-prod.", "empty dot-separated tokens"),
 		Entry("rejects consecutive dots (UT-MSG-046)", "agent..prod", "empty dot-separated tokens"),
+		Entry("rejects bare dot (UT-MSG-047)", ".", "empty dot-separated tokens"),
+		Entry("rejects double dot (UT-MSG-048)", "..", "empty dot-separated tokens"),
+	)
+})
+
+// ValidateJetStreamSafeName guards a constraint ValidateTopicName
+// deliberately does not: dots are valid subject tokens (UT-MSG-034) but
+// invalid in JetStream stream/consumer names, which are derived from the
+// same Base (REQ-MSG-011). See topics.go's MainConsumer/CancelConsumer/
+// RetryStream/RetryConsumer.
+var _ = Describe("ValidateJetStreamSafeName", Label("unit"), func() {
+	DescribeTable("rejects dots even though ValidateTopicName allows them",
+		func(name, errSubstring string) {
+			err := messaging.ValidateJetStreamSafeName(name)
+			if errSubstring == "" {
+				Expect(err).NotTo(HaveOccurred())
+			} else {
+				Expect(err).To(MatchError(ContainSubstring(errSubstring)))
+			}
+		},
+		Entry("rejects a name with a dot (UT-MSG-110)", "agent-prod.1", "must not contain dots"),
+		Entry("rejects a name that is only a dot (UT-MSG-111)", ".", "must not contain dots"),
+		Entry("accepts hyphens and underscores without dots (UT-MSG-112)", "agent-prod_1", ""),
 	)
 })

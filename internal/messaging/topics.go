@@ -107,3 +107,20 @@ func ValidateTopicName(name string) error {
 	}
 	return nil
 }
+
+// ValidateJetStreamSafeName additionally validates that name is safe to use
+// when deriving JetStream stream and durable-consumer names (MainConsumer,
+// CancelConsumer, RetryStream, RetryConsumer — see REQ-MSG-011). Unlike
+// subject tokens, which ValidateTopicName alone governs and which legally
+// allow dots, NATS JetStream stream/consumer names reject dots outright
+// (nats.go's validateStreamName/validateConsumerName reject any of
+// ">*. /\t\r\n"; ValidateTopicName's character whitelist already excludes
+// every other forbidden character, so only dots need checking here). Callers
+// deriving stream/consumer names from a Base must call this in addition to,
+// not instead of, ValidateTopicName.
+func ValidateJetStreamSafeName(name string) error {
+	if strings.Contains(name, ".") {
+		return errors.New("topic name must not contain dots (NATS JetStream stream/consumer names forbid dots, even though subject tokens allow them)")
+	}
+	return nil
+}
