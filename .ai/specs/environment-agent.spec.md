@@ -889,6 +889,7 @@ Out of scope: Metrics/observability integration.
 
 ##### AC-HMN-100: Pod conditions updated on state change
 
+- **Status:** Deferred — unimplemented in v1alpha1, see DD-270
 - **Validates:** REQ-HMN-190, REQ-HMN-210, REQ-HMN-260, REQ-HMN-220, REQ-HMN-200, REQ-HMN-230
 - **Given** the agent runs on Kubernetes with `AGENT_POD_CONDITIONS_ENABLED=true`
 - **And** SP "db-provider" transitions from Ready to Unhealthy
@@ -980,6 +981,7 @@ Out of scope: Metrics/observability integration.
 
 ##### AC-HMN-120: Pod Readiness Gates used for conditions
 
+- **Status:** Deferred — unimplemented in v1alpha1, see DD-270
 - **Validates:** REQ-HMN-240, REQ-HMN-250
 - **Given** the agent runs on Kubernetes with `AGENT_POD_CONDITIONS_ENABLED=true`
 - **When** an SP health state changes
@@ -1049,7 +1051,7 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
 | REQ-DCM-140 | After successful registration, the agent MUST send periodic heartbeats to DCM via `PUT /api/v1alpha1/agents/{agentId}/heartbeat` | MUST | |
-| REQ-DCM-150 | The heartbeat payload MUST include `timestamp` (ISO 8601) and `consumer_lag` (number of unacknowledged messages on the main topic's durable consumer, excluding retry and cancel topics). `timestamp` MUST be strictly greater than the previous heartbeat's `timestamp` | MUST | Generated fresh via `time.Now()` on every send; DCM rejects a heartbeat whose timestamp isn't strictly increasing (control-plane review item #8) |
+| REQ-DCM-150 | The heartbeat payload MUST include `timestamp` (ISO 8601) and `consumer_lag`: the total count of messages on the main topic's durable consumer that have not yet been acknowledged, counting both messages still queued for delivery to that consumer and messages already delivered to it but not yet acknowledged — excluding the retry and cancel topics entirely. `timestamp` MUST be strictly greater than the previous heartbeat's `timestamp` | MUST | Generated fresh via `time.Now()` on every send; DCM rejects a heartbeat whose timestamp isn't strictly increasing (control-plane review item #8) |
 | REQ-DCM-160 | The heartbeat interval MUST be configurable | MUST | |
 | REQ-DCM-170 | Heartbeat failures MUST be logged and retried on the next interval without causing the agent to exit | MUST | |
 | REQ-DCM-180 | DCM registrar startup MUST be logged at INFO. Successful heartbeats MUST be logged at DEBUG with `agent_id`, `consumer_lag`. Successful re-registration MUST be logged at INFO with `agent_id` | MUST | Today only failures/retries are logged on these three paths; success was silent |
@@ -2259,7 +2261,7 @@ All configuration is loadable from environment variables. Configuration files ar
 | health.checkInterval | AGENT_HEALTH_CHECK_INTERVAL | 10s | No | 1s | 5m | duration | 5 |
 | health.checkTimeout | AGENT_HEALTH_CHECK_TIMEOUT | 5s | No | 500ms | health.checkInterval | duration | 5 |
 | health.failureThreshold | AGENT_HEALTH_FAILURE_THRESHOLD | 3 | No | 1 | 100 | integer | 5 |
-| health.podConditionsEnabled | AGENT_POD_CONDITIONS_ENABLED | auto | No | - | - | - | 5 |
+| health.podConditionsEnabled\* | AGENT_POD_CONDITIONS_ENABLED | auto | No | - | - | - | 5 |
 | agent.name | AGENT_NAME | - | Yes | - | - | - | 6 |
 | agent.environment | AGENT_ENVIRONMENT | - | Yes | - | - | - | 6 |
 | agent.cost | AGENT_COST | - | Yes | - | - | - | 6 |
@@ -2275,6 +2277,10 @@ All configuration is loadable from environment variables. Configuration files ar
 | routing.denyListMaxSize | AGENT_DENY_LIST_MAX_SIZE | 100000 | No | 1000 | 10000000 | integer | 8 |
 | messaging.maxDeliver | AGENT_MESSAGING_MAX_DELIVER | 10 | No | 1 | 100 | integer | 9 |
 | routing.handlerTimeout | AGENT_ROUTING_HANDLER_TIMEOUT | 60s | No | 1s | 10m | duration | 9 |
+
+\* `health.podConditionsEnabled` is parsed and validated but never read past
+config loading — pod-condition updates are unimplemented in v1alpha1. See
+DD-270.
 
 ---
 
@@ -2315,15 +2321,15 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
 |--------|-------|-------|
 | REQ-HTTP-NNN | 4.1: HTTP Server | 12 |
 | REQ-HLT-NNN | 4.2: Health Service | 7 |
-| REQ-SPR-NNN | 4.3: SP Registration & Management | 26 |
+| REQ-SPR-NNN | 4.3: SP Registration & Management | 31 |
 | REQ-STS-NNN | 4.4: Provider Query Endpoints | 7 |
-| REQ-HMN-NNN | 4.5: SP Health Monitoring | 31 |
-| REQ-DCM-NNN | 4.6: DCM Registration & Heartbeat | 18 |
-| REQ-MSG-NNN | 4.7: Messaging System Integration | 24 |
+| REQ-HMN-NNN | 4.5: SP Health Monitoring | 33 |
+| REQ-DCM-NNN | 4.6: DCM Registration & Heartbeat | 19 |
+| REQ-MSG-NNN | 4.7: Messaging System Integration | 27 |
 | REQ-RTE-NNN | 4.8: Resource Operation Routing | 28 |
 | REQ-RCM-NNN | 4.9: Retry & Cancel Mechanisms | 26 |
 | REQ-XC-ERR-NNN | 5.1: Error Handling | 4 |
 | REQ-XC-CE-NNN | 5.2: CloudEvent Definitions | 5 |
-| REQ-XC-LOG-NNN | 5.3: Logging | 2 |
+| REQ-XC-LOG-NNN | 5.3: Logging | 3 |
 | REQ-XC-CFG-NNN | 5.4: Configuration Management | 6 |
-| **Total** | | **196** |
+| **Total** | | **208** |
