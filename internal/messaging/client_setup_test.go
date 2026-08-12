@@ -3,7 +3,6 @@ package messaging
 import (
 	"context"
 	"log/slog"
-	"os"
 	"testing"
 	"time"
 
@@ -35,16 +34,10 @@ func TestAttemptSetup_SetupDoneShortCircuits(t *testing.T) {
 // connect) can still succeed. TestAttemptSetup_SetupDoneShortCircuits only
 // covers the already-done short-circuit; this covers actual recovery.
 func TestAttemptSetup_RecoversAfterTransientFailure(t *testing.T) {
-	dir, err := os.MkdirTemp("", "nats-setup-recovery-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-
 	opts := natstest.DefaultTestOptions
 	opts.Port = -1
 	opts.JetStream = true
-	opts.StoreDir = dir
+	opts.StoreDir = t.TempDir()
 	srv := natstest.RunServer(&opts)
 	defer srv.Shutdown()
 
