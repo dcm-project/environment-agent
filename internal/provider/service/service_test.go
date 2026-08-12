@@ -252,13 +252,13 @@ var _ = Describe("toAPI health fallback", Label("unit"), func() {
 var _ = Describe("resolveEmbeddedIdentity", Label("unit"), func() {
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 
-	It("generates new ID and uses now when existing is nil (UT-SPR-100)", func() {
+	It("generates new ID and uses now when existing is nil (UT-SPR-104)", func() {
 		id, ct := resolveEmbeddedIdentity(nil, now)
 		Expect(id).NotTo(BeEmpty())
 		Expect(ct).To(Equal(now))
 	})
 
-	It("generates new ID and uses now when existing is external (UT-SPR-101)", func() {
+	It("generates new ID and uses now when existing is external (UT-SPR-105)", func() {
 		existing := &store.StoredProvider{
 			ID:         "ext-id-123",
 			Type:       string(v1alpha1.External),
@@ -270,7 +270,7 @@ var _ = Describe("resolveEmbeddedIdentity", Label("unit"), func() {
 		Expect(ct).To(Equal(now))
 	})
 
-	It("preserves ID and create_time from existing embedded record (UT-SPR-102)", func() {
+	It("preserves ID and create_time from existing embedded record (UT-SPR-106)", func() {
 		orig := time.Date(2025, 6, 15, 9, 30, 0, 0, time.UTC)
 		existing := &store.StoredProvider{
 			ID:         "emb-stable-id",
@@ -282,7 +282,7 @@ var _ = Describe("resolveEmbeddedIdentity", Label("unit"), func() {
 		Expect(ct).To(Equal(orig))
 	})
 
-	It("generates new ID and uses now when embedded record has empty fields (UT-SPR-103)", func() {
+	It("generates new ID and uses now when embedded record has empty fields (UT-SPR-107)", func() {
 		existing := &store.StoredProvider{
 			ID:   "",
 			Type: string(v1alpha1.Embedded),
@@ -327,7 +327,7 @@ var _ = Describe("removeStaleEmbedded slot-ownership check", Label("unit"), func
 	// slot if it's still held by the stale embedded provider itself,
 	// otherwise it would steal the slot out from under the external
 	// provider (REQ-SPR-200).
-	It("does not release a service-type slot now legitimately held by a different (external) provider", func() {
+	It("does not release a service-type slot now legitimately held by a different (external) provider (UT-SPR-102)", func() {
 		svc := newTestService()
 		ctx := context.Background()
 
@@ -358,7 +358,7 @@ var _ = Describe("removeStaleEmbedded slot-ownership check", Label("unit"), func
 		Expect(stored).To(BeNil(), "the stale embedded record itself must still be deleted from the store")
 	})
 
-	It("releases the slot when it is still held by the stale embedded provider itself", func() {
+	It("releases the slot when it is still held by the stale embedded provider itself (UT-SPR-103)", func() {
 		svc := newTestService()
 		ctx := context.Background()
 
