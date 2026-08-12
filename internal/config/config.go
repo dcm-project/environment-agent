@@ -36,7 +36,11 @@ type RoutingConfig struct {
 	RetryMaxBackoff  time.Duration `env:"ROUTING_RETRY_MAX_BACKOFF" envDefault:"30s"`
 	DenyListMaxSize  int           `env:"DENY_LIST_MAX_SIZE" envDefault:"100000"`
 	HandlerTimeout   time.Duration `env:"ROUTING_HANDLER_TIMEOUT" envDefault:"60s"`
-	NakDelay         time.Duration `env:"ROUTING_NAK_DELAY" envDefault:"500ms"`
+	// CancelHandlerTimeout bounds cancel-message processing (REQ-RCM-180),
+	// mirroring HandlerTimeout's relationship to AckWait but against
+	// CancelAckWait's much shorter default (10s vs AckWait's 120s).
+	CancelHandlerTimeout time.Duration `env:"ROUTING_CANCEL_HANDLER_TIMEOUT" envDefault:"5s"`
+	NakDelay             time.Duration `env:"ROUTING_NAK_DELAY" envDefault:"500ms"`
 }
 
 // HealthConfig holds SP health monitoring configuration.
@@ -238,6 +242,9 @@ func (c *Config) Validate() error {
 	if err := validateDurationRange("AGENT_ROUTING_HANDLER_TIMEOUT", c.Routing.HandlerTimeout, time.Second, 10*time.Minute); err != nil {
 		return err
 	}
+	if err := validateDurationRange("AGENT_ROUTING_CANCEL_HANDLER_TIMEOUT", c.Routing.CancelHandlerTimeout, 500*time.Millisecond, time.Minute); err != nil {
+		return err
+	}
 	if err := validateDurationRange("AGENT_ROUTING_NAK_DELAY", c.Routing.NakDelay, 100*time.Millisecond, 30*time.Second); err != nil {
 		return err
 	}
@@ -251,6 +258,15 @@ func (c *Config) Validate() error {
 func (c *Config) ValidateHandlerAckWaitInvariant() error {
 	if c.Routing.HandlerTimeout >= c.Messaging.AckWait {
 		return fmt.Errorf("AGENT_ROUTING_HANDLER_TIMEOUT (%v) must be less than AGENT_MESSAGING_ACK_WAIT (%v) to prevent redelivery during handling", c.Routing.HandlerTimeout, c.Messaging.AckWait)
+	}
+	return nil
+}
+
+// ValidateCancelHandlerAckWaitInvariant checks that CancelHandlerTimeout <
+// CancelAckWait — the cancel-topic analog of ValidateHandlerAckWaitInvariant.
+func (c *Config) ValidateCancelHandlerAckWaitInvariant() error {
+	if c.Routing.CancelHandlerTimeout >= c.Messaging.CancelAckWait {
+		return fmt.Errorf("AGENT_ROUTING_CANCEL_HANDLER_TIMEOUT (%v) must be less than AGENT_MESSAGING_CANCEL_ACK_WAIT (%v) to prevent redelivery during handling", c.Routing.CancelHandlerTimeout, c.Messaging.CancelAckWait)
 	}
 	return nil
 }

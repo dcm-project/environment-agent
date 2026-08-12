@@ -66,7 +66,12 @@ type ClientConfig struct {
 	CancelAckWait  time.Duration
 	MaxDeliver     int
 	HandlerTimeout time.Duration
-	NakDelay       time.Duration
+	// CancelHandlerTimeout bounds cancelHandler's execution the same way
+	// HandlerTimeout bounds mainHandler's, so a hung downstream call (e.g.
+	// FetchRetryMessages/publish during cancel processing) can't block the
+	// cancel consumer indefinitely (REQ-RCM-180).
+	CancelHandlerTimeout time.Duration
+	NakDelay             time.Duration
 	// ReconnectInitialBackoff/ReconnectMaxBackoff bound the exponential
 	// backoff-with-jitter formula used between NATS reconnect attempts —
 	// same formula as REQ-DCM-050 (min(initial×2^attempt, max) with full
@@ -200,7 +205,8 @@ func (c *Client) Start(_ context.Context) error {
 
 	if conn.IsConnected() {
 		c.connected.Store(true)
-		c.doSetup(setupCtx, conn)
+		// Goroutine: doSetup can block up to requestStreamRetryTimeout; Start must stay non-blocking (REQ-MSG-110).
+		go c.doSetup(setupCtx, conn)
 	}
 
 	return nil
@@ -555,6 +561,30 @@ func (c *Client) Stop() {
 
 // IsConnected returns the cached connectivity state (no I/O).
 func (c *Client) IsConnected() bool { return c.connected.Load() }
+
+// WaitUntilReady blocks until JetStream setup has completed at least once
+// (c.js populated) or ctx is done, whichever comes first. Returns whether
+// setup was observed ready. Since Start is non-blocking (AC-MSG-050),
+// callers with setup-dependent work that can't use SetOnSetupReady's
+// fire-once callback (e.g. one-off startup logic that must run before,
+// not from within, that callback) can use this to bound their own wait.
+func (c *Client) WaitUntilReady(ctx context.Context) bool {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		c.mu.Lock()
+		ready := c.js != nil
+		c.mu.Unlock()
+		if ready {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+}
 
 // consumerLagInfoTimeout bounds the live JetStream round-trip ConsumerLag
 // makes to fetch current consumer state. CachedInfo() is not used here

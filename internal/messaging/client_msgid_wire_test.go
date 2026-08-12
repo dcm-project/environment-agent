@@ -69,7 +69,12 @@ var _ = Describe("PublishWithMsgID wire-level behavior", Label("integration"), f
 
 	It("sets the wire-level Nats-Msg-Id header to the caller's msgID (IT-MSG-160)", func() {
 		msgID := "wire-msg-id-" + uuid.New().String()
-		Expect(client.PublishWithMsgID(ctx, subject, msgID, []byte(`{"hello":"world"}`))).To(Succeed())
+		// Start is non-blocking (AC-MSG-050): retry until doSetup has
+		// populated the client's jetstream handle. Failed attempts return
+		// before reaching the server, so no duplicate publish occurs.
+		Eventually(func() error {
+			return client.PublishWithMsgID(ctx, subject, msgID, []byte(`{"hello":"world"}`))
+		}, 5*time.Second).Should(Succeed())
 
 		cons, err := testJS.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
 			AckPolicy: jetstream.AckNonePolicy,
@@ -90,7 +95,9 @@ var _ = Describe("PublishWithMsgID wire-level behavior", Label("integration"), f
 	It("lets JetStream's server-side dedup drop a second publish with the same Nats-Msg-Id (IT-MSG-161)", func() {
 		msgID := "dedup-msg-id-" + uuid.New().String()
 
-		Expect(client.PublishWithMsgID(ctx, subject, msgID, []byte(`{"attempt":1}`))).To(Succeed())
+		Eventually(func() error {
+			return client.PublishWithMsgID(ctx, subject, msgID, []byte(`{"attempt":1}`))
+		}, 5*time.Second).Should(Succeed())
 		Expect(client.PublishWithMsgID(ctx, subject, msgID, []byte(`{"attempt":2}`))).To(Succeed())
 
 		stream, err := testJS.Stream(ctx, streamName)

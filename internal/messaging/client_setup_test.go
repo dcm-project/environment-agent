@@ -91,6 +91,74 @@ func TestAttemptSetup_RecoversAfterTransientFailure(t *testing.T) {
 	}
 }
 
+// TestStart_DoesNotBlockOnSynchronousConnect: doSetup must run in a
+// goroutine even on the already-connected path (REQ-MSG-110). (UT-MSG-120)
+func TestStart_DoesNotBlockOnSynchronousConnect(t *testing.T) {
+	opts := natstest.DefaultTestOptions
+	opts.Port = -1
+	opts.JetStream = true
+	opts.StoreDir = t.TempDir()
+	srv := natstest.RunServer(&opts)
+	defer srv.Shutdown()
+
+	// No RequestStreamName created: createRequestConsumer retries every
+	// requestStreamRetryInterval, which would block a synchronous doSetup.
+	c := NewClient(ClientConfig{URL: srv.ClientURL(), AgentName: "test-agent", TopicName: "start-nonblocking-topic"}, slog.Default())
+	c.SetMainHandler(func(context.Context, []byte) error { return nil })
+	c.SetCancelHandler(func(context.Context, []byte) error { return nil })
+	defer c.Stop()
+
+	started := time.Now()
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	elapsed := time.Since(started)
+	if elapsed >= requestStreamRetryInterval {
+		t.Fatalf("Start blocked for %v (>= requestStreamRetryInterval=%v) — doSetup must run in "+
+			"a goroutine on the synchronous-connect path, not inline", elapsed, requestStreamRetryInterval)
+	}
+}
+
+// TestWaitUntilReady: returns false if ctx is done first, true once c.js
+// is set (even if set concurrently, after polling starts). (UT-MSG-122)
+func TestWaitUntilReady(t *testing.T) {
+	opts := natstest.DefaultTestOptions
+	opts.Port = -1
+	opts.JetStream = true
+	opts.StoreDir = t.TempDir()
+	srv := natstest.RunServer(&opts)
+	defer srv.Shutdown()
+
+	conn, err := nats.Connect(srv.ClientURL())
+	if err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+	defer conn.Close()
+	js, err := jetstream.New(conn)
+	if err != nil {
+		t.Fatalf("failed to create jetstream context: %v", err)
+	}
+
+	c := NewClient(ClientConfig{AgentName: "test-agent", TopicName: "t"}, slog.Default())
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if c.WaitUntilReady(ctx) {
+		t.Fatal("WaitUntilReady must return false when ctx is done before js is ever set")
+	}
+
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		c.mu.Lock()
+		c.js = js
+		c.mu.Unlock()
+	}()
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer readyCancel()
+	if !c.WaitUntilReady(readyCtx) {
+		t.Fatal("WaitUntilReady must return true once js becomes non-nil, even if set after polling starts")
+	}
+}
+
 // TestBeginConsuming_ConsumingFlagShortCircuits complements the above:
 // even if setupStreamsAndConsume were ever re-entered (e.g. a future
 // DeferConsume/StartConsuming race), beginConsuming has its own independent

@@ -187,6 +187,70 @@ var _ = Describe("Topic 8 Messaging AckWait Config", Label("unit"), func() {
 	})
 })
 
+var _ = Describe("Cancel Handler Timeout Config", Label("unit"), func() {
+	Describe("Load", func() {
+		It("parses CancelHandlerTimeout from env", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_ROUTING_CANCEL_HANDLER_TIMEOUT", "2s")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Routing.CancelHandlerTimeout).To(Equal(2 * time.Second))
+		})
+
+		It("defaults CancelHandlerTimeout to 5s", func() {
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Routing.CancelHandlerTimeout).To(Equal(5 * time.Second))
+		})
+	})
+
+	Describe("Validate", func() {
+		It("rejects CancelHandlerTimeout below 500ms", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_ROUTING_CANCEL_HANDLER_TIMEOUT", "100ms")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AGENT_ROUTING_CANCEL_HANDLER_TIMEOUT"))
+		})
+
+		It("rejects CancelHandlerTimeout above 1m", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_ROUTING_CANCEL_HANDLER_TIMEOUT", "2m")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AGENT_ROUTING_CANCEL_HANDLER_TIMEOUT"))
+		})
+	})
+
+	Describe("ValidateCancelHandlerAckWaitInvariant", func() {
+		It("rejects CancelHandlerTimeout >= CancelAckWait", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_ROUTING_CANCEL_HANDLER_TIMEOUT", "10s")
+			GinkgoT().Setenv("AGENT_MESSAGING_CANCEL_ACK_WAIT", "10s")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.ValidateCancelHandlerAckWaitInvariant()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AGENT_ROUTING_CANCEL_HANDLER_TIMEOUT"))
+			Expect(err.Error()).To(ContainSubstring("AGENT_MESSAGING_CANCEL_ACK_WAIT"))
+		})
+
+		It("accepts CancelHandlerTimeout < CancelAckWait", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_ROUTING_CANCEL_HANDLER_TIMEOUT", "5s")
+			GinkgoT().Setenv("AGENT_MESSAGING_CANCEL_ACK_WAIT", "10s")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.ValidateCancelHandlerAckWaitInvariant()).To(Succeed())
+		})
+	})
+})
+
 var _ = Describe("Messaging Reconnect Backoff Config", Label("unit"), func() {
 	Describe("Load", func() {
 		It("parses ReconnectInitialBackoff and ReconnectMaxBackoff from env", func() {

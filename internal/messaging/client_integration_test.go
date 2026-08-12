@@ -75,6 +75,30 @@ func deleteTestArtifacts(js jetstream.JetStream, topics messaging.TopicNames) {
 	_ = js.DeleteStream(ctx, topics.RetryStream())
 }
 
+// waitForConsumer/waitForStream poll for a consumer/stream to exist. Needed
+// because Start is non-blocking (AC-MSG-050): doSetup creates streams and
+// consumers asynchronously, so they aren't guaranteed to exist the instant
+// Start returns.
+func waitForConsumer(ctx context.Context, js jetstream.JetStream, stream, name string) jetstream.Consumer {
+	var cons jetstream.Consumer
+	Eventually(func() error {
+		var err error
+		cons, err = js.Consumer(ctx, stream, name)
+		return err
+	}, 5*time.Second).Should(Succeed())
+	return cons
+}
+
+func waitForStream(ctx context.Context, js jetstream.JetStream, name string) jetstream.Stream {
+	var stream jetstream.Stream
+	Eventually(func() error {
+		var err error
+		stream, err = js.Stream(ctx, name)
+		return err
+	}, 5*time.Second).Should(Succeed())
+	return stream
+}
+
 func publishCE(ctx context.Context, js jetstream.JetStream, subject, ceType, source string, payload any) {
 	event := cloudevents.NewEvent()
 	event.SetID(uuid.New().String())
@@ -129,20 +153,17 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 		defer client.Stop()
 
 		// Retry stream is agent-owned.
-		retryStream, err := testJS.Stream(ctx, topics.RetryStream())
-		Expect(err).NotTo(HaveOccurred())
+		retryStream := waitForStream(ctx, testJS, topics.RetryStream())
 		Expect(retryStream.CachedInfo().Config.Subjects).To(ContainElement(topics.Retry))
 
 		// Main/Cancel are durable consumers on the control-plane-owned
 		// RequestStreamName (REQ-MSG-048) — the agent must NOT create streams for them.
-		mainCons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
-		Expect(err).NotTo(HaveOccurred())
+		mainCons := waitForConsumer(ctx, testJS, messaging.RequestStreamName, topics.MainConsumer())
 		mainInfo, err := mainCons.Info(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(mainInfo.Config.FilterSubject).To(Equal(topics.Main))
 
-		cancelCons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.CancelConsumer())
-		Expect(err).NotTo(HaveOccurred())
+		cancelCons := waitForConsumer(ctx, testJS, messaging.RequestStreamName, topics.CancelConsumer())
 		cancelInfo, err := cancelCons.Info(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cancelInfo.Config.FilterSubject).To(Equal(topics.Cancel))
@@ -158,12 +179,9 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
-		_, err := testJS.Consumer(ctx, messaging.RequestStreamName, topicName+"-consumer")
-		Expect(err).NotTo(HaveOccurred())
-		_, err = testJS.Consumer(ctx, messaging.RequestStreamName, topicName+"-cancel-consumer")
-		Expect(err).NotTo(HaveOccurred())
-		_, err = testJS.Consumer(ctx, topics.RetryStream(), topicName+"-retry-consumer")
-		Expect(err).NotTo(HaveOccurred())
+		waitForConsumer(ctx, testJS, messaging.RequestStreamName, topicName+"-consumer")
+		waitForConsumer(ctx, testJS, messaging.RequestStreamName, topicName+"-cancel-consumer")
+		waitForConsumer(ctx, testJS, topics.RetryStream(), topicName+"-retry-consumer")
 	})
 
 	It("reuses existing topics on restart without error (IT-MSG-050)", func() {
@@ -195,8 +213,7 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 		setNoopHandlers(client1)
 		Expect(client1.Start(ctx)).To(Succeed())
 
-		mainCons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
-		Expect(err).NotTo(HaveOccurred())
+		mainCons := waitForConsumer(ctx, testJS, messaging.RequestStreamName, topics.MainConsumer())
 		initialInfo, err := mainCons.Info(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		client1.Stop()
@@ -206,8 +223,7 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 		Expect(client2.Start(ctx)).To(Succeed())
 		defer client2.Stop()
 
-		mainCons, err = testJS.Consumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
-		Expect(err).NotTo(HaveOccurred())
+		mainCons = waitForConsumer(ctx, testJS, messaging.RequestStreamName, topics.MainConsumer())
 		reusedInfo, err := mainCons.Info(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		// Same Created timestamp proves CreateOrUpdateConsumer reused the
@@ -428,8 +444,7 @@ var _ = Describe("Consumer Lag Reporting", Label("integration"), func() {
 		// the split directly (not just the total) so a NumPending-only
 		// implementation can't coincidentally pass by having all 5 undelivered
 		// at check time.
-		mainCons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
-		Expect(err).NotTo(HaveOccurred())
+		mainCons := waitForConsumer(ctx, testJS, messaging.RequestStreamName, topics.MainConsumer())
 		Eventually(func() uint64 {
 			info, infoErr := mainCons.Info(ctx)
 			if infoErr != nil {
@@ -664,10 +679,11 @@ var _ = Describe("Message Consumption", Label("integration"), func() {
 		Expect(client.Start(ctx)).To(Succeed())
 		defer client.Stop()
 
-		// Durable consumers must exist immediately (a restart-drain caller,
-		// e.g. retry.Processor.ProcessOnRestart, needs to Fetch from them)...
-		mainCons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
-		Expect(err).NotTo(HaveOccurred())
+		// Durable consumers must exist eventually (a restart-drain caller,
+		// e.g. retry.Processor.ProcessOnRestart, needs to Fetch from them —
+		// in production this is sequenced via SetOnSetupReady, not by
+		// assuming Start's non-blocking return implies setup is done)...
+		mainCons := waitForConsumer(ctx, testJS, messaging.RequestStreamName, topics.MainConsumer())
 
 		// ...but publishing to main must NOT be picked up by any live
 		// Consume() loop while consumption is deferred: fetch it ourselves

@@ -514,6 +514,39 @@ func TestHandleCancelMessage_SuccessLogsReceiptAndAck(t *testing.T) {
 	assertAttr(t, acked, "resource_id", "res-cancel-ok")
 }
 
+// TestHandleCancelMessage_RespectsCancelHandlerTimeout: cancelHandler must
+// observe a context cancelled once CancelHandlerTimeout elapses. (UT-MSG-130)
+func TestHandleCancelMessage_RespectsCancelHandlerTimeout(t *testing.T) {
+	ctxDone := make(chan struct{})
+	c := &Client{
+		logger: slog.New(&captureHandler{}),
+		cfg:    ClientConfig{CancelHandlerTimeout: 50 * time.Millisecond},
+		cancelHandler: func(ctx context.Context, _ []byte) error {
+			<-ctx.Done()
+			close(ctxDone)
+			return ctx.Err()
+		},
+	}
+	msg := &fakeMsg{
+		data:    buildTestCE("evt-cancel-deadline", cloudevent.TypeRequestCancel),
+		subject: "agent-test.cancel",
+		meta:    &jetstream.MsgMetadata{NumDelivered: 1},
+	}
+
+	handleDone := make(chan struct{})
+	go func() {
+		c.handleCancelMessage(msg)
+		close(handleDone)
+	}()
+
+	select {
+	case <-ctxDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelHandler's context was never cancelled — CancelHandlerTimeout not enforced")
+	}
+	<-handleDone
+}
+
 // fakePublishJetStream is a minimal jetstream.JetStream that only implements
 // Publish, used to exercise publishMaxDeliverError's success/failure logging
 // without a real NATS connection.
@@ -711,6 +744,9 @@ func TestHandleMainMessage_PanicRecovery_NakError(t *testing.T) {
 	assertAttr(t, rec, "nak_error", "nak failed after panic")
 }
 
+// TestHandleCancelMessage_PanicRecovery verifies cancels are Nak'd (not
+// Term'd) on panic, so a transient handler bug redelivers the cancel
+// instead of permanently dropping it. (UT-MSG-121)
 func TestHandleCancelMessage_PanicRecovery(t *testing.T) {
 	ch := &captureHandler{}
 	c := &Client{
@@ -725,11 +761,11 @@ func TestHandleCancelMessage_PanicRecovery(t *testing.T) {
 
 	c.handleCancelMessage(msg)
 
-	if msg.termCount != 1 {
-		t.Errorf("expected 1 Term after panic (cancel has no MaxDeliver), got %d", msg.termCount)
+	if msg.nakCount != 1 {
+		t.Errorf("expected 1 NakWithDelay after cancel panic, got %d", msg.nakCount)
 	}
-	if msg.nakCount != 0 {
-		t.Errorf("expected 0 naks after cancel panic, got %d", msg.nakCount)
+	if msg.termCount != 0 {
+		t.Errorf("expected 0 terms after cancel panic, got %d", msg.termCount)
 	}
 	if msg.ackCount != 0 {
 		t.Errorf("expected 0 acks after cancel panic, got %d", msg.ackCount)
@@ -743,13 +779,12 @@ func TestHandleCancelMessage_PanicRecovery(t *testing.T) {
 	assertAttr(t, rec, "resource_id", "res-panic-cancel")
 	assertAttr(t, rec, "ce_id", "evt-panic-cancel")
 	assertAttr(t, rec, "ce_type", cloudevent.TypeRequestCancel)
-	assertAttrNotExists(t, rec, "term_error")
+	assertAttrNotExists(t, rec, "nak_error")
 }
 
-// TestHandleCancelMessage_PanicRecovery_TermError verifies the term_error
-// attr on the panic log surfaces a real error (not just a nil placeholder)
-// when the Term resolution call issued from the recover path itself fails.
-func TestHandleCancelMessage_PanicRecovery_TermError(t *testing.T) {
+// TestHandleCancelMessage_PanicRecovery_NakError verifies the nak_error attr
+// surfaces a real error when the recover path's own NakWithDelay call fails.
+func TestHandleCancelMessage_PanicRecovery_NakError(t *testing.T) {
 	ch := &captureHandler{}
 	c := &Client{
 		logger:        slog.New(ch),
@@ -757,13 +792,13 @@ func TestHandleCancelMessage_PanicRecovery_TermError(t *testing.T) {
 	}
 
 	msg := &fakeMsg{
-		data:    buildTestCE("evt-panic-cancel-termerr", cloudevent.TypeRequestCancel),
+		data:    buildTestCE("evt-panic-cancel-nakerr", cloudevent.TypeRequestCancel),
 		subject: "agent-test.cancel",
-		termErr: errors.New("term failed after panic"),
+		nakErr:  errors.New("nak failed after panic"),
 	}
 
 	c.handleCancelMessage(msg)
 
 	rec := ch.lastRecord()
-	assertAttr(t, rec, "term_error", "term failed after panic")
+	assertAttr(t, rec, "nak_error", "nak failed after panic")
 }

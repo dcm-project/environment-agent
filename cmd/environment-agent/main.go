@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 	oapigen "github.com/dcm-project/environment-agent/internal/api/server"
@@ -27,6 +28,14 @@ import (
 	"github.com/dcm-project/environment-agent/internal/routing"
 	"github.com/dcm-project/environment-agent/internal/routing/retry"
 )
+
+// registerEmbeddedSetupWait bounds how long RegisterEmbedded waits for
+// JetStream setup before proceeding anyway. Start is non-blocking
+// (AC-MSG-050), so setup may still be in flight when RegisterEmbedded's
+// synchronous initialCheck (DD-290) fires its health CE; this bridges the
+// common case (setup finishes in milliseconds) without reintroducing
+// REQ-MSG-051's much longer CP-stream retry as a startup blocker.
+const registerEmbeddedSetupWait = 3 * time.Second
 
 // serviceTypeLister adapts ProviderService to dcm.ServiceTypeLister.
 type serviceTypeLister struct {
@@ -74,6 +83,10 @@ func run(ctx context.Context) int {
 		return 1
 	}
 	if err := cfg.ValidateHandlerAckWaitInvariant(); err != nil {
+		logger.Error("invalid configuration", "error", err)
+		return 1
+	}
+	if err := cfg.ValidateCancelHandlerAckWaitInvariant(); err != nil {
 		logger.Error("invalid configuration", "error", err)
 		return 1
 	}
@@ -222,6 +235,9 @@ func run(ctx context.Context) int {
 
 	// Now safe to register embedded SPs: any transition their initialCheck
 	// triggers is captured by the callback wired immediately above.
+	readyCtx, readyCancel := context.WithTimeout(ctx, registerEmbeddedSetupWait)
+	msgClient.WaitUntilReady(readyCtx)
+	readyCancel()
 	providerSvc.RegisterEmbedded(cfg.Provider.EmbeddedSPs)
 
 	healthMonitor.Start(ctx)
@@ -282,6 +298,7 @@ func setupMessaging(cfg *config.Config, logger *slog.Logger) (*messaging.Client,
 		CancelAckWait:           cfg.Messaging.CancelAckWait,
 		MaxDeliver:              cfg.Messaging.MaxDeliver,
 		HandlerTimeout:          cfg.Routing.HandlerTimeout,
+		CancelHandlerTimeout:    cfg.Routing.CancelHandlerTimeout,
 		NakDelay:                cfg.Routing.NakDelay,
 		ReconnectInitialBackoff: cfg.Messaging.ReconnectInitialBackoff,
 		ReconnectMaxBackoff:     cfg.Messaging.ReconnectMaxBackoff,

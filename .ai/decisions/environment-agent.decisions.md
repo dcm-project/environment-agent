@@ -832,3 +832,74 @@ the primary `Eventually(healthCh, ...)` assertion, so a failure of that assertio
 lifetime.
 
 **Related requirements:** none (test-infrastructure hygiene only, no behavioral requirement)..
+
+### DD-450: `Start`'s synchronous-connect path now runs `doSetup` in a goroutine (HIGH)
+
+**Decision:** In `messaging.Client.Start`, the `if conn.IsConnected()` branch (taken when
+`nats.Connect` returns already-connected — the common case) now spawns `doSetup` in a goroutine,
+matching the `ConnectHandler`/`ReconnectHandler` branches immediately below it, instead of calling
+it inline.
+
+**Rationale:** `doSetup`'s consumer-creation retry loop (`REQ-MSG-051`) can block for up to
+`requestStreamRetryTimeout` (30s) waiting on the control-plane's request stream. Calling it inline
+on the synchronous-connect path meant `Start` — documented as non-blocking (`AC-MSG-050`) — could
+in practice block the caller for up to 30s whenever NATS was reachable but the CP's stream wasn't
+created yet, directly undermining `REQ-MSG-110` (messaging must not block HTTP server startup)
+since `main.go` calls `Start` before the HTTP listener starts. Verified via
+`TestStart_DoesNotBlockOnSynchronousConnect` (`UT-MSG-120`), which fails against the pre-fix code
+with `Start` blocked for the full 30s and passes in under 50ms with the fix.
+
+**Follow-on fix required:** Making `Start` genuinely non-blocking exposed a latent race in
+`main.go`: `providerSvc.RegisterEmbedded` (and its synchronous `initialCheck`-driven health CE,
+`DD-290`) ran immediately after `Start` returned, previously "protected" only by `Start`'s
+accidental blocking. `messaging.Client.WaitUntilReady(ctx)` was added — a bounded poll for `c.js`
+being populated — and `main.go` now waits on it (3s cap, not tied to the 30s CP-stream retry) right
+before `RegisterEmbedded`, so the common case (JetStream reachable, ready within milliseconds)
+still gets its health CE published, without reintroducing a long block on the rare CP-down case.
+Verified via the existing `IT-SPR-172` (`cmd/environment-agent/main_wiring_test.go`), which
+regressed (health CE lost) when only the `Start` fix was applied, and passes with `WaitUntilReady`
+added.
+
+**Related requirements:** REQ-MSG-051, REQ-MSG-110, AC-MSG-050, AC-RCM-047, DD-290
+
+### DD-460: Cancel-message panic recovery Naks instead of Terms (MEDIUM)
+
+**Decision:** `handleCancelMessage`'s panic-recovery `defer` now calls `msg.NakWithDelay` instead
+of `msg.Term()`, matching `handleMainMessage`'s panic path.
+
+**Rationale:** The cancel consumer has no `MaxDeliver` limit — cancels must never be dropped by
+delivery-count exhaustion (`DD-410`'s rationale applies identically here). `Term()` permanently
+drops a message regardless of delivery count; on a transient handler panic that's the opposite of
+the "cancels are never dropped" invariant. `NakWithDelay` lets it redeliver instead.
+
+**Related requirements:** REQ-RCM-150 (scoping), REQ-MSG-070
+
+### DD-470: `fetchAllFromConsumer` distinguishes genuine `Fetch` errors from expected timeouts (MEDIUM)
+
+**Decision:** `retry.Processor.fetchAllFromConsumer` now returns a top-level `Fetch` error and a
+non-nil `MessageBatch.Error()` to the caller instead of treating either as the expected
+`FetchMaxWait` timeout. Per `nats.go`'s internals, `MessageBatch.Error()` is already nil for the
+expected "timeout"/"no messages" outcome, so any non-nil value is a genuine mid-fetch failure.
+
+**Rationale:** The previous unconditional `break` on any `fetchErr` masked real outages (e.g. a
+connection drop between `cons.Info()` and `cons.Fetch()`) as normal end-of-messages. Every caller
+already propagates a non-nil error correctly. Messages already collected before the error remain
+unacked and will redeliver, so nothing is lost by returning early.
+
+**Related requirements:** REQ-RCM-180 (reliability of the retry/drain path)
+
+### DD-480: `CancelHandlerTimeout` bounds cancel-message processing (MEDIUM)
+
+**Decision:** Added `ClientConfig.CancelHandlerTimeout` (env `AGENT_ROUTING_CANCEL_HANDLER_TIMEOUT`,
+default 5s, range [500ms, 1m]) and `Config.ValidateCancelHandlerAckWaitInvariant`
+(`CancelHandlerTimeout < CancelAckWait`). `handleCancelMessage` now bounds `cancelHandler` with this
+timeout instead of bare `context.Background()`, via a `handlerContext` helper shared with
+`handleMainMessage`.
+
+**Rationale:** `REQ-RCM-180` bounds per-message processing time, but only for main/retry-subject
+messages — cancel-subject had no equivalent bound, despite `HandleCancel` calling
+`FetchRetryMessages` and publishing response CEs, either of which can hang. `HandlerTimeout`
+(60s default) can't be reused: it would violate the new invariant against `CancelAckWait`'s much
+shorter default (10s).
+
+**Related requirements:** REQ-RCM-180

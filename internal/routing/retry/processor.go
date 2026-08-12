@@ -620,18 +620,28 @@ func (p *Processor) fetchAllFromConsumer(ctx context.Context, streamName, consum
 		}
 		batch, fetchErr := cons.Fetch(fetchBatchSize, jetstream.FetchMaxWait(fetchMaxWait))
 		if fetchErr != nil {
-			break
+			// A request-level failure (e.g. subscribe/pull-request send
+			// failed) — never returned for the expected "no more messages"
+			// case, which surfaces via batch.Error() below instead.
+			return collected, fetchErr
 		}
 		count := 0
 		for msg := range batch.Messages() {
 			collected = append(collected, msg)
 			count++
 		}
+		// batch.Error() is nil for the expected FetchMaxWait timeout /
+		// no-messages cases (nats.go filters those internally); a non-nil
+		// value here is a genuine mid-fetch failure that must not be masked
+		// as "done fetching".
+		if batchErr := batch.Error(); batchErr != nil {
+			return collected, batchErr
+		}
 		if count == 0 {
 			break
 		}
 	}
-	return collected, nil //nolint:nilerr // fetchErr from Fetch timeout is expected, not a failure
+	return collected, nil //nolint:nilerr // ctx.Err() above breaks the loop early on caller cancellation/deadline; that's not a fetch failure, so partial results are returned with a nil error
 }
 
 // heartbeatAll resets AckWait on every message in the batch. Called once before

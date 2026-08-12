@@ -19,13 +19,13 @@ func (c *Client) handleCancelMessage(msg jetstream.Msg) {
 	resourceID, ceID, ceType := extractLogFields(msg.Data())
 	defer func() {
 		if r := recover(); r != nil {
-			termErr := msg.Term()
+			nakErr := msg.NakWithDelay(c.nakDelay())
 			attrs := []any{
 				"panic", r, "resource_id", resourceID, "ce_id", ceID, "ce_type", ceType,
 				"subject", msg.Subject(), "stack", string(debug.Stack()),
 			}
-			if termErr != nil {
-				attrs = append(attrs, "term_error", termErr)
+			if nakErr != nil {
+				attrs = append(attrs, "nak_error", nakErr)
 			}
 			c.logger.Error("panic in cancel message handler", attrs...)
 		}
@@ -33,7 +33,10 @@ func (c *Client) handleCancelMessage(msg jetstream.Msg) {
 
 	c.logMessageReceived(msg, resourceID, ceID, ceType)
 
-	if err := c.cancelHandler(context.Background(), msg.Data()); err != nil {
+	ctx, cancel := handlerContext(c.cfg.CancelHandlerTimeout)
+	defer cancel()
+
+	if err := c.cancelHandler(ctx, msg.Data()); err != nil {
 		if nakErr := msg.NakWithDelay(c.nakDelay()); nakErr != nil {
 			c.logMessageResolutionFailure("failed to nak cancel message", msg, nakErr)
 			return
@@ -89,13 +92,7 @@ func (c *Client) handleMainMessage(msg jetstream.Msg) {
 		}
 	}
 
-	var ctx context.Context
-	var cancel context.CancelFunc
-	if c.cfg.HandlerTimeout > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), c.cfg.HandlerTimeout)
-	} else {
-		ctx, cancel = context.WithCancel(context.Background())
-	}
+	ctx, cancel := handlerContext(c.cfg.HandlerTimeout)
 	defer cancel()
 
 	if err := c.mainHandler(ctx, msg.Data()); err != nil {
@@ -111,6 +108,16 @@ func (c *Client) handleMainMessage(msg jetstream.Msg) {
 		return
 	}
 	c.logger.Info("main message acked", "resource_id", resourceID, "ce_id", ceID, "ce_type", ceType, "subject", msg.Subject())
+}
+
+// handlerContext bounds handler execution so a hung SP/downstream call can't
+// block a consumer indefinitely (REQ-RCM-180); falls back to a cancellable,
+// deadline-free context when timeout is unset.
+func handlerContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(context.Background(), timeout)
+	}
+	return context.WithCancel(context.Background())
 }
 
 func (c *Client) nakDelay() time.Duration {

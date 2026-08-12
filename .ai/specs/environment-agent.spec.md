@@ -1897,9 +1897,9 @@ message, not elapsed time.
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| REQ-RCM-180 | The agent MUST bound the processing time of each consumed message with a configurable per-message handler deadline, covering forwarding to the SP and awaiting its response. For main-subject messages, enforcement MUST occur in the messaging client before invoking the router; for retry-subject messages, enforcement MUST occur in the retry processor | MUST | Prevents a hung SP call from blocking the consumer indefinitely |
+| REQ-RCM-180 | The agent MUST bound the processing time of each consumed message with a configurable per-message handler deadline, covering forwarding to the SP and awaiting its response. For main-subject messages, enforcement MUST occur in the messaging client before invoking the router; for retry-subject messages, enforcement MUST occur in the retry processor; for cancel-subject messages, enforcement MUST occur in the messaging client before invoking the router's cancel handler, using a separately configurable deadline (REQ-RCM-200) | MUST | Prevents a hung SP call — or, for cancel-subject messages, a hung retry-topic purge/publish — from blocking the consumer indefinitely |
 | REQ-RCM-190 | If the handler deadline elapses before the routing outcome is finalized, the agent MUST cancel the in-flight SP call, treat the outcome as a retryable error (per REQ-RTE-110), and MUST NOT acknowledge the message | MUST | Main path: messaging client Naks; retry path: retry processor Naks in place (see `RetryMessage.NakFunc`) |
-| REQ-RCM-200 | The handler deadline MUST be configurable | MUST | |
+| REQ-RCM-200 | The handler deadline MUST be configurable. The cancel-subject deadline is a separate config value from the main/retry-subject deadline, since cancel processing is bounded by `CancelAckWait` rather than `AckWait` (see Configuration table) | MUST | |
 
 #### Requirements — SP-Side Idempotency (Event ID Forwarding)
 
@@ -1923,6 +1923,7 @@ message, not elapsed time.
 |------------|---------|---------|-----|-----|------|-------------|
 | messaging.maxDeliver | AGENT_MESSAGING_MAX_DELIVER | 10 | 1 | 100 | integer | Maximum JetStream delivery attempts for a **main-subject** message before terminal error CE and termination (REQ-RCM-150). Does not apply to the retry-subject or cancel consumers — see DD-410 |
 | routing.handlerTimeout | AGENT_ROUTING_HANDLER_TIMEOUT | 60s | 1s | 10m | duration | Maximum time allowed to process a single consumed message, including the SP call (REQ-RCM-180) |
+| routing.cancelHandlerTimeout | AGENT_ROUTING_CANCEL_HANDLER_TIMEOUT | 5s | 500ms | 1m | duration | Maximum time allowed to process a single cancel-subject message, including the retry-topic purge and response CE publish (REQ-RCM-180). MUST be less than `messaging.cancelAckWait` |
 
 #### Acceptance Criteria
 
@@ -2031,6 +2032,15 @@ message, not elapsed time.
 - **Given** `AGENT_ROUTING_HANDLER_TIMEOUT=45s`
 - **When** the agent begins processing a message consumed from the main topic
 - **Then** the context passed to the SP call MUST carry a deadline no later than 45s from consumption
+
+##### AC-RCM-105: Cancel handler deadline aborts a hung cancel-topic purge
+
+- **Validates:** REQ-RCM-180, REQ-RCM-190, REQ-RCM-200
+- **Given** `AGENT_ROUTING_CANCEL_HANDLER_TIMEOUT` is set
+- **And** the cancel handler's downstream work (retry-topic purge or response CE publish) hangs
+- **When** the configured timeout elapses without the cancel handler returning
+- **Then** the context passed to the cancel handler MUST be cancelled
+- **And** the message MUST be Nak'd (not acknowledged), eligible for redelivery
 
 ##### AC-RCM-110: Idempotency-Key forwarded to external SP
 
