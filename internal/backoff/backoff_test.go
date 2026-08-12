@@ -19,6 +19,7 @@ var _ = Describe("CalculateBackoff", Label("unit"), func() {
 		Entry("attempt 3 → 8s (UT-DCM-010)", time.Second, 5*time.Minute, 3, 8*time.Second),
 		Entry("attempt 9 → capped at 300s (UT-DCM-013)", time.Second, 5*time.Minute, 9, 5*time.Minute),
 		Entry("attempt 20 → still capped, overflow-safe (UT-DCM-014)", time.Second, 5*time.Minute, 20, 5*time.Minute),
+		Entry("attempt 1_000_000 → still capped, no float/overflow (UT-DCM-015)", time.Second, 5*time.Minute, 1_000_000, 5*time.Minute),
 	)
 })
 
