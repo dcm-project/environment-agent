@@ -57,5 +57,8 @@ var _ = Describe("ValidateTopicName", Label("unit"), func() {
 		Entry("accepts 255-char boundary (UT-MSG-041)", strings.Repeat("a", 255), ""),
 		Entry("rejects reserved dcm.agent. prefix (UT-MSG-042)", "dcm.agent.foo", "reserved"),
 		Entry("rejects exact reserved base dcm.agent with no trailing dot (UT-MSG-043)", "dcm.agent", "reserved"),
+		Entry("rejects leading dot (UT-MSG-044)", ".agent-prod", "empty dot-separated tokens"),
+		Entry("rejects trailing dot (UT-MSG-045)", "agent-prod.", "empty dot-separated tokens"),
+		Entry("rejects consecutive dots (UT-MSG-046)", "agent..prod", "empty dot-separated tokens"),
 	)
 })

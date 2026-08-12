@@ -95,6 +95,9 @@ func ValidateTopicName(name string) error {
 	if !validTopicNameRe.MatchString(name) {
 		return errors.New("topic name contains invalid characters (allowed: alphanumeric, hyphens, dots, underscores)")
 	}
+	if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..") {
+		return errors.New("topic name must not contain empty dot-separated tokens")
+	}
 	// The exact base "dcm.agent" (no trailing dot) needs an explicit check:
 	// it wouldn't match HasPrefix below but would still derive a colliding
 	// Retry subject.
