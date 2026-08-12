@@ -10,7 +10,7 @@ import (
 var validTopicNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // RequestStreamName is the JetStream stream owned by the control plane,
-// binding the `dcm.agent.>` wildcard subject (F2). The agent must not create
+// binding the `dcm.agent.>` wildcard subject (REQ-MSG-048). The agent must not create
 // or own this stream — only durable consumers on it, filtered to Main/Cancel
 // below. See Client.createRequestConsumer for the startup-race tolerance.
 const RequestStreamName = "dcm-agent-requests"
@@ -84,7 +84,7 @@ func (t TopicNames) RetryConsumer() string { return t.Base + "-retry-consumer" }
 // Also rejects a base that already starts with the reserved
 // requestSubjectPrefix: otherwise Main would be double-prefixed, and the
 // derived Retry subject would fall inside the CP-owned dcm.agent.> wildcard
-// (F2), colliding with the CP's own stream.
+// (REQ-MSG-048), colliding with the CP's own stream.
 func ValidateTopicName(name string) error {
 	if name == "" {
 		return errors.New("topic name must not be empty")

@@ -3,8 +3,9 @@ package routing
 import "sync"
 
 // KeyLock is a concurrent, non-evicting set of resource IDs used purely for
-// mutual exclusion (F13's transient in-flight forward lock, shared between
-// Router and retry.Processor). Unlike ResourceSet, it has no LRU/eviction
+// mutual exclusion (the transient in-flight forward lock required by
+// REQ-RTE-210/AC-RTE-210, shared between Router and retry.Processor). Unlike
+// ResourceSet, it has no LRU/eviction
 // behavior: entries are always explicitly removed by the holder, and
 // eviction would silently release a lock still in use, allowing
 // double-dispatch. Naturally bounded by the number of concurrently

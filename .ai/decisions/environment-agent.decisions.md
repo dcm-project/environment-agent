@@ -279,7 +279,7 @@ context deadlines, and CE event ID forwarding as `Idempotency-Key` to enable
 proper SP-side event-level dedup. SP idempotency for create/delete by resourceId
 is a MUST requirement (not merely an assumption).
 
-**Amendment (Topic 9, F13 — concurrent double-dispatch):** The above rationale
+**Amendment (Topic 9, REQ-RTE-210 — concurrent double-dispatch):** The above rationale
 covers *sequential* redeliveries (message-level dedup, deliberately not
 implemented). It does not cover two *concurrent* forward attempts for the same
 `resource_id` racing each other into the SP simultaneously — e.g. a JetStream
@@ -320,10 +320,10 @@ plane use snake_case (`resource_id`, `service_type`, `agent_name`, `topic_name`,
 etc.), matching the control-plane's AEP-style structs.
 
 **Rationale:** Go's `encoding/json` does not fold underscores — camelCase tags
-cannot bind to snake_case wire payloads. The control-plane review (2026-08-07, F1)
-identified silent message drops in both directions when casing diverged. Internal
-Go identifiers and config env vars (e.g. `AGENT_TOPIC_NAME`, struct field
-`TopicName`) remain unchanged; only marshaled JSON field names follow snake_case.
+cannot bind to snake_case wire payloads, causing silent message drops in both
+directions when casing diverges. Internal Go identifiers and config env vars
+(e.g. `AGENT_TOPIC_NAME`, struct field `TopicName`) remain unchanged; only
+marshaled JSON field names follow snake_case.
 
 **Related requirements:** REQ-MSG-130, REQ-RCM-140, REQ-XC-CE-010
 
@@ -377,8 +377,8 @@ administers resources it owns; CP-facing traffic uses CP-provisioned streams.
 to JetStream with the `Nats-Msg-Id` header set to the CloudEvent's own `id`.
 
 **Rationale:** Enables server-side deduplication if publish retry logic is added
-later (control-plane review F34). Without a stable message ID, a retried publish
-could duplicate delivery to the control-plane's response consumer.
+later. Without a stable message ID, a retried publish could duplicate delivery
+to the control-plane's response consumer.
 
 **Related requirements:** REQ-MSG-135, REQ-XC-CE-050
 

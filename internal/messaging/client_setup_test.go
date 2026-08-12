@@ -47,7 +47,7 @@ func TestAttemptSetup_RecoversAfterTransientFailure(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Simulate the control-plane-owned request stream (F2), same as
+	// Simulate the control-plane-owned request stream (REQ-MSG-048), same as
 	// suite_test.go's Ginkgo fixture, so the second (recovery) attempt has
 	// somewhere to bind its durable consumers.
 	js, err := jetstream.New(conn)

@@ -48,7 +48,7 @@ type ProcessorDeps struct {
 	JSProvider          JSProvider
 	DenyList            *routing.ResourceSet
 	ClaimedResourcesSet *routing.ResourceSet // nil-safe; shared with Router for REQ-RTE-180
-	InFlightSet         *routing.KeyLock     // nil-safe; shared with Router, blocks concurrent double-dispatch (F13)
+	InFlightSet         *routing.KeyLock     // nil-safe; shared with Router, blocks concurrent double-dispatch (REQ-RTE-210)
 	Config              ProcessorConfig
 	Logger              *slog.Logger
 	AgentName           string
@@ -288,7 +288,6 @@ func (p *Processor) drainRetryTopicWithDedup(ctx context.Context) error {
 	return nil
 }
 
-// publishAckCE emits the appropriate creation-acked or deletion-acked CE.
 func (p *Processor) publishAckCE(ctx context.Context, res ceResult) {
 	if res.ceType == cloudevent.TypeRequestDelete {
 		p.publishCE(ctx, cloudevent.TypeDeletionAcked, res.resourceID, res.eventID, routing.DeletionAckData{
@@ -324,7 +323,7 @@ func (p *Processor) FetchRetryMessages(ctx context.Context) ([]routing.RetryMess
 			_ = m.Term()
 			continue
 		}
-		msg := m // capture for closure
+		msg := m
 		result = append(result, routing.RetryMessage{
 			Data:        m.Data(),
 			ResourceID:  res.resourceID,
@@ -483,7 +482,7 @@ func (p *Processor) forwardRequest(ctx context.Context, sp *store.StoredProvider
 		return true
 	}
 
-	// Transient double-dispatch guard (F13): shared with Router so a
+	// Transient double-dispatch guard (REQ-RTE-210): shared with Router so a
 	// main-topic forward and a retry-topic forward for the same resourceId
 	// can't race each other into calling the SP twice. Released
 	// unconditionally below, so it never blocks a later legitimate attempt.
@@ -589,7 +588,6 @@ func (p *Processor) requeueToRetryTopic(ctx context.Context, msg jetstream.Msg, 
 	}
 }
 
-// js resolves the current JetStream context from the provider.
 func (p *Processor) js() jetstream.JetStream {
 	if p.deps.JSProvider == nil {
 		return nil

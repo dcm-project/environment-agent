@@ -134,7 +134,7 @@ var _ = Describe("Topic Management", Label("integration"), func() {
 		Expect(retryStream.CachedInfo().Config.Subjects).To(ContainElement(topics.Retry))
 
 		// Main/Cancel are durable consumers on the control-plane-owned
-		// RequestStreamName (F2) — the agent must NOT create streams for them.
+		// RequestStreamName (REQ-MSG-048) — the agent must NOT create streams for them.
 		mainCons, err := testJS.Consumer(ctx, messaging.RequestStreamName, topics.MainConsumer())
 		Expect(err).NotTo(HaveOccurred())
 		mainInfo, err := mainCons.Info(ctx)
@@ -876,7 +876,7 @@ var _ = Describe("Connection Resilience", Label("integration"), func() {
 		defer reconnectServer.Shutdown()
 
 		// Pre-create the CP-owned request stream so the client's async
-		// consumer-creation backoff (F2) isn't the bottleneck for this test.
+		// consumer-creation backoff (REQ-MSG-051) isn't the bottleneck for this test.
 		createRequestStream(reconnectURL)
 
 		// IsConnected should transition to true after reconnection
@@ -944,7 +944,7 @@ var _ = Describe("Connection Resilience", Label("integration"), func() {
 
 	It("creates consumers once the CP request stream appears mid-retry (IT-MSG-107)", func() {
 		// NATS is already up; only RequestStreamName (CP-owned) is missing,
-		// exercising createRequestConsumer's inner retry loop (F2). Uses a
+		// exercising createRequestConsumer's inner retry loop (REQ-MSG-051). Uses a
 		// dynamic port to avoid reuse races with IT-MSG-100/105's hardcoded one.
 		opts := natstest.DefaultTestOptions
 		opts.Port = -1

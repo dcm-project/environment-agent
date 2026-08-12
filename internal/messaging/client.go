@@ -38,7 +38,7 @@ const (
 	// requestStreamRetryInterval/Timeout bound the retry loop for creating
 	// durable consumers on the control-plane-owned RequestStreamName. The CP
 	// may not have created that stream yet when this agent starts (startup
-	// order isn't guaranteed) — F2 of the CP/agent alignment review.
+	// order isn't guaranteed, per REQ-MSG-051).
 	requestStreamRetryInterval = 2 * time.Second
 	requestStreamRetryTimeout  = 30 * time.Second
 
@@ -88,7 +88,7 @@ type Client struct {
 	conn       *nats.Conn
 	js         jetstream.JetStream
 	mainCons   jetstream.Consumer
-	cancelCons jetstream.Consumer // stored so StartConsuming can begin consuming once DeferConsume is set
+	cancelCons jetstream.Consumer // retained for beginConsuming when DeferConsume is set
 	consumers  []jetstream.ConsumeContext
 	consuming  bool // guarded by mu; true once the live Consume() loops have started
 	mu         sync.Mutex
@@ -101,7 +101,8 @@ type Client struct {
 	// DeferConsume is true.
 	consumeRequested atomic.Bool
 
-	// ponytail: set-before-Start contract — not safe for concurrent mutation
+	// mainHandler/cancelHandler must be set before Start; not safe for
+	// concurrent mutation afterward.
 	mainHandler   MessageHandler
 	cancelHandler MessageHandler
 
@@ -146,8 +147,7 @@ func (c *Client) SetOnSetupReady(fn func()) {
 // reconnectDelay computes the NATS reconnect wait for the given attempt
 // count using exponential backoff with full jitter — the same formula as
 // REQ-DCM-050, which REQ-MSG-100 explicitly cross-references. Passed to
-// nats.CustomReconnectDelay in Start, replacing the previous fixed
-// nats.ReconnectWait(2*time.Second).
+// nats.CustomReconnectDelay in Start.
 func (c *Client) reconnectDelay(attempts int) time.Duration {
 	initial, maxWait := c.cfg.ReconnectInitialBackoff, c.cfg.ReconnectMaxBackoff
 	if initial <= 0 {
@@ -206,7 +206,7 @@ func (c *Client) Start(_ context.Context) error {
 // doSetup creates streams/consumers and starts consuming. Invoked from
 // Start's initial connect attempt and from every ConnectHandler/
 // ReconnectHandler. A single attempt can block for up to
-// requestStreamRetryTimeout waiting on RequestStreamName (F2); if it still
+// requestStreamRetryTimeout waiting on RequestStreamName (REQ-MSG-051); if it still
 // fails, doSetup hands off to retrySetupInBackground rather than retrying
 // inline, since Start itself must stay non-blocking.
 func (c *Client) doSetup(ctx context.Context, conn *nats.Conn) {
@@ -304,9 +304,7 @@ func (c *Client) setupStreamsAndConsume(ctx context.Context, conn *nats.Conn) bo
 // connection.
 func (c *Client) finishSetup() bool {
 	if c.cfg.DeferConsume && !c.consumeRequested.Load() {
-		// JetStream is confirmed ready for the first time here, so this is
-		// where onSetupReady fires; the callback is expected to call
-		// StartConsuming() synchronously.
+		// onSetupReady's callback is expected to call StartConsuming() synchronously.
 		if c.onSetupReady != nil {
 			c.onSetupReady()
 		}
@@ -324,7 +322,6 @@ func (c *Client) finishSetup() bool {
 	return true
 }
 
-// isConsuming reports whether the live pull-consumer loops have started.
 func (c *Client) isConsuming() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -389,7 +386,7 @@ func (c *Client) StartConsuming() {
 
 // initInternalStreams creates the agent-owned streams only. The request
 // subjects (dcm.agent.>) and response subject (dcm.agents.responses) are
-// owned by the control-plane (F2) — this agent must not create streams for
+// owned by the control-plane (REQ-MSG-048) — this agent must not create streams for
 // them; see initConsumers (durable consumers on the CP's stream) and
 // Publish (direct publish to the response subject, no stream needed).
 func (c *Client) initInternalStreams(ctx context.Context, js jetstream.JetStream) (jetstream.Stream, error) {
@@ -440,7 +437,7 @@ func (c *Client) initConsumers(ctx context.Context, js jetstream.JetStream, retr
 // createRequestConsumer creates a durable consumer on the control-plane-owned
 // RequestStreamName, filtered to the given subject. Retries internally for up
 // to requestStreamRetryTimeout since the CP may not have created that stream
-// yet at agent startup (F2); the caller (doSetup) retries the whole setup
+// yet at agent startup (REQ-MSG-051); the caller (doSetup) retries the whole setup
 // indefinitely beyond that.
 func (c *Client) createRequestConsumer(ctx context.Context, js jetstream.JetStream, durable, filterSubject string, ackWait time.Duration, maxDeliver int) (jetstream.Consumer, error) {
 	cfg := jetstream.ConsumerConfig{
@@ -599,7 +596,7 @@ func (c *Client) JS() jetstream.JetStream {
 
 // Publish publishes raw bytes to the given NATS subject via JetStream.
 // For dcm.agents.responses, this relies on the control-plane's stream
-// binding that subject (F2) — the agent does not create its own stream for
+// binding that subject (REQ-MSG-048) — the agent does not create its own stream for
 // it, JetStream auto-routes the publish to whichever stream binds the subject.
 func (c *Client) Publish(ctx context.Context, subject string, data []byte) error {
 	c.mu.Lock()
@@ -614,8 +611,8 @@ func (c *Client) Publish(ctx context.Context, subject string, data []byte) error
 }
 
 // PublishWithMsgID publishes with a Nats-Msg-Id header for JetStream
-// server-side dedup, using the CE's own id (F34). Used for response CEs to
-// guard against duplicate delivery on a future publish-retry.
+// server-side dedup, using the CE's own id (REQ-MSG-135). Used for response
+// CEs to guard against duplicate delivery on a future publish-retry.
 func (c *Client) PublishWithMsgID(ctx context.Context, subject, msgID string, data []byte) error {
 	c.mu.Lock()
 	js := c.js

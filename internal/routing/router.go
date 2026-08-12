@@ -35,7 +35,7 @@ const claimedResourcesSetMaxSize = 100000
 // transient error (Nak/retry shortly) — it is NOT a permanent block: the
 // lock is released as soon as the in-flight attempt finishes, regardless of
 // outcome, so a later legitimate redelivery or delete-after-create is never
-// blocked. See REQ-RTE-210 and DD-190 (F13 amendment): a naive permanent
+// blocked. See REQ-RTE-210 and DD-190's amendment: a naive permanent
 // block on the cancel-rejection ledger (REQ-RTE-200) would wrongly block
 // delete-after-create and, worse, could strand a message that succeeded but
 // crashed before acking.
@@ -48,8 +48,8 @@ type Router struct {
 	store               store.Store
 	forwarder           SPForwarder
 	publisher           Publisher
-	rcMu                sync.RWMutex       // protects retryConsumer for late-bind via SetRetryConsumer
-	retryConsumer       RetryTopicConsumer // set after construction via SetRetryConsumer
+	rcMu                sync.RWMutex // protects retryConsumer for late-bind via SetRetryConsumer
+	retryConsumer       RetryTopicConsumer
 	denyList            *ResourceSet
 	claimedResourcesSet *ResourceSet
 	inFlight            *KeyLock
@@ -76,8 +76,7 @@ type RouterDeps struct {
 	// only for CE correlation (ResponseContext.TopicName).
 	TopicName string
 	// RetryTopic is the agent-internal subject used to hold requests while
-	// an SP is unhealthy (distinct from TopicName since the CP/agent
-	// alignment migration prefixes TopicName with "dcm.agent.").
+	// an SP is unhealthy (distinct from the CP-facing TopicName).
 	RetryTopic string
 }
 
@@ -250,7 +249,7 @@ func (r *Router) resolveProvider(ctx context.Context, serviceType string) (*stor
 // forwardWithRetry forwards a request to the SP with retry logic and
 // claimed-resources-set tracking.
 func (r *Router) forwardWithRetry(ctx context.Context, sp *store.StoredProvider, isCreate bool, payload inboundPayload) error {
-	// Transient double-dispatch guard (F13): reject a second concurrent
+	// Transient double-dispatch guard (REQ-RTE-210): reject a second concurrent
 	// forward attempt for the same resourceId instead of racing the SP call.
 	// Released unconditionally when this attempt finishes, so it never blocks
 	// a later, non-concurrent redelivery or delete-after-create.

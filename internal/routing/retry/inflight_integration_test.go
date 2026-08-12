@@ -21,9 +21,10 @@ import (
 	"github.com/dcm-project/environment-agent/internal/routing/routingtest"
 )
 
-// Verifies the transient in-flight lock (F13) is effective ACROSS the router
-// and retry-processor paths when they share one InFlightSet instance, the
-// way cmd/environment-agent/main.go wires them in production.
+// Verifies the transient in-flight lock (REQ-RTE-210/AC-RTE-210) is effective
+// ACROSS the router and retry-processor paths when they share one
+// InFlightSet instance, the way cmd/environment-agent/main.go wires them in
+// production.
 var _ = Describe("Cross-Path In-Flight Guard", Label("integration"), func() {
 	var (
 		ctx       context.Context

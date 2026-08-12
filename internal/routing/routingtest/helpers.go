@@ -152,8 +152,8 @@ func (f *FakeSPForwarder) SetCreateErr(err error) {
 }
 
 // GatedSPForwarder blocks CreateResource until Release is called, letting
-// tests observe/control a call while it's still "in flight" (F13: transient
-// double-dispatch guard tests).
+// tests observe/control a call while it's still "in flight" (REQ-RTE-210
+// transient double-dispatch guard tests).
 type GatedSPForwarder struct {
 	mu      sync.Mutex
 	calls   int

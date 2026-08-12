@@ -49,7 +49,7 @@ var _ = Describe("run wiring: embedded SP transitions during RegisterEmbedded", 
 		Expect(err).NotTo(HaveOccurred())
 		setupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		// dcm-agent-requests: control-plane-owned stream (F2) that
+		// dcm-agent-requests: control-plane-owned stream (REQ-MSG-048) that
 		// messaging.Client.Start needs before setup completes. Must not
 		// also pre-create "dcm-health" (the agent creates that one itself
 		// in initInternalStreams), or JetStream rejects the subject overlap.

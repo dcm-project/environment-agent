@@ -36,7 +36,7 @@ type Publisher interface {
 	// PublishWithMsgID publishes with a JetStream Nats-Msg-Id header for
 	// server-side dedup, using the CE's own id. Used for response CEs so that
 	// a future publish-retry mechanism can safely re-publish without risking
-	// duplicate delivery to the control-plane (F34).
+	// duplicate delivery to the control-plane (REQ-MSG-135).
 	PublishWithMsgID(ctx context.Context, subject, msgID string, data []byte) error
 }
 

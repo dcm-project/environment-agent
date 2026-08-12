@@ -37,7 +37,7 @@ var _ = BeforeSuite(func() {
 	opts.StoreDir = testStoreDir
 	testNATSServer = natstest.RunServer(&opts)
 
-	// Simulate the control-plane-owned request stream (F2): messaging.Client
+	// Simulate the control-plane-owned request stream (REQ-MSG-048): messaging.Client
 	// only creates durable consumers on it, never the stream itself. Created
 	// once for the suite; each test derives unique subjects under dcm.agent.>.
 	conn, err := nats.Connect(testNATSServer.ClientURL())

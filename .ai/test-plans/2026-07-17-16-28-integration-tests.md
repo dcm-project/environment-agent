@@ -1792,13 +1792,13 @@ Unless overridden, tests use:
 ### IT-RTE-142: Deny-list drop and retry-topic purge summary logged
 
 - **Validates AC:** AC-RCM-160
-- **Test Infrastructure:** Implemented as `slog.Handler`-capture extensions of IT-RTE-100 and
-  IT-RTE-120 in-place (same scenarios, no separate `It` needed)
+- **Test Infrastructure:** Implemented as captured-log extensions of IT-RTE-100 and IT-RTE-120
+  in-place (same scenarios, no separate test case needed)
 - **Given** a create request is dropped because its `resource_id` is on the deny list
 - **When** it is dropped
 - **Then** an INFO log MUST be emitted with `resource_id` (asserted in IT-RTE-100)
-- **Given** `purgeFromRetryTopic` runs during a cancel with other resources present in the retry topic
-- **When** it completes
+- **Given** a cancel is processed while other resources are present in the retry topic
+- **When** the retry-topic purge for that cancel completes
 - **Then** an INFO log MUST be emitted with `resource_id`, `matched`, `requeued` (asserted in IT-RTE-120)
 
 ---
@@ -1930,11 +1930,11 @@ Unless overridden, tests use:
 ### IT-RCM-095: Retry-topic Nak-in-place increments JetStream delivery count
 
 - **Validates AC:** AC-RTE-080
-- **Test Infrastructure:** Real JetStream retry stream/consumer; `retry.Processor.FetchRetryMessages` (production code path, not a fake consumer)
+- **Test Infrastructure:** Real JetStream retry stream/consumer; the production retry-fetch path (not a fake consumer)
 - **Given** a create request for a resourceId is published to the real retry-topic stream
-- **And** it is fetched once via `FetchRetryMessages` (`NumDelivered` == 1)
-- **When** the returned `NakFunc` is invoked (Nak-in-place, not ack+republish) and the message is redelivered
-- **Then** the redelivered message MUST report `NumDelivered` == 2, not reset to 1
+- **And** it is fetched once through the retry-topic consumer (delivery count == 1)
+- **When** the fetched message is Nak'd in place (not acked-and-republished) and redelivered
+- **Then** the redelivered message MUST report delivery count == 2, not reset to 1
 - **And** the message MUST be the same retry-topic message (not a duplicate republished copy)
 
 ---
