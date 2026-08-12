@@ -356,6 +356,7 @@ var _ = Describe("Forwarder", Label("unit"), func() {
 			Expect(v.String()).To(Equal("delete"))
 			v, ok := attrValue(rec, "http_status")
 			Expect(ok).To(BeTrue())
+			Expect(v.Kind()).To(Equal(slog.KindInt64), "http_status must be logged as an int, not stringified")
 			Expect(v.Int64()).To(BeEquivalentTo(http.StatusServiceUnavailable))
 
 			// Scan every captured record (not just the last) and every attribute

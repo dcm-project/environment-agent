@@ -257,13 +257,19 @@ health state with an empty key or routing to it. See REQ-RTE-026.
 **Amendment (PR #19 review):** A review pass initially recommended removing
 this branch outright as dead code per `quality.mdc`'s single-point-of-defense
 rule, since it had zero test coverage. On reconsideration, the branch is kept
-and tested (`IT-RTE-150`) rather than deleted: the store record is persisted
-data (file I/O), one of the trust boundaries `quality.mdc` explicitly calls
-out as requiring defense, not merely a caller-validated internal call. The
-single-writer registration path prevents empty IDs *in normal operation*, but
-does not prevent on-disk corruption or a future second writer from
-introducing one — the same class of risk `quality.mdc` says file I/O
-boundaries must defend against, even when the failure is expected to be rare.
+and tested (`IT-RTE-150`) rather than deleted, but not for the reason
+originally given here: `store.FileStore` already rejects empty-`.ID` records
+on both `Save` and every read (`validateStoredProvider`), so under the
+production `store.NewFileStore` wiring this branch is unreachable — on-disk
+corruption surfaces as a `GetByName` **error** (line 30-32's branch), not as
+a `StoredProvider` with an empty `.ID`. The actual justification is narrower:
+`ResolveProvider` is written against the `store.Store` *interface*, which
+carries no such non-empty-`.ID` guarantee in its contract. The defense is for
+that interface gap — a future or alternate `Store` implementation that
+doesn't validate as strictly as `FileStore` — not for file I/O corruption
+specifically. `routingtest.FakeStore` (used by `IT-RTE-150`) is exactly such
+a non-validating implementation, which is why the test can reach this branch
+at all.
 
 ### DD-190: SP-side idempotency for JetStream redelivery protection
 
@@ -411,7 +417,7 @@ to the control-plane's response consumer.
 
 ### DD-270: Kubernetes pod conditions unimplemented (v1alpha1)
 
-**Decision:** REQ-HMN-190 through REQ-HMN-270 (8 requirements covering surfacing SP health as Kubernetes pod conditions) are entirely unimplemented. Only a dead config flag (`Health.PodConditionsEnabled`, never read past `config.go`) exists; there is no Kubernetes client dependency anywhere in the module. `IT-HMN-140/150/160` assert generic health-check/liveness facts and never touch pod conditions.
+**Decision:** REQ-HMN-190 through REQ-HMN-270 (9 requirements covering surfacing SP health as Kubernetes pod conditions) are entirely unimplemented. Only a dead config flag (`Health.PodConditionsEnabled`, never read past `config.go`) exists; there is no Kubernetes client dependency anywhere in the module. `IT-HMN-140/150/160` assert generic health-check/liveness facts and never touch pod conditions.
 
 **Rationale:** Confirmed by the 2026-08-07 audit as the single largest, most-corroborated gap in the entire audit (4 independent agents across 2 rounds, zero dissent). This is a real backlog item, not an oversight to silently drop — DD-090 already anticipated pod conditions as a best-effort, non-fatal feature, but the feature itself was never built. Tracked here so the dead config flag doesn't continue to imply a capability that doesn't exist. Implementation (client-go dependency, RBAC, condition-update loop) is deferred to a future version.
 

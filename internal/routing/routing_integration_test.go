@@ -273,6 +273,61 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(found).To(BeTrue(), "empty-ID anomaly must be logged at ERROR")
 	})
 
+	It("propagates a transient store error for redelivery instead of swallowing it (resolve.go coverage hardening)", func() {
+		Expect(registry.Claim("flaky-sp", "database")).To(Succeed())
+		st.GetByNameErr = fmt.Errorf("simulated transient store failure")
+		setupDefaultRouter()
+
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-store-err", "database"))
+		Expect(err).To(HaveOccurred(), "a transient store error must propagate so the caller can retry/redeliver, not be swallowed")
+		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
+		routingtest.ExpectNoResponseCE(responseSub, 200*time.Millisecond)
+	})
+
+	It("treats a registry/store inconsistency (registered but no store record) like an unregistered service type (resolve.go coverage hardening)", func() {
+		// FakeStore.GetByName returns an error for an absent map key, so a
+		// direct nil insert (bypassing Save) is required to reach the actual
+		// sp==nil branch — matching production FileStore's GetByName, which
+		// returns (nil, nil) rather than an error when a record isn't found.
+		Expect(registry.Claim("ghost-sp", "database")).To(Succeed())
+		st.Providers["ghost-sp"] = nil
+		setupDefaultRouter()
+
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-ghost", "database"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
+
+		ce := routingtest.ExpectResponseCE(responseSub)
+		Expect(ce.Type()).To(Equal("dcm.agent.error"))
+		var data routing.ErrorData
+		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
+		Expect(data.ResourceID).To(Equal("res-ghost"))
+		Expect(data.Error).To(Equal("UNSUPPORTED_SERVICE_TYPE"))
+	})
+
+	It("treats a valid provider with no recorded health state as Unavailable (resolve.go coverage hardening)", func() {
+		// A real, non-empty ID that healthTracker.SetState was never called
+		// for (distinct from an explicit Unhealthy/Unavailable state).
+		Expect(registry.Claim("unknown-health-sp", "database")).To(Succeed())
+		Expect(st.Save(ctx, store.StoredProvider{
+			ID: uuid.New().String(), Name: "unknown-health-sp", Endpoint: "http://mock:8080",
+			ServiceType: "database", SchemaVersion: "v1alpha1", Type: "external",
+			CreateTime: time.Now(), UpdateTime: time.Now(),
+		})).To(Succeed())
+		setupDefaultRouter()
+
+		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-no-health", "database"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
+
+		ce := routingtest.ExpectResponseCE(responseSub)
+		Expect(ce.Type()).To(Equal("dcm.agent.error"))
+		var data routing.ErrorData
+		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
+		Expect(data.ResourceID).To(Equal("res-no-health"))
+		Expect(data.Error).To(Equal("SP_UNAVAILABLE"))
+	})
+
 	It("queues creation when SP is Unhealthy (IT-RTE-060)", func() {
 		registerProvider("unhealthy-sp", "database", "http://mock:8080", "external", v1alpha1.Unhealthy)
 		setupDefaultRouter()
@@ -359,6 +414,7 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		for _, rec := range spErrRecords {
 			v, ok := attrValue(rec, "http_status")
 			Expect(ok).To(BeTrue(), "%s log must carry http_status instead of the raw error", rec.Message)
+			Expect(v.Kind()).To(Equal(slog.KindInt64), "http_status must be logged as an int, not stringified")
 			Expect(v.Int64()).To(BeEquivalentTo(503))
 			_, hasErrAttr := attrValue(rec, "error")
 			Expect(hasErrAttr).To(BeFalse(), "%s log must not carry a raw error attr for *SPResponseError", rec.Message)

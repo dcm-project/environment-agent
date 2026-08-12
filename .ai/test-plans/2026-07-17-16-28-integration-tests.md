@@ -1692,6 +1692,7 @@ Unless overridden, tests use:
 - **When** a creation request for the provider's service type is processed
 - **Then** `dcm.agents.responses` MUST receive `dcm.agent.error` with `error: "SP_UNAVAILABLE"`
 - **And** the SP MUST NOT be called
+- **And** an ERROR-level log MUST be emitted for the anomaly
 
 ---
 
