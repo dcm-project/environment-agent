@@ -356,7 +356,15 @@ marshaled JSON field names follow snake_case.
 `topic_name` to match `^dcm\.agent\..+`. The retry subject is never published to
 by the control plane, so it stays unprefixed and agent-owned.
 
-**Related requirements:** REQ-MSG-010, REQ-MSG-030, REQ-MSG-050
+The same base name is also used to derive JetStream stream/durable-consumer
+names for DD-230's `{base}-retry` stream and the main/cancel consumers
+(`{base}-consumer`, `{base}-cancel-consumer`, `{base}-retry-consumer`). Those
+have stricter constraints than subject tokens — no dots, and length capped so
+the derived name (base + longest suffix) stays within NATS's 255-char limit —
+enforced separately via `ValidateJetStreamSafeName` (REQ-MSG-011), in addition
+to the subject-token validation (`ValidateTopicName`) described above.
+
+**Related requirements:** REQ-MSG-010, REQ-MSG-011, REQ-MSG-030, REQ-MSG-050
 
 ### DD-230: JetStream stream ownership split (CP vs agent)
 

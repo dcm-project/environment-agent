@@ -108,19 +108,39 @@ func ValidateTopicName(name string) error {
 	return nil
 }
 
+// jsMaxNameLen mirrors nats-server's JSMaxNameLen (server/jetstream_api.go):
+// the maximum length the NATS server accepts for a JetStream stream or
+// consumer/durable name, enforced server-side (unlike the dot check above,
+// nats.go does not pre-validate this client-side).
+const jsMaxNameLen = 255
+
+// longestJetStreamSuffix is "-cancel-consumer" (CancelConsumer's suffix),
+// the longest of the four suffixes MainConsumer/CancelConsumer/RetryStream/
+// RetryConsumer append to Base — the binding constraint on how long Base can
+// safely be while keeping every derived name within jsMaxNameLen.
+const longestJetStreamSuffix = "-cancel-consumer"
+
 // ValidateJetStreamSafeName additionally validates that name is safe to use
 // when deriving JetStream stream and durable-consumer names (MainConsumer,
 // CancelConsumer, RetryStream, RetryConsumer — see REQ-MSG-011). Unlike
 // subject tokens, which ValidateTopicName alone governs and which legally
-// allow dots, NATS JetStream stream/consumer names reject dots outright
-// (nats.go's validateStreamName/validateConsumerName reject any of
-// ">*. /\t\r\n"; ValidateTopicName's character whitelist already excludes
-// every other forbidden character, so only dots need checking here). Callers
-// deriving stream/consumer names from a Base must call this in addition to,
-// not instead of, ValidateTopicName.
+// allow dots and up to 255 characters, NATS JetStream stream/consumer names
+// (a) reject dots outright (nats.go's validateStreamName/validateConsumerName
+// reject any of ">*. /\t\r\n"; ValidateTopicName's character whitelist
+// already excludes every other forbidden character, so only dots need
+// checking here) and (b) are capped at 255 characters INCLUDING the derived
+// suffix, not just the base — so a base within ValidateTopicName's own
+// 255-character limit can still overflow once a suffix like
+// "-cancel-consumer" (16 chars) is appended. Callers deriving stream/
+// consumer names from a Base must call this in addition to, not instead of,
+// ValidateTopicName.
 func ValidateJetStreamSafeName(name string) error {
 	if strings.Contains(name, ".") {
 		return errors.New("topic name must not contain dots (NATS JetStream stream/consumer names forbid dots, even though subject tokens allow them)")
+	}
+	if len(name)+len(longestJetStreamSuffix) > jsMaxNameLen {
+		return fmt.Errorf("topic name too long: combined with JetStream consumer/stream suffixes it must not exceed %d characters (max %d)",
+			jsMaxNameLen, jsMaxNameLen-len(longestJetStreamSuffix))
 	}
 	return nil
 }

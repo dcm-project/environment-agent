@@ -65,13 +65,17 @@ var _ = Describe("ValidateTopicName", Label("unit"), func() {
 	)
 })
 
-// ValidateJetStreamSafeName guards a constraint ValidateTopicName
-// deliberately does not: dots are valid subject tokens (UT-MSG-034) but
-// invalid in JetStream stream/consumer names, which are derived from the
-// same Base (REQ-MSG-011). See topics.go's MainConsumer/CancelConsumer/
-// RetryStream/RetryConsumer.
+// ValidateJetStreamSafeName guards two constraints ValidateTopicName
+// deliberately does not: (1) dots are valid subject tokens (UT-MSG-034) but
+// invalid in JetStream stream/consumer names, and (2) ValidateTopicName's own
+// 255-char limit applies to Base alone, but NATS server-side enforces 255
+// chars on the DERIVED stream/consumer name (Base + suffix), and the longest
+// suffix ("-cancel-consumer", 16 chars) means a Base above 239 chars can
+// still pass ValidateTopicName yet produce an over-length derived name. Both
+// are derived from the same Base (REQ-MSG-011). See topics.go's
+// MainConsumer/CancelConsumer/RetryStream/RetryConsumer.
 var _ = Describe("ValidateJetStreamSafeName", Label("unit"), func() {
-	DescribeTable("rejects dots even though ValidateTopicName allows them",
+	DescribeTable("rejects dots and over-length names even though ValidateTopicName allows them",
 		func(name, errSubstring string) {
 			err := messaging.ValidateJetStreamSafeName(name)
 			if errSubstring == "" {
@@ -83,5 +87,10 @@ var _ = Describe("ValidateJetStreamSafeName", Label("unit"), func() {
 		Entry("rejects a name with a dot (UT-MSG-110)", "agent-prod.1", "must not contain dots"),
 		Entry("rejects a name that is only a dot (UT-MSG-111)", ".", "must not contain dots"),
 		Entry("accepts hyphens and underscores without dots (UT-MSG-112)", "agent-prod_1", ""),
+		Entry("accepts 239-char boundary — Base + longest suffix (16 chars) == 255 (UT-MSG-113)",
+			strings.Repeat("a", 239), ""),
+		Entry("rejects 240 chars — Base + longest suffix would exceed 255, even though "+
+			"this passes ValidateTopicName's own 255-char limit on Base alone (UT-MSG-114)",
+			strings.Repeat("a", 240), "too long"),
 	)
 })

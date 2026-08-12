@@ -1245,6 +1245,22 @@ Unless overridden, tests use:
 
 ---
 
+### IT-MSG-012: Too-long topic name fails startup fast, not via indefinite JetStream retry
+
+- **Validates AC:** AC-MSG-011
+- **Test Infrastructure:** No real NATS server needed — the failure is a startup-time validation
+  error raised before any messaging connection is attempted; `AGENT_NAME` set to 240 `'a'` characters
+- **Given** the agent is configured with a base name whose length alone (240 chars) already passes
+  `ValidateTopicName`'s own 255-char limit, but which would exceed NATS's 255-char `JSMaxNameLen`
+  once the `-cancel-consumer` suffix (16 chars) is appended for the derived JetStream consumer name
+- **When** the agent starts (`run(ctx)`)
+- **Then** `run` MUST return a non-zero exit code within ~2s
+- **And** it MUST NOT ever reach `createRequestConsumer`'s 30s startup retry loop (REQ-MSG-051) —
+  same failure class as IT-MSG-011, discovered via round 2 review: length, not just dots, can make
+  a `ValidateTopicName`-valid base produce a JetStream-invalid derived name
+
+---
+
 ### IT-MSG-020: Durable consumer creation on first start
 
 - **Validates AC:** AC-MSG-015
@@ -2330,7 +2346,7 @@ Unless overridden, tests use:
 | AC-DCM-100 | IT-DCM-160 |
 | AC-DCM-105 | IT-DCM-170 |
 | AC-MSG-010 | IT-MSG-010 |
-| AC-MSG-011 | IT-MSG-011 |
+| AC-MSG-011 | IT-MSG-011, IT-MSG-012 |
 | AC-MSG-015 | IT-MSG-020 |
 | AC-MSG-016 | IT-MSG-030 |
 | AC-MSG-018 | IT-MSG-040 |

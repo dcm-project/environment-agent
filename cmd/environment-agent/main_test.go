@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,5 +89,29 @@ var _ = Describe("run", Label("unit"), func() {
 		Eventually(done, 2*time.Second, 10*time.Millisecond).Should(Receive(Equal(1)),
 			"run() must fail fast on a dotted AGENT_NAME (invalid for JetStream stream/consumer "+
 				"names per REQ-MSG-011) rather than ever reaching the 30s createRequestConsumer retry loop")
+	})
+
+	// Regression test for a gap found during round 2 review: a base name up
+	// to 255 chars passes ValidateTopicName's own length check, but the
+	// derived JetStream names (base + suffix, e.g. "-cancel-consumer") can
+	// still exceed NATS's server-side 255-char JSMaxNameLen — the same
+	// indefinite-retry-hang bug class as the dot case above (IT-MSG-011),
+	// just via length instead of character set.
+	It("fails fast on a too-long topic name instead of hanging in JetStream setup retries (IT-MSG-012)", func() {
+		GinkgoT().Setenv("AGENT_SERVER_ADDRESS", ":0")
+		GinkgoT().Setenv("AGENT_SP_PERSISTENCE_PATH", GinkgoT().TempDir()+"/registrations.json")
+		GinkgoT().Setenv("AGENT_NAME", strings.Repeat("a", 240))
+		GinkgoT().Setenv("AGENT_ENVIRONMENT", "test")
+		GinkgoT().Setenv("AGENT_COST", "medium")
+		GinkgoT().Setenv("DCM_REGISTRATION_URL", "http://localhost:8080")
+		GinkgoT().Setenv("AGENT_MESSAGING_URL", "nats://localhost:4222")
+
+		done := make(chan int, 1)
+		go func() { done <- run(context.Background()) }()
+
+		Eventually(done, 2*time.Second, 10*time.Millisecond).Should(Receive(Equal(1)),
+			"run() must fail fast on a 240-char AGENT_NAME (too long for JetStream stream/consumer "+
+				"names once a suffix is appended, per REQ-MSG-011) rather than ever reaching the 30s "+
+				"createRequestConsumer retry loop")
 	})
 })

@@ -53,8 +53,11 @@ const (
 type MessageHandler func(ctx context.Context, msg []byte) error
 
 // ClientConfig holds the NATS client configuration.
-// TopicName, if set, must be a pre-validated topic name (via ValidateTopicName).
-// If empty, the agent name is used as the base for topic derivation.
+// TopicName, if set, must be a pre-validated topic name: both ValidateTopicName
+// AND ValidateJetStreamSafeName (the latter guards dots/length constraints
+// specific to the JetStream stream/consumer names this client derives from it
+// — see REQ-MSG-011). If empty, the agent name is used as the base for topic
+// derivation, and the same dual validation applies to it instead.
 type ClientConfig struct {
 	URL            string
 	TopicName      string
