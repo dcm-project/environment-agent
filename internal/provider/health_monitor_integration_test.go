@@ -529,7 +529,7 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 	})
 
 	Describe("Endpoint Change Health Reset", func() {
-		It("resets and re-checks when endpoint changes to a healthy SP", func() {
+		It("resets and re-checks when endpoint changes to a healthy SP (IT-HMN-180)", func() {
 			mockSP := startMockSP(`{"status":"healthy"}`)
 			DeferCleanup(mockSP.Close)
 
@@ -556,7 +556,7 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 				"initial check on new endpoint should transition back to Ready")
 		})
 
-		It("resets to Unhealthy when endpoint changes to an unreachable SP", func() {
+		It("resets to Unhealthy when endpoint changes to an unreachable SP (IT-HMN-181)", func() {
 			mockSP := startMockSP(`{"status":"healthy"}`)
 			DeferCleanup(mockSP.Close)
 
@@ -583,7 +583,7 @@ var _ = Describe("SP Health Monitoring Integration", Serial, Label("integration"
 				"must stay Unhealthy when new endpoint is unreachable")
 		})
 
-		It("does NOT reset health when updating non-endpoint fields", func() {
+		It("does NOT reset health when updating non-endpoint fields (IT-HMN-182)", func() {
 			mockSP := startMockSP(`{"status":"healthy"}`)
 			DeferCleanup(mockSP.Close)
 

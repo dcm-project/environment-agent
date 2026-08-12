@@ -401,6 +401,8 @@ func TestHandleMainMessage_MaxDeliverMetadataFailure(t *testing.T) {
 	assertAttrExists(t, rec, "nak_error")
 }
 
+// TestHandleMainMessage_SuccessLogsReceiptAndAck covers the "message
+// received" and "main message acked" logs. (IT-MSG-170, IT-MSG-171)
 func TestHandleMainMessage_SuccessLogsReceiptAndAck(t *testing.T) {
 	ch := &captureHandler{}
 	c := &Client{
@@ -445,6 +447,8 @@ func TestHandleMainMessage_SuccessLogsReceiptAndAck(t *testing.T) {
 	assertAttr(t, acked, "ce_id", "evt-main-ok")
 }
 
+// TestHandleMainMessage_HandlerErrorLogsWarnOnSuccessfulNak covers the
+// WARN/nak resolution logging half of (IT-MSG-171).
 func TestHandleMainMessage_HandlerErrorLogsWarnOnSuccessfulNak(t *testing.T) {
 	ch := &captureHandler{}
 	c := &Client{
@@ -478,6 +482,8 @@ func TestHandleMainMessage_HandlerErrorLogsWarnOnSuccessfulNak(t *testing.T) {
 	assertAttrExists(t, nacked, "error")
 }
 
+// TestHandleCancelMessage_SuccessLogsReceiptAndAck covers the receipt-logging
+// half of (IT-MSG-170) on the cancel subject.
 func TestHandleCancelMessage_SuccessLogsReceiptAndAck(t *testing.T) {
 	ch := &captureHandler{}
 	c := &Client{

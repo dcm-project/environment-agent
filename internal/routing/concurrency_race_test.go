@@ -12,7 +12,7 @@ import (
 // TestResourceSet_ConcurrentAddIfAbsentRemove_NoRace stresses the bounded LRU
 // set (claimedResourcesSet's underlying type) with concurrent
 // Add/AddIfAbsent/Remove/Contains across a small key space, so any future
-// refactor that weakens the mutex gets caught by `go test -race`.
+// refactor that weakens the mutex gets caught by `go test -race`. (UT-RTE-046)
 func TestResourceSet_ConcurrentAddIfAbsentRemove_NoRace(t *testing.T) {
 	const maxSize = 10
 	rs := routing.NewResourceSet(maxSize)
@@ -52,7 +52,7 @@ func TestResourceSet_ConcurrentAddIfAbsentRemove_NoRace(t *testing.T) {
 // many goroutines continuously race to claim-then-release the same key. If
 // AddIfAbsent/Remove ever let two goroutines believe they both hold the lock
 // at once, this test catches it directly (not just via `go test -race`,
-// which wouldn't flag a logic bug here).
+// which wouldn't flag a logic bug here). (UT-RTE-047)
 func TestKeyLock_ReverseRaceOrdering_MutualExclusion(t *testing.T) {
 	kl := routing.NewKeyLock()
 	const key = "res-race"

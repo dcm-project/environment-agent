@@ -14,7 +14,7 @@ import (
 // TestAttemptSetup_SetupDoneShortCircuits verifies attemptSetup's setupDone
 // guard returns before setupStreamsAndConsume runs again, so a NATS
 // reconnect can't re-append to c.consumers. A nil *nats.Conn is safe here
-// only because that guard fires first.
+// only because that guard fires first. (UT-MSG-060)
 func TestAttemptSetup_SetupDoneShortCircuits(t *testing.T) {
 	c := NewClient(ClientConfig{AgentName: "test-agent", TopicName: "t"}, slog.Default())
 	c.setupDone = true // simulate: initial setup already completed once
@@ -33,6 +33,7 @@ func TestAttemptSetup_SetupDoneShortCircuits(t *testing.T) {
 // NOT latch setupDone, so a later retry (background retry loop or a fresh
 // connect) can still succeed. TestAttemptSetup_SetupDoneShortCircuits only
 // covers the already-done short-circuit; this covers actual recovery.
+// (UT-MSG-100)
 func TestAttemptSetup_RecoversAfterTransientFailure(t *testing.T) {
 	opts := natstest.DefaultTestOptions
 	opts.Port = -1
@@ -93,7 +94,7 @@ func TestAttemptSetup_RecoversAfterTransientFailure(t *testing.T) {
 // TestBeginConsuming_ConsumingFlagShortCircuits complements the above:
 // even if setupStreamsAndConsume were ever re-entered (e.g. a future
 // DeferConsume/StartConsuming race), beginConsuming has its own independent
-// consuming-flag guard preventing a second append to c.consumers.
+// consuming-flag guard preventing a second append to c.consumers. (UT-MSG-061)
 func TestBeginConsuming_ConsumingFlagShortCircuits(t *testing.T) {
 	c := NewClient(ClientConfig{}, slog.Default())
 	c.consuming = true // simulate: live consumption already started once

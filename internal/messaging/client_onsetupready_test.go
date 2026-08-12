@@ -38,7 +38,7 @@ func (*fakeConsumeContext) Closed() <-chan struct{} { ch := make(chan struct{});
 // TestSetupStreamsAndConsume_FiresOnSetupReadyBeforeConsuming verifies
 // onSetupReady fires exactly once, synchronously within setupStreamsAndConsume
 // with c.js/mainCons/cancelCons already populated, and before beginConsuming's
-// live consume loops start — see onSetupReady's doc comment.
+// live consume loops start — see onSetupReady's doc comment. (UT-MSG-080)
 func TestSetupStreamsAndConsume_FiresOnSetupReadyBeforeConsuming(t *testing.T) {
 	c := NewClient(ClientConfig{AgentName: "test-agent", TopicName: "t", DeferConsume: true}, slog.Default())
 
@@ -99,7 +99,7 @@ type fakeJetStream struct {
 
 // TestBeginConsuming_ConcurrentCallsStartExactlyOneConsumeLoopEach verifies
 // beginConsuming holds c.mu for its entire check-then-act sequence, so under
-// concurrent calls only one caller ever invokes Consume() per topic.
+// concurrent calls only one caller ever invokes Consume() per topic. (UT-MSG-090)
 func TestBeginConsuming_ConcurrentCallsStartExactlyOneConsumeLoopEach(t *testing.T) {
 	// Many trials, each releasing a batch of goroutines simultaneously via a
 	// shared start barrier, to maximize the odds of catching a race.
@@ -142,7 +142,7 @@ func TestBeginConsuming_ConcurrentCallsStartExactlyOneConsumeLoopEach(t *testing
 // verifies finishSetup reports failure (not success) when the callback's
 // StartConsuming() fails to actually start consuming, so attemptSetup retries
 // instead of latching setupDone and stranding the client — see finishSetup's
-// doc comment.
+// doc comment. (UT-MSG-095)
 func TestFinishSetup_DoesNotReportSuccessWhenBeginConsumingFailsAfterCallback(t *testing.T) {
 	c := NewClient(ClientConfig{AgentName: "test-agent", TopicName: "t", DeferConsume: true}, slog.Default())
 

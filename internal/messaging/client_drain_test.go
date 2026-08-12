@@ -52,7 +52,7 @@ func (emptyMessageBatch) Error() error { return nil }
 
 // TestDrainCancelTopic_ContinuesPastTransientFetchError verifies a transient
 // Fetch failure doesn't truncate the drain — REQ-MSG-090 requires the deny
-// list fully populated before main-topic processing begins.
+// list fully populated before main-topic processing begins. (UT-MSG-070)
 func TestDrainCancelTopic_ContinuesPastTransientFetchError(t *testing.T) {
 	c := NewClient(ClientConfig{}, slog.Default())
 	fc := &fakeCancelConsumer{failN: 2}
