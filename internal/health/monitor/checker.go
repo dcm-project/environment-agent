@@ -20,6 +20,7 @@ type ExternalChecker struct {
 	client   *http.Client
 }
 
+// NewExternalChecker creates an ExternalChecker for the given SP endpoint.
 func NewExternalChecker(endpoint string) *ExternalChecker {
 	return &ExternalChecker{endpoint: strings.TrimRight(endpoint, "/"), client: &http.Client{}}
 }
@@ -62,6 +63,7 @@ type EmbeddedChecker struct {
 	checkFn func() HealthCheckResult
 }
 
+// NewEmbeddedChecker creates an EmbeddedChecker backed by checkFn.
 func NewEmbeddedChecker(checkFn func() HealthCheckResult) *EmbeddedChecker {
 	return &EmbeddedChecker{checkFn: checkFn}
 }

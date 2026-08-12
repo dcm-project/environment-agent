@@ -305,9 +305,9 @@ var _ = Describe("Message Durability", Label("integration"), func() {
 		publishCE(ctx, testJS, topics.Main, cloudevent.TypeRequestCreate, "dcm/test", map[string]string{"key": "value"})
 		Eventually(handlerStarted, 5*time.Second).Should(Receive())
 
-		// Stop while the handler is still sleeping — the old ConsumeContext.
-		// Stop()-based shutdown would tear down the subscription immediately,
-		// racing the handler's in-flight Ack; Drain must let it finish first.
+		// Stop while the handler is still sleeping: an immediate subscription
+		// teardown would race the handler's in-flight Ack, so Drain must let
+		// it finish first.
 		stopDone := make(chan struct{})
 		go func() { client.Stop(); close(stopDone) }()
 		Eventually(stopDone, shutdownWaitBound).Should(BeClosed(), "Stop must return once the in-flight handler finishes (bounded by shutdownDrainTimeout)")

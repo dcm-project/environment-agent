@@ -1,6 +1,7 @@
 package routing_test
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,11 +13,12 @@ import (
 // set (claimedResourcesSet's underlying type) with concurrent
 // Add/AddIfAbsent/Remove/Contains across a small key space, so any future
 // refactor that weakens the mutex gets caught by `go test -race`.
-func TestResourceSet_ConcurrentAddIfAbsentRemove_NoRace(_ *testing.T) {
-	rs := routing.NewResourceSet(10)
+func TestResourceSet_ConcurrentAddIfAbsentRemove_NoRace(t *testing.T) {
+	const maxSize = 10
+	rs := routing.NewResourceSet(maxSize)
 	const goroutines = 50
 	const itersPerGoroutine = 500
-	const keySpace = 5
+	const keySpace = 20 // > maxSize, so the LRU eviction path actually runs
 
 	var wg sync.WaitGroup
 	for g := 0; g < goroutines; g++ {
@@ -39,6 +41,10 @@ func TestResourceSet_ConcurrentAddIfAbsentRemove_NoRace(_ *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+
+	if got := rs.Len(); got > maxSize {
+		t.Fatalf("ResourceSet grew past maxSize: len=%d maxSize=%d", got, maxSize)
+	}
 }
 
 // TestKeyLock_ReverseRaceOrdering_MutualExclusion stresses KeyLock's
@@ -67,6 +73,7 @@ func TestKeyLock_ReverseRaceOrdering_MutualExclusion(t *testing.T) {
 				if atomic.AddInt32(&holders, 1) > 1 {
 					atomic.AddInt32(&violations, 1)
 				}
+				runtime.Gosched() // widen the window so an overlapping holder isn't missed
 				atomic.AddInt32(&holders, -1)
 				kl.Remove(key)
 			}

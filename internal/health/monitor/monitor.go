@@ -38,6 +38,7 @@ type Monitor struct {
 	wg           sync.WaitGroup
 }
 
+// New creates a Monitor with the given health tracker, config, and logger.
 func New(healthTracker provider.HealthTracker, cfg config.HealthConfig, logger *slog.Logger) *Monitor {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Monitor{

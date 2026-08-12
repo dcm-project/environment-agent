@@ -185,8 +185,6 @@ the enhancement will reflect the implementation.
 
 **Related requirements:** REQ-HTTP-020
 
-**Ref:** MF-R3 from multi-model review panel (Codex, 2026-07-20)
-
 ### DD-150: Non-strict handler pattern (v1alpha1)
 
 **Decision:** Use `HandlerWithOptions` with `server.Unimplemented{}` for Topic 1
@@ -213,8 +211,8 @@ runtime, not at construction time. This matches all 4 active peer repos.
 
 **Rationale:** Keeping constructor pure (no I/O resources) and passing the
 listener at runtime boundary improves testability and cross-repo consistency.
-`Addr()` reads from a field set during `Run()`. Tests that previously passed the
-listener to `New()` are updated to pass it to `Run()` instead.
+`Addr()` reads from a field set during `Run()`. Tests pass the listener to
+`Run()`, not to `New()`.
 
 **Related requirements:** REQ-HTTP-010
 
@@ -254,11 +252,10 @@ an empty `.ID` (registry/store data corruption — should be unreachable given
 the single-writer registration path) as Unavailable rather than querying
 health state with an empty key or routing to it. See REQ-RTE-026.
 
-**Amendment (PR #19 review):** A review pass initially recommended removing
-this branch outright as dead code per `quality.mdc`'s single-point-of-defense
-rule, since it had zero test coverage. On reconsideration, the branch is kept
-and tested (`IT-RTE-150`) rather than deleted, but not for the reason
-originally given here: `store.FileStore` already rejects empty-`.ID` records
+**Amendment: this is an interface-gap defense, not a corruption defense.**
+This branch looks like dead code under `quality.mdc`'s single-point-of-defense
+rule against the production `FileStore` wiring, but is kept and tested
+(`IT-RTE-150`) rather than deleted: `store.FileStore` already rejects empty-`.ID` records
 on both `Save` and every read (`validateStoredProvider`), so under the
 production `store.NewFileStore` wiring this branch is unreachable — on-disk
 corruption surfaces as a `GetByName` **error** (line 30-32's branch), not as
@@ -454,9 +451,9 @@ refactor that touches these guards is aware of the invariant they protect.
 **Rationale:** `RegisterEmbedded` → `registerEmbeddedType` calls `monitor.Monitor.RegisterProvider`
 with `initialCheck=true`, which runs the embedded SP's health check synchronously and invokes the
 monitor's `onTransition` callback in-line — before `RegisterProvider` even returns — if the check
-result differs from the assumed initial status. If that callback isn't set yet (`main.go`
-previously called `RegisterEmbedded` immediately after `LoadPersisted`, long before
-`registrar`/`retryProcessor`/`healthCEPub` exist to be wired into the callback), that transition is
+result differs from the assumed initial status. If that callback isn't wired yet — e.g. if
+`RegisterEmbedded` runs immediately after `LoadPersisted`, before
+`registrar`/`retryProcessor`/`healthCEPub` exist to be wired into the callback — that transition is
 silently dropped: no retry-topic reprocessing, no health CloudEvent, and DCM re-registration only
 happens to be compensated for by the unconditional `NotifyServiceTypeChange()` kick later in
 `run()`. This is a general property of `Monitor.RegisterProvider`'s `initialCheck` path, not
@@ -517,8 +514,7 @@ original implementation returned this error like any other write failure, and `s
 back in-memory registry/health state to the pre-write state — which would desync the in-memory
 registry from the store, since the disk had already moved on to the post-write state. `NewFileStore`
 now takes a `*slog.Logger` (matches the `monitor.New`/`health.NewCEPublisher` convention of a
-required, non-nil logger dependency) purely to make this warning observable; see `UT-SPR-112`, RED
-confirmed via a temporary revert to the old "propagate as error" behavior.
+required, non-nil logger dependency) purely to make this warning observable; see `UT-SPR-112`.
 
 ### DD-320: `name`/`service_type` are trimmed once, at the HTTP handler boundary
 
@@ -555,7 +551,7 @@ file+env view be passed in as a plain map rather than mutating the real process 
 `os.Setenv`, which would leak file-sourced values across repeated `Load()` calls (e.g. into
 unrelated test cases that never touch `AGENT_CONFIG_FILE` themselves) — verified by
 `UT-XC-CFG-063`, which asserts `os.LookupEnv` does NOT see file-sourced keys after `Load()`
-returns. This closes a gap where file-based config was previously "entirely unimplemented — env vars only."
+returns.
 
 **Related requirements:** REQ-XC-CFG-010
 
@@ -574,9 +570,7 @@ it through `messaging.Client`'s own abstractions (fakes/mocks of the JetStream p
 observing the actual bytes/headers a NATS consumer receives. A refactor that accidentally dropped
 the `jetstream.WithMsgID(msgID)` option, or passed the wrong ID, would still pass those tests.
 Fetching the message back out via an independent `jetstream.JetStream` connection created directly
-from the test (not reusing `Client`'s internals) closes that blind spot. RED confirmed by temporarily
-reverting `PublishWithMsgID` to `js.Publish(ctx, subject, data)` (dropping the msg-ID option) —
-both tests failed as expected — then reverting back to GREEN.
+from the test (not reusing `Client`'s internals) closes that blind spot.
 
 **Related requirements:** REQ-MSG-135, REQ-XC-CE-050
 
@@ -586,15 +580,15 @@ both tests failed as expected — then reverting back to GREEN.
 synchronously from within `setupStreamsAndConsume`, right after `c.js`/`c.mainCons`/`c.cancelCons`
 are populated for the first time, and before any live consumption begins. `main.go` now constructs
 `retry.Processor` before calling `msgClient.Start`, wires `SetOnSetupReady` to run
-`retryProcessor.ProcessOnRestart` followed by `msgClient.StartConsuming()`, and removed the old
-direct calls to both that previously ran synchronously right after `Start` returned. Separately,
+`retryProcessor.ProcessOnRestart` followed by `msgClient.StartConsuming()`, replacing direct calls
+to both right after `Start` returned. Separately,
 `beginConsuming` was changed to hold `c.mu` for its entire check-then-act sequence (including the
 `Consume()` calls) instead of releasing it between the `consuming` guard check and setting the flag.
 
 **Rationale:** `messaging.Client.Start` is explicitly non-blocking (AC-MSG-050: NATS may still be
-unreachable when it returns). The composition root previously called
-`retryProcessor.ProcessOnRestart` synchronously right after `Start`, assuming JetStream was already
-set up — but `Processor.fetchAllFromConsumer` silently returns `(nil, nil)` when `JSProvider()` is
+unreachable when it returns). Calling `retryProcessor.ProcessOnRestart` synchronously right after
+`Start` would assume JetStream is already set up — but `Processor.fetchAllFromConsumer` silently
+returns `(nil, nil)` when `JSProvider()` is
 nil, and `ProcessOnRestart` is invoked exactly once at startup with no retry of its own. If NATS
 happened to not be connected yet at that exact instant (a scenario AC-MSG-050 explicitly requires
 the agent to tolerate, not a rare edge case), restart-drain of the retry/cancel backlog would be
@@ -604,14 +598,12 @@ loss/stealing. `SetOnSetupReady` ties the drain-then-consume sequence to the one
 readiness is actually known, whether that's Start's own synchronous connect attempt or a later
 `ReconnectHandler`-driven `doSetup`; `attemptSetup`'s existing `setupDone` single-flight guard
 ensures it fires at most once. This also incidentally closes a related concurrency gap: with
-`StartConsuming` now called from exactly one place (inside the once-only callback), the previous
+`StartConsuming` now called from exactly one place (inside the once-only callback), a
 theoretical race where two overlapping `StartConsuming`/`doSetup` callers could each start a
 duplicate live consume loop on the same durable consumer (`beginConsuming`'s check-then-act
 without holding the lock throughout) is unreachable via the production call path — but
 `beginConsuming` was hardened directly anyway (rather than relying on "only one caller in
 practice") since it remains a public method any future caller could invoke concurrently.
-RED confirmed for the concurrency fix via a barrier-synchronized multi-trial test against the
-reverted (lock-released) implementation before restoring the fix.
 
 **Related requirements:** REQ-RCM-080, REQ-MSG-100
 ### DD-360: Registrar panic recovery must not let the goroutine exit permanently
@@ -636,10 +628,7 @@ from this agent" — arguably worse than a crash, since a crash is at least visi
 supervisor restart) whereas this failure mode is silent. Restarting `run()` after a panic is safe
 because DCM registration is idempotent (REQ-DCM-080): even if the agent was already registered and
 mid-heartbeat when a panic occurred, restarting from the prerequisite-wait phase just re-registers,
-which the control plane treats as an update to the existing agent entry, not a duplicate. RED
-confirmed via `IT-DCM-180` against the pre-fix `Start` (single `recover()`, no restart loop): the
-new assertion (registration eventually succeeds after 3 panics) timed out as expected, since the
-old code's goroutine exited for good after the very first panic.
+which the control plane treats as an update to the existing agent entry, not a duplicate.
 
 **Related requirements:** REQ-DCM-070
 
@@ -662,10 +651,7 @@ regression tests — construct `ProviderService`/
 `monitor.Monitor` directly and prove the general ordering property in isolation; they never touch
 `main.go`'s `run()` at all. If `main.go`'s actual construction order were reverted to the
 pre-fix state (`RegisterEmbedded` before `SetOnTransition`/`SetOnChange`), those unit tests
-would keep passing regardless, since they don't exercise the composition root's wiring. RED
-confirmed by temporarily swapping the two blocks back to the pre-fix order in `main.go`: the new
-test timed out waiting for the health CE (10s), as expected, then passed again once the order was
-restored.
+would keep passing regardless, since they don't exercise the composition root's wiring.
 
 **Related requirements:** REQ-SPR-030, REQ-HMN-100, REQ-HMN-120
 ### DD-380: `RequestErrorHandlerFunc` wired to RFC 7807 output
@@ -787,9 +773,8 @@ ready" latch. If `beginConsuming`'s `Consume()` call failed transiently — plau
 reconnect boundary, since `beginConsuming` now runs synchronously inside `onSetupReady`, itself
 called from `setupStreamsAndConsume`, itself invoked from a `ConnectHandler`/`ReconnectHandler` —
 the client would silently and permanently strand itself "connected but not consuming" until process
-restart: exactly the class of failure the restart-drain fix was introduced to prevent, just one step further down the
-same call chain. Confirmed RED (a temporarily-reverted single line: `return true` unconditionally)
-against the new regression test before restoring the fix.
+restart: exactly the class of failure the restart-drain fix was introduced to prevent, just one step
+further down the same call chain.
 
 **Related requirements:** REQ-RCM-080, REQ-MSG-100
 

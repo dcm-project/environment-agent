@@ -8,8 +8,7 @@ import (
 
 // TestReconnectDelay_ExponentialWithJitter validates REQ-MSG-100: NATS
 // reconnect delay uses the same exponential-backoff-with-full-jitter formula
-// as REQ-DCM-050 (min(initial×2^attempt, max) with full jitter), not the
-// previous fixed nats.ReconnectWait(2*time.Second).
+// as REQ-DCM-050 (min(initial×2^attempt, max) with full jitter).
 func TestReconnectDelay_ExponentialWithJitter(t *testing.T) {
 	c := NewClient(ClientConfig{
 		ReconnectInitialBackoff: 1 * time.Second,

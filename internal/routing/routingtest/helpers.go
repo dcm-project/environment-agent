@@ -224,6 +224,7 @@ type FakeStore struct {
 	GetByNameErr error // when non-nil, GetByName returns this error
 }
 
+// NewFakeStore creates an empty FakeStore.
 func NewFakeStore() *FakeStore {
 	return &FakeStore{Providers: make(map[string]*store.StoredProvider)}
 }

@@ -556,10 +556,7 @@ Unless overridden, tests use:
   `internal/provider/service` prove the general ordering property (SetOnTransition must be wired
   before RegisterEmbedded) by manually constructing `ProviderService`/`monitor.Monitor` directly;
   they never touch `main.go`'s `run()` at all, so if `main.go`'s actual wiring order were reverted
-  to the pre-fix state, those unit tests would keep passing regardless. RED confirmed by
-  temporarily swapping `main.go`'s `RegisterEmbedded` call back to before the
-  `SetOnTransition`/`SetOnChange` wiring — the test timed out waiting for the health CE, as
-  expected — then reverting to GREEN
+  to the pre-fix state, those unit tests would keep passing regardless.
 
 ---
 
@@ -2159,9 +2156,7 @@ Unless overridden, tests use:
 - **When** `config.Load()` is called
 - **Then** `cfg.Server.Address` MUST be `:9090`
 - **Note:** unit-tested directly against `config.Load()` (a pure function of its inputs) rather than
-  through a full agent-startup integration test — see `UT-XC-CFG-060` in `unit-tests.md`. This
-  AC/IT pair previously described intended behavior for a feature that was "entirely
-  unimplemented" — no backing Go test existed until this fix.
+  through a full agent-startup integration test — see `UT-XC-CFG-060` in `unit-tests.md`.
 
 ---
 

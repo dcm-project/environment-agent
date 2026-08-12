@@ -129,9 +129,9 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 		runErrCh := make(chan error, 1)
 		go func() { runErrCh <- srv.Run(ctx, ln) }()
 
-		// Race: either Run() errors (RED) or server starts serving (GREEN).
-		// Use HTTP readiness probe — TCP connect alone isn't enough since
-		// the listener is open but no HTTP server may be attached.
+		// Run() erroring and the server starting to serve race each other, so
+		// poll with an HTTP readiness probe — TCP connect alone isn't enough
+		// since the listener is open but no HTTP server may be attached yet.
 		ready := make(chan struct{})
 		go func() {
 			for {

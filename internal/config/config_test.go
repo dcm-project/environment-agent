@@ -463,7 +463,7 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 
 // writeConfigFile writes a .env-style (KEY=VALUE per line) config file and
 // points AGENT_CONFIG_FILE at it. This is REQ-XC-CFG-010's MAY-level
-// file-based config support (previously entirely unimplemented).
+// file-based config support.
 func writeConfigFile(contents string) {
 	path := GinkgoT().TempDir() + "/agent.env"
 	Expect(os.WriteFile(path, []byte(contents), 0o600)).To(Succeed())

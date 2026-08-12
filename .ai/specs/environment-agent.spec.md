@@ -377,7 +377,7 @@ service type with selection strategies.
 | REQ-SPR-180 | On startup, the agent MUST load persisted registrations before registering embedded SPs or accepting external ones | MUST | |
 | REQ-SPR-190 | An external SP registered during a prior session MUST retain its service type slot across agent restarts | MUST | |
 | REQ-SPR-181 | If the persistence layer fails to load on startup (corruption, I/O error, schema mismatch), the agent MUST log the error and exit immediately (fail fast) | MUST | |
-| REQ-SPR-250 | On startup, `LoadPersisted` MUST log, at INFO, each restored provider's `name`, `service_type`, and type (embedded/external), plus a final summary count | MUST | Restore was previously silent on success — only conflicts logged |
+| REQ-SPR-250 | On startup, `LoadPersisted` MUST log, at INFO, each restored provider's `name`, `service_type`, and type (embedded/external), plus a final summary count | MUST | |
 
 > **Known limitation (v1alpha1):** When an external SP becomes Unavailable
 > (via health monitoring), its registration is retained in local persistent
@@ -1052,7 +1052,7 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
 | REQ-DCM-140 | After successful registration, the agent MUST send periodic heartbeats to DCM via `PUT /api/v1alpha1/agents/{agentId}/heartbeat` | MUST | |
-| REQ-DCM-150 | The heartbeat payload MUST include `timestamp` (ISO 8601) and `consumer_lag`: the total count of messages on the main topic's durable consumer that have not yet been acknowledged, counting both messages still queued for delivery to that consumer and messages already delivered to it but not yet acknowledged — excluding the retry and cancel topics entirely. `timestamp` MUST be strictly greater than the previous heartbeat's `timestamp` | MUST | Generated fresh via `time.Now()` on every send; DCM rejects a heartbeat whose timestamp isn't strictly increasing (control-plane review item #8) |
+| REQ-DCM-150 | The heartbeat payload MUST include `timestamp` (ISO 8601) and `consumer_lag`: the total count of messages on the main topic's durable consumer that have not yet been acknowledged, counting both messages still queued for delivery to that consumer and messages already delivered to it but not yet acknowledged — excluding the retry and cancel topics entirely. `timestamp` MUST be strictly greater than the previous heartbeat's `timestamp` | MUST | Generated fresh via `time.Now()` on every send; DCM rejects a heartbeat whose timestamp isn't strictly increasing |
 | REQ-DCM-160 | The heartbeat interval MUST be configurable | MUST | |
 | REQ-DCM-170 | Heartbeat failures MUST be logged and retried on the next interval without causing the agent to exit | MUST | |
 | REQ-DCM-180 | DCM registrar startup MUST be logged at INFO. Successful heartbeats MUST be logged at DEBUG with `agent_id`, `consumer_lag`. Successful re-registration MUST be logged at INFO with `agent_id` | MUST | Today only failures/retries are logged on these three paths; success was silent |
