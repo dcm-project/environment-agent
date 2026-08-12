@@ -339,6 +339,20 @@ Unless overridden, tests use:
 
 ---
 
+### IT-SPR-085: Embedded SP preserves identity across restart
+
+- **Validates AC:** AC-SPR-052
+- **Test Infrastructure:** Real HTTP server, real filesystem persistence, `AGENT_EMBEDDED_SPS`
+- **Given** an embedded SP is registered for a persisted service type
+- **When** the agent process is stopped and restarted
+- **Then** `GET /api/v1alpha1/providers` MUST report the same provider `id` and `create_time` for
+  that service type as before the restart — the end-to-end companion to `resolveEmbeddedIdentity`'s
+  unit tests (UT-SPR-104–107 in `.ai/test-plans/unit-tests.md`), proving identity stability holds
+  through the full `LoadPersisted` → `RegisterEmbedded` startup sequence, not just the helper
+  function in isolation
+
+---
+
 ### IT-SPR-090: Re-registration with changed service type (available)
 
 - **Validates AC:** AC-SPR-095
@@ -602,6 +616,59 @@ Unless overridden, tests use:
 - **When** each is successfully restored
 - **Then** an INFO log MUST be emitted per provider with `name`, `service_type`, `type`
 - **And** a final INFO summary log MUST be emitted with `restored` and `conflicts` counts
+
+### IT-SPR-194: Embedded SP re-registration with stale persisted state logs WARN, not INFO
+
+- **Validates AC:** AC-SPR-221
+- **Test Infrastructure:** `slog.Handler` capture; store wrapped to fail `Save` while leaving the
+  existing persisted record intact
+- **Given** an embedded SP already registered once successfully (existing persisted record present)
+- **When** it re-registers and the persistence write now fails
+- **Then** a WARN log MUST be emitted with `service_type`, `provider_id` noting the stale persisted state
+- **And** the REQ-SPR-220 success INFO log MUST NOT be emitted again for that attempt
+
+### IT-SPR-195: Embedded SP removal logged on successful cleanup
+
+- **Validates AC:** AC-SPR-222
+- **Test Infrastructure:** `slog.Handler` capture
+- **Given** an embedded SP is registered, then its service type is dropped from the enabled list
+- **When** `removeStaleEmbedded` deletes its persisted record successfully
+- **Then** an INFO log MUST be emitted with `service_type`, `provider_id`, `name`
+
+### IT-SPR-196: Embedded SP removal suppressed when the store delete fails
+
+- **Validates AC:** AC-SPR-222
+- **Test Infrastructure:** `slog.Handler` capture; store wrapped to fail `Delete`
+- **Given** an embedded SP is registered, then its service type is dropped from the enabled list
+- **When** the store's `Delete` call fails
+- **Then** the INFO "embedded SP removed" log MUST NOT be emitted
+- **And** an ERROR log MUST be emitted instead
+
+### IT-SPR-197: External SP update success logged
+
+- **Validates AC:** AC-SPR-051
+- **Test Infrastructure:** Real HTTP server; `slog.Handler` capture
+- **Given** an external SP is already registered
+- **When** it re-registers with a changed field (e.g. `endpoint`) and the update persists successfully
+- **Then** an INFO log MUST be emitted with `service_type`, `provider_id`, `name`
+
+### IT-SPR-198: External SP update logging suppressed when the persistence write fails
+
+- **Validates AC:** AC-SPR-051
+- **Test Infrastructure:** Real HTTP server; `slog.Handler` capture; store wrapped to fail `Save`
+- **Given** an external SP is already registered
+- **When** it re-registers with a changed field and the persistence write fails
+- **Then** the INFO "external SP updated" log MUST NOT be emitted
+
+### IT-SPR-199: Health monitor re-registered when only the service type changes
+
+- **Validates AC:** AC-SPR-095
+- **Test Infrastructure:** Real health monitor wired to the service; `slog.Handler` capture
+- **Given** an external SP is registered for service type "database"
+- **When** it re-registers with only `service_type` changed (e.g. to "cache"), leaving `endpoint` unchanged
+- **Then** the health monitor's cached registration for that provider MUST be refreshed to the new
+  service type — a deeper proof than AC-SPR-095's HTTP-response-only assertion (IT-SPR-090), showing
+  the change actually propagates to the health-check wiring, not just the stored record
 
 ---
 
@@ -986,6 +1053,16 @@ Unless overridden, tests use:
 
 ---
 
+### IT-DCM-035: Retries prerequisite check via ticker, without an explicit notification
+
+- **Validates AC:** AC-DCM-020
+- **Test Infrastructure:** Mock DCM; `ServiceTypeLister` stub returning empty twice, then a real type
+- **Given** the agent is running with no eligible service types yet, and `NotifyServiceTypeChange` is never called
+- **When** the periodic prerequisite-retry ticker (`PrerequisiteRetryInterval`) re-evaluates and the lister now returns a non-empty type list
+- **Then** the agent MUST register to DCM, proving the ticker alone (not just an explicit notification) drives re-evaluation
+
+---
+
 ### IT-DCM-040: Pre-registration defers service type changes
 
 - **Validates AC:** AC-DCM-025
@@ -1135,6 +1212,18 @@ Unless overridden, tests use:
 
 ---
 
+### IT-DCM-135: Heartbeat payload timestamps strictly increase
+
+- **Validates AC:** AC-DCM-091
+- **Test Infrastructure:** Mock DCM capturing heartbeat request bodies
+- **Given** the registrar sends at least 3 heartbeats over time
+- **When** each heartbeat body's `timestamp` field is compared to the previous one
+- **Then** each MUST be strictly greater than the previous — unlike IT-DCM-130, which only checks
+  the wall-clock gap between requests, this asserts on the `timestamp` value inside the body itself,
+  which the control plane rejects if it does not strictly increase
+
+---
+
 ### IT-DCM-140: Heartbeat includes consumer lag (main topic only)
 
 - **Validates AC:** AC-DCM-090
@@ -1214,6 +1303,21 @@ Unless overridden, tests use:
 - **Given** a service-type change triggers re-registration and it succeeds
 - **When** it completes
 - **Then** an INFO log MUST be emitted with `agent_id`
+
+---
+
+### IT-DCM-195: Post-panic restart distinguishable from fresh start in the startup log
+
+- **Validates AC:** AC-DCM-055
+- **Test Infrastructure:** `slog.Handler` capture; `ServiceTypeLister` stub that panics once then
+  behaves normally
+- **Given** the registrar's dependency panics once, forcing the supervisor to recover and restart
+  the registrar goroutine
+- **When** both the initial startup and the post-panic restart emit a "DCM registrar starting" log
+- **Then** the initial log MUST NOT carry a `restart_attempt` attribute
+- **And** the restart's log MUST carry `restart_attempt >= 1`
+- **And** the "panic in DCM registrar goroutine, restarting" log MUST carry the same
+  `restart_attempt` value, so the two log lines can be cross-referenced
 
 ---
 
@@ -1434,6 +1538,31 @@ Unless overridden, tests use:
 - **When** the agent starts
 - **Then** `GET /api/v1alpha1/health` MUST return 200 promptly
 - **And** after NATS becomes available, the agent MUST reconnect and consume messages
+
+---
+
+### IT-MSG-105: Processes messages after delayed NATS start — setup completes on connect
+
+- **Validates AC:** AC-MSG-050
+- **Test Infrastructure:** `messaging.Client` started before any NATS server is listening; real
+  JetStream server started afterward on the same address
+- **Given** `Start` is called while NATS is unreachable
+- **When** a real NATS/JetStream server later starts listening on that address
+- **Then** the client MUST connect, complete setup (streams + consumers), and reach `IsConnected() == true`
+- **And** a CloudEvent published to the main subject afterward MUST be delivered to the main handler
+  — a deeper, full end-to-end proof than IT-MSG-100's HTTP-availability check alone
+
+---
+
+### IT-MSG-107: Creates consumers once the CP request stream appears mid-retry
+
+- **Validates AC:** AC-MSG-012
+- **Test Infrastructure:** Real NATS server (no JetStream stream pre-created); dynamic port
+- **Given** NATS is already reachable but the control-plane-owned `dcm-agent-requests` stream does
+  not exist yet, forcing `createRequestConsumer`'s inner retry loop (REQ-MSG-051)
+- **When** the stream is created later, while the agent's retry loop is still polling
+- **Then** the agent MUST detect the stream, successfully create its durable consumer, and begin
+  consuming — with no restart or manual intervention required
 
 ---
 
@@ -1831,13 +1960,19 @@ Unless overridden, tests use:
 ### IT-RTE-140: CloudEvent publish outcome logged
 
 - **Validates AC:** AC-RCM-140
-- **Test Infrastructure:** NATS; `slog.Handler` capture in `router_test.go`
+- **Test Infrastructure:** No real NATS needed — a fake `Publisher` stub (configurable error) lets
+  the failure path be forced deterministically; `slog.Handler` capture in
+  `router_publish_logging_test.go`, exercised via `Router.HandleCancel` (the cheapest public path
+  that reaches `publishCE`)
 - **Given** `Router.publishCE` is called and the publish succeeds
 - **When** the CE is published
 - **Then** an INFO log MUST be emitted with `ce_type`, `resource_id`
 - **Given** the publish fails (e.g. publisher returns an error)
 - **When** the publish attempt fails
 - **Then** a WARN log MUST be emitted with `ce_type`, `resource_id`, `error`
+- **Found via traceability audit:** this AC previously had no dedicated test anywhere — the
+  success path was only incidentally, non-specifically touched by `IT-XC-LOG-030`, and the
+  failure/WARN path was entirely untested
 
 ### IT-RTE-141: SP dispatch outcome logged, no request/response body leaked
 
@@ -2281,12 +2416,17 @@ Unless overridden, tests use:
 | AC-SPR-020 | IT-SPR-020 |
 | AC-SPR-030 | IT-SPR-030 |
 | AC-SPR-040 | IT-SPR-040 |
+| AC-SPR-051 | IT-SPR-197, IT-SPR-198 |
 | AC-SPR-050 | IT-SPR-050 |
 | AC-SPR-060 | IT-SPR-060 |
 | AC-SPR-070 | IT-SPR-070 |
 | AC-SPR-071 | IT-SPR-149, IT-SPR-149b |
+| AC-SPR-052 | IT-SPR-085 |
+| AC-SPR-220 | IT-SPR-190 |
+| AC-SPR-221 | IT-SPR-194 |
+| AC-SPR-222 | IT-SPR-195, IT-SPR-196 |
 | AC-SPR-090 | IT-SPR-080 |
-| AC-SPR-095 | IT-SPR-090 |
+| AC-SPR-095 | IT-SPR-090, IT-SPR-199 |
 | AC-SPR-096 | IT-SPR-100 |
 | AC-SPR-100 | IT-SPR-110 |
 | AC-SPR-105 | IT-SPR-120 |
@@ -2329,19 +2469,20 @@ Unless overridden, tests use:
 | AC-HMN-185 | IT-HMN-170 |
 | AC-DCM-010 | IT-DCM-010 |
 | AC-DCM-015 | IT-DCM-020 |
-| AC-DCM-020 | IT-DCM-030 |
+| AC-DCM-020 | IT-DCM-030, IT-DCM-035 |
 | AC-DCM-025 | IT-DCM-040 |
 | AC-DCM-030 | IT-DCM-050 |
 | AC-DCM-035 | IT-DCM-060 |
 | AC-DCM-040 | IT-DCM-070 |
 | AC-DCM-050 | IT-DCM-080 |
-| AC-DCM-055 | IT-DCM-180 (now also covers survive-multiple-panics-and-keep-retrying, not just single-panic-recovery — see DD-360) |
+| AC-DCM-055 | IT-DCM-180 (now also covers survive-multiple-panics-and-keep-retrying, not just single-panic-recovery — see DD-360), IT-DCM-195 |
 | AC-DCM-060 | IT-DCM-090 |
 | AC-DCM-061 | IT-DCM-100, IT-DCM-105, IT-DCM-106, IT-DCM-107 |
 | AC-DCM-070 | IT-DCM-110 |
 | AC-DCM-080 | IT-DCM-120 |
 | AC-DCM-085 | IT-DCM-130 |
 | AC-DCM-090 | IT-DCM-140 |
+| AC-DCM-091 | IT-DCM-135 |
 | AC-DCM-095 | IT-DCM-150 |
 | AC-DCM-100 | IT-DCM-160 |
 | AC-DCM-105 | IT-DCM-170 |
@@ -2355,7 +2496,8 @@ Unless overridden, tests use:
 | AC-MSG-030 | IT-MSG-070, IT-MSG-071 |
 | AC-MSG-035 | IT-MSG-080 |
 | AC-MSG-040 | IT-MSG-090, IT-MSG-130 |
-| AC-MSG-050 | IT-MSG-100 |
+| AC-MSG-050 | IT-MSG-100, IT-MSG-105 |
+| AC-MSG-012 | IT-MSG-107 |
 | AC-MSG-052 | UT-MSG-050, UT-MSG-051–053 (unit-tested: `reconnectDelay` is a pure function; see `.ai/test-plans/unit-tests.md`) |
 | AC-MSG-055 | IT-MSG-110, IT-MSG-073 |
 | AC-MSG-060 | IT-MSG-120, IT-MSG-072 |

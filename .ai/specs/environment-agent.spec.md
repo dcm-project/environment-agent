@@ -345,7 +345,10 @@ service type with selection strategies.
 | REQ-SPR-040 | Embedded SP registration MUST be performed in-process without a REST call | MUST | |
 | REQ-SPR-050 | If an embedded SP's service type is already occupied by a persisted external SP registration (from a prior session), the embedded SP registration for that service type MUST be skipped | MUST | |
 | REQ-SPR-051 | When an embedded SP registration is skipped due to slot conflict, the agent MUST log a warning and continue startup without failing; the skipped SP MUST NOT prevent other SPs from registering or the agent from becoming operational (HTTP server listening, messaging system connection initiated, health checks running) | MUST | |
+| REQ-SPR-052 | When registering an embedded SP for a service type that has a prior persisted *embedded* record, the agent MUST preserve that record's provider ID and `create_time` rather than generating new ones, so the provider's identity is stable across restarts. If no such prior embedded record exists — first registration, or the existing record is a different type (e.g. external), or the existing record has empty/zero fields — the agent MUST generate a new provider ID (REQ-SPR-091) and use the current time as `create_time` | MUST | Found via traceability audit: `resolveEmbeddedIdentity` implements this, but it had no governing requirement/AC — its 4 unit tests were mis-cited as UT-SPR-100–103, colliding with tests rightfully owned by AC-SPR-015 (REQ-SPR-030) and AC-SPR-111 (REQ-SPR-200) |
 | REQ-SPR-220 | Successful embedded SP registration MUST be logged at INFO with `service_type`, `provider_id` | MUST | Today only the skip-due-to-conflict case logs; the success path was silent |
+| REQ-SPR-221 | If an embedded SP registration succeeds in-memory but persisting it to disk fails while an existing persisted record for that service type remains intact, the agent MUST log a WARN (instead of the REQ-SPR-220 INFO) with `service_type`, `provider_id`, noting the persisted state is now stale, and MUST continue running rather than treating the write failure as fatal | MUST | Found via traceability audit: implemented (the stale-state WARN branch), but had no governing requirement — see `IT-SPR-194` |
+| REQ-SPR-222 | When an embedded SP is removed because it is no longer enabled in configuration, successful removal MUST be logged at INFO with `service_type`, `provider_id`, `name`. If the underlying store delete fails, the agent MUST NOT log the success message and MUST instead log the failure at ERROR | MUST | Found via traceability audit: implemented in `removeStaleEmbedded`/`cleanupEmbeddedRecord`, but had no governing requirement — see `IT-SPR-195`, `IT-SPR-196` |
 
 #### Requirements — External SP Registration
 
@@ -368,6 +371,7 @@ service type with selection strategies.
 | REQ-SPR-131 | If the request body passes structural parsing but fails semantic validation (`schema_version` pattern, `endpoint` not a valid URI, `?id=` pattern violation), the agent MUST return 422 Unprocessable Entity with RFC 7807 error body (type=UNPROCESSABLE_ENTITY) | MUST | |
 | REQ-SPR-230 | Successful external SP registration (new registration, not update) MUST be logged at INFO with `service_type`, `provider_id`, `name` | MUST | Domain-level log distinct from the generic HTTP access-log status code |
 | REQ-SPR-240 | External SP registration rejected due to a service-type slot conflict MUST be logged at WARN with `service_type`, `name`, and the conflict error (which identifies the existing slot holder) | MUST | Today only visible as HTTP `status=409` in the generic access log |
+| REQ-SPR-241 | Successful external SP re-registration (an update to an existing record, not a new registration) MUST be logged at INFO with `service_type`, `provider_id`, `name` — distinct from REQ-SPR-230, which covers new registrations only. If persisting the update fails, the agent MUST NOT log this success message | MUST | Found via traceability audit: implemented, but had no governing requirement distinct from REQ-SPR-230 — see `IT-SPR-197`, `IT-SPR-198` |
 
 #### Requirements — Persistence
 
@@ -442,12 +446,46 @@ service type with selection strategies.
 - **And** a warning MUST be logged
 - **And** the agent MUST continue starting normally
 
+##### AC-SPR-052: Embedded SP identity preserved across restart
+
+- **Validates:** REQ-SPR-052
+- **Given** a persisted embedded record already exists for a service type (from a prior session)
+- **When** the embedded SP for that service type registers again
+- **Then** the new registration MUST reuse the existing record's provider ID and `create_time`
+- **Given** no persisted embedded record exists for the service type, or the persisted record for
+  that service type belongs to a different (external) type, or an existing embedded record has an
+  empty ID / zero `create_time`
+- **When** the embedded SP registers
+- **Then** the agent MUST generate a fresh provider ID and use the current time as `create_time`
+- **And** this MUST hold end-to-end across a real agent restart (`resolveEmbeddedIdentity` alone
+  proves the decision logic; identity stability must also survive the full `LoadPersisted` →
+  `RegisterEmbedded` startup sequence, not just the helper function in isolation)
+
 ##### AC-SPR-220: Embedded SP registration success logged
 
 - **Validates:** REQ-SPR-220
 - **Given** `registerEmbeddedType` completes without error
 - **When** the embedded SP is registered
 - **Then** an INFO log MUST be emitted with `service_type`, `provider_id`
+
+##### AC-SPR-221: Embedded SP registration with a stale persisted state logs WARN, not INFO
+
+- **Validates:** REQ-SPR-221
+- **Given** an embedded SP already has a persisted record, and a subsequent registration attempt's
+  persistence write (`Save`) fails
+- **When** the registration otherwise completes (in-memory)
+- **Then** a WARN log MUST be emitted noting the stale persisted state, with `service_type`, `provider_id`
+- **And** the REQ-SPR-220 success INFO log MUST NOT also be emitted for that same attempt
+
+##### AC-SPR-222: Embedded SP removal logged on success, suppressed on delete failure
+
+- **Validates:** REQ-SPR-222
+- **Given** an embedded SP is no longer enabled in configuration and is removed
+- **When** the store delete succeeds
+- **Then** an INFO log MUST be emitted with `service_type`, `provider_id`, `name`
+- **Given** the store delete instead fails
+- **When** removal is attempted
+- **Then** the INFO success log MUST NOT be emitted, and an ERROR log MUST be emitted instead
 
 ##### AC-SPR-040: External SP registration — success (new)
 
@@ -465,6 +503,16 @@ service type with selection strategies.
 - **When** `POST /api/v1alpha1/providers` is called with the same `name` and `service_type`
 - **Then** the response MUST be 200 OK
 - **And** the `update_time` MUST be refreshed
+
+##### AC-SPR-051: External SP re-registration (update) success logged, suppressed on save failure
+
+- **Validates:** REQ-SPR-241
+- **Given** an external SP re-registers with a changed field (e.g. `endpoint`)
+- **When** the update is persisted successfully
+- **Then** an INFO log MUST be emitted with `service_type`, `provider_id`, `name`
+- **Given** persisting that update instead fails
+- **When** the re-registration is attempted
+- **Then** the INFO success log MUST NOT be emitted
 
 ##### AC-SPR-060: Service type conflict
 
@@ -1139,6 +1187,9 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
   registration/heartbeating MUST keep being retried afterward, so DCM registration does not
   silently stall forever for the remainder of the process lifetime just because one dependency
   call panicked once
+- **And** the "DCM registrar starting" log line emitted by the restarted goroutine MUST carry a
+  `restart_attempt` attribute (absent on the initial, pre-panic startup log), so operators can
+  distinguish a post-panic restart from a fresh start in the logs
 
 ##### AC-DCM-070: Service type change triggers DCM update
 
@@ -1162,7 +1213,7 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 - **When** a heartbeat is sent
 - **Then** `consumer_lag` MUST be 5
 
-##### AC-DCM-095: Heartbeat timestamps strictly increase
+##### AC-DCM-091: Heartbeat timestamps strictly increase
 
 - **Validates:** REQ-DCM-150
 - **Given** the registrar sends multiple heartbeats over time
