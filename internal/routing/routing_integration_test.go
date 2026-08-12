@@ -409,16 +409,37 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(data.Error).To(Equal("NON_RETRYABLE_SP_ERROR"))
 	})
 
-	It("deny list filters cancelled create (IT-RTE-100)", func() {
+	It("deny list filters cancelled create and logs the drop (IT-RTE-100, IT-RTE-142)", func() {
 		registerProvider("normal-sp", "container", "", "embedded", v1alpha1.Ready)
 		denyList.Add("res-456")
-		setupDefaultRouter()
+
+		ch := &captureLogHandler{}
+		router = routing.NewRouter(routing.RouterDeps{
+			Registry: registry, HealthTracker: healthTracker, Store: st,
+			Forwarder: fakeForwarder, Publisher: publisher, RetryConsumer: fakeRetry,
+			DenyList: denyList, Config: routingCfg, Logger: slog.New(ch),
+			AgentName: "agent-prod-1", TopicName: topics.Main, RetryTopic: topics.Retry,
+		})
 
 		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-456", "container"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(0))
 
 		routingtest.ExpectNoResponseCE(responseSub, 500*time.Millisecond)
+
+		found := false
+		for _, rec := range ch.all() {
+			if rec.Message != "create request dropped, resource in deny list" || rec.Level != slog.LevelInfo {
+				continue
+			}
+			rec.Attrs(func(a slog.Attr) bool {
+				if a.Key == "resource_id" && a.Value.String() == "res-456" {
+					found = true
+				}
+				return true
+			})
+		}
+		Expect(found).To(BeTrue(), "deny-list drop must be logged at INFO with resource_id")
 	})
 
 	It("deny list consume-on-use allows second request through (IT-RTE-105)", func() {
@@ -481,7 +502,7 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(1)) // still denied, no new call
 	})
 
-	It("cancel for request in retry topic removes matching message (IT-RTE-120)", func() {
+	It("cancel for request in retry topic removes matching message and logs the purge summary (IT-RTE-120, IT-RTE-142)", func() {
 		registerProvider("unhealthy-sp", "database", "http://mock:8080", "external", v1alpha1.Unhealthy)
 
 		acked, nakked := false, false
@@ -493,7 +514,13 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 				NakFunc: func() error { nakked = true; return nil },
 			},
 		}
-		setupDefaultRouter()
+		ch := &captureLogHandler{}
+		router = routing.NewRouter(routing.RouterDeps{
+			Registry: registry, HealthTracker: healthTracker, Store: st,
+			Forwarder: fakeForwarder, Publisher: publisher, RetryConsumer: fakeRetry,
+			DenyList: denyList, Config: routingCfg, Logger: slog.New(ch),
+			AgentName: "agent-prod-1", TopicName: topics.Main, RetryTopic: topics.Retry,
+		})
 
 		err := router.HandleCancel(ctx, routingtest.BuildCancelCE("res-789", "database"))
 		Expect(err).NotTo(HaveOccurred())
@@ -510,6 +537,19 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(data.ResourceID).To(Equal("res-789"))
 		Expect(data.AgentName).To(Equal("agent-prod-1"))
 		Expect(data.ServiceType).To(Equal("database"))
+
+		found := false
+		for _, rec := range ch.all() {
+			if rec.Message != "retry topic purged for cancel" || rec.Level != slog.LevelInfo {
+				continue
+			}
+			attrs := map[string]slog.Value{}
+			rec.Attrs(func(a slog.Attr) bool { attrs[a.Key] = a.Value; return true })
+			if attrs["resource_id"].String() == "res-789" && attrs["matched"].Int64() == 1 && attrs["requeued"].Int64() == 1 {
+				found = true
+			}
+		}
+		Expect(found).To(BeTrue(), "purge summary must be logged at INFO with resource_id, matched, requeued")
 	})
 
 	It("delete bypasses deny list — denied resource still gets deleted (TC-7)", func() {

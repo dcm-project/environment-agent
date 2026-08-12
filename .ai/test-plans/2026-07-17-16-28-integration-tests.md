@@ -1792,13 +1792,14 @@ Unless overridden, tests use:
 ### IT-RTE-142: Deny-list drop and retry-topic purge summary logged
 
 - **Validates AC:** AC-RCM-160
-- **Test Infrastructure:** Same setup as IT-RTE-100 and IT-RTE-120, extended with `slog.Handler` capture
+- **Test Infrastructure:** Implemented as `slog.Handler`-capture extensions of IT-RTE-100 and
+  IT-RTE-120 in-place (same scenarios, no separate `It` needed)
 - **Given** a create request is dropped because its `resource_id` is on the deny list
 - **When** it is dropped
-- **Then** an INFO log MUST be emitted with `resource_id`
+- **Then** an INFO log MUST be emitted with `resource_id` (asserted in IT-RTE-100)
 - **Given** `purgeFromRetryTopic` runs during a cancel with other resources present in the retry topic
 - **When** it completes
-- **Then** an INFO log MUST be emitted with `resource_id`, `matched`, `requeued`
+- **Then** an INFO log MUST be emitted with `resource_id`, `matched`, `requeued` (asserted in IT-RTE-120)
 
 ---
 
