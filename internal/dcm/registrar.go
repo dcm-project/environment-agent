@@ -201,14 +201,12 @@ func (r *Registrar) run(ctx context.Context, restartAttempt int) {
 	}
 	retryTicker.Stop()
 
-	// Registration loop with backoff
 	if !r.doRegistration(ctx) {
 		// Non-retryable failure or context cancelled — block until shutdown
 		<-ctx.Done()
 		return
 	}
 
-	// Post-registration: heartbeat + service-type update loop
 	ticker := time.NewTicker(r.config.HeartbeatInterval)
 	defer ticker.Stop()
 
@@ -251,7 +249,6 @@ func (r *Registrar) doRegistration(ctx context.Context) bool {
 			return false
 		}
 
-		// Determine backoff duration
 		wait := r.computeBackoff(err, attempt)
 		attempt++
 		r.logger.Warn("DCM registration failed, retrying", "error", err, "attempt", attempt, "backoff", wait)
@@ -272,12 +269,13 @@ func (r *Registrar) doRegistration(ctx context.Context) bool {
 
 func (r *Registrar) computeBackoff(err error, attempt int) time.Duration {
 	var rle *RateLimitError
-	if errors.As(err, &rle) && rle.HasRetryAfter {
-		// ponytail: Retry-After intentionally NOT capped by MaxBackoff — server directive per REQ-DCM-060.
-		// DCM is our own trusted control plane; cap at MaxBackoff if trust boundary changes.
-		if rle.RetryAfter <= 0 {
-			return 0
-		}
+	// Retry-After is intentionally NOT capped by MaxBackoff — it's a server
+	// directive per REQ-DCM-060, and DCM is our own trusted control plane.
+	// Revisit capping if that trust boundary ever changes. Only trusted when
+	// positive: ParseRetryAfter already rejects non-positive values, but a
+	// zero/negative RetryAfter is treated as unusable here too, in case some
+	// other caller ever constructs a bad RateLimitError.
+	if errors.As(err, &rle) && rle.HasRetryAfter && rle.RetryAfter > 0 {
 		return rle.RetryAfter
 	}
 	calculated := backoff.CalculateBackoff(r.config.InitialBackoff, r.config.MaxBackoff, attempt)

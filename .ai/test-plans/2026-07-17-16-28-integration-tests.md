@@ -1077,6 +1077,17 @@ Unless overridden, tests use:
 
 ---
 
+### IT-DCM-106: Standard backoff on 429 with a past HTTP-date Retry-After
+
+- **Validates AC:** AC-DCM-061 (second clause)
+- **Test Infrastructure:** Mock DCM returning 429 with a `Retry-After` HTTP-date one hour in the past, then 201
+- **Given** DCM returns 429 with a stale/expired `Retry-After` HTTP-date on first attempt
+- **When** the agent retries
+- **Then** the gap between attempts MUST be bounded by MaxBackoff + tolerance (the unusable Retry-After is discarded, standard backoff applied — not a near-zero immediate-retry loop)
+- **And** the gap MUST be greater than 0
+
+---
+
 ### IT-DCM-110: Service type change triggers DCM update
 
 - **Validates AC:** AC-DCM-070
@@ -2280,7 +2291,7 @@ Unless overridden, tests use:
 | AC-DCM-050 | IT-DCM-080 |
 | AC-DCM-055 | IT-DCM-180 (now also covers survive-multiple-panics-and-keep-retrying, not just single-panic-recovery — see DD-360) |
 | AC-DCM-060 | IT-DCM-090 |
-| AC-DCM-061 | IT-DCM-100, IT-DCM-105 |
+| AC-DCM-061 | IT-DCM-100, IT-DCM-105, IT-DCM-106 |
 | AC-DCM-070 | IT-DCM-110 |
 | AC-DCM-080 | IT-DCM-120 |
 | AC-DCM-085 | IT-DCM-130 |

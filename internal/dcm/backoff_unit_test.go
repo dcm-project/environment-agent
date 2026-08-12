@@ -58,4 +58,11 @@ var _ = Describe("ParseRetryAfter", Label("unit"), func() {
 		Expect(ok).To(BeTrue())
 		Expect(d).To(Equal(999999999 * time.Second))
 	})
+
+	It("returns (0, false) for an HTTP-date in the past (UT-DCM-038)", func() {
+		now := time.Date(2025, 12, 1, 15, 55, 0, 0, time.UTC)
+		d, ok := dcm.ParseRetryAfter("Thu, 01 Dec 2025 15:50:00 GMT", now)
+		Expect(ok).To(BeFalse())
+		Expect(d).To(Equal(time.Duration(0)))
+	})
 })

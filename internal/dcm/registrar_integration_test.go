@@ -330,7 +330,6 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 
 		r.Start(ctx)
 
-		// Companion: Eventually agent_id becomes non-empty — fails on stub → RED
 		Eventually(func() bool {
 			_, registered := r.AgentID()
 			return registered
@@ -351,7 +350,6 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 
 		r.Start(ctx)
 
-		// Companion: Eventually mock receives registration POST — fails on no-op Start → RED
 		Eventually(func() int {
 			return len(mock.getRegistrations())
 		}, 2*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 1))
@@ -371,7 +369,6 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 			return len(mock.getRegistrations())
 		}, 500*time.Millisecond, 50*time.Millisecond).Should(Equal(0))
 
-		// Companion: Eventually POST when SP becomes available — fails on no-op Start → RED
 		lister.setTypes([]string{"container"})
 		r.NotifyServiceTypeChange()
 
@@ -411,7 +408,6 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 
 		r.Start(ctx)
 
-		// Companion: first POST must include both types — fails because no POST → RED
 		Eventually(func() int {
 			return len(mock.getRegistrations())
 		}, 3*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 1))
@@ -541,7 +537,8 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 
 		r.Start(ctx)
 
-		// Exact count: must be exactly 1 (not soft <= 1) — prevents accidental GREEN
+		// Exact count (not just >= 1): a second, unwanted registration would
+		// also satisfy a looser bound and go unnoticed.
 		Eventually(func() int {
 			return len(mock.getRegistrations())
 		}, 3*time.Second, 50*time.Millisecond).Should(Equal(1))
@@ -578,6 +575,32 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 	It("applies standard backoff on 429 without Retry-After (IT-DCM-105)", func() {
 		mock.mu.Lock()
 		mock.regSequence = []int{429, 201}
+		mock.mu.Unlock()
+
+		cfg := defaultRegistrarConfig(mock.server.URL)
+		cfg.InitialBackoff = 50 * time.Millisecond
+		cfg.MaxBackoff = 200 * time.Millisecond
+
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() int {
+			return len(mock.getRegistrations())
+		}, 5*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 2))
+
+		regs := mock.getRegistrations()
+		gap := regs[1].Timestamp.Sub(regs[0].Timestamp)
+		Expect(gap).To(BeNumerically("<=", cfg.MaxBackoff+50*time.Millisecond))
+		Expect(gap).To(BeNumerically(">", 0))
+	})
+
+	It("falls back to standard backoff on 429 with a past HTTP-date Retry-After (IT-DCM-106)", func() {
+		mock.mu.Lock()
+		mock.regSequence = []int{429, 201}
+		mock.retryAfter = time.Now().UTC().Add(-1 * time.Hour).Format(http.TimeFormat)
 		mock.mu.Unlock()
 
 		cfg := defaultRegistrarConfig(mock.server.URL)

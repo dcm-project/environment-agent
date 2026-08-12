@@ -45,8 +45,8 @@ type registrationResponse struct {
 	AgentID string `json:"agent_id"`
 }
 
-// ponytail: hand-rolled HTTP client — replace with generated control-plane client
-// once the DCM agent registration OpenAPI spec is published and a Go client is generated.
+// dcmClient is hand-rolled pending a generated control-plane client once the
+// DCM agent registration OpenAPI spec is published.
 type dcmClient struct {
 	baseURL    *url.URL
 	httpClient *http.Client
@@ -124,7 +124,8 @@ func (c *dcmClient) heartbeat(ctx context.Context, agentID string, payload heart
 		return fmt.Errorf("marshal heartbeat payload: %w", err)
 	}
 
-	// ponytail: agentID from trusted DCM control plane — no path-traversal sanitization needed beyond empty check above
+	// agentID comes from the trusted DCM control plane, so no path-traversal
+	// sanitization beyond the empty check above is needed.
 	endpoint := c.baseURL.JoinPath("api", "v1alpha1", "agents", agentID, "heartbeat").String()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
 	if err != nil {

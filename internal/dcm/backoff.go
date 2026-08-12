@@ -24,7 +24,10 @@ func ParseRetryAfter(value string, now time.Time) (time.Duration, bool) {
 	}
 
 	if t, err := http.ParseTime(value); err == nil {
-		return t.Sub(now), true
+		if d := t.Sub(now); d > 0 {
+			return d, true
+		}
+		return 0, false
 	}
 
 	return 0, false
