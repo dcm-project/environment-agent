@@ -10,7 +10,7 @@ require (
 	github.com/oapi-codegen/nethttp-middleware v1.1.2
 	github.com/oapi-codegen/oapi-codegen/v2 v2.8.0
 	github.com/oapi-codegen/runtime v1.6.0
-	github.com/onsi/ginkgo/v2 v2.32.0
+	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.42.1
 )
 
