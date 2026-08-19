@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -62,6 +63,23 @@ func (h *stubHandler) GetProvider(w http.ResponseWriter, r *http.Request, provid
 
 var _ server.ServerInterface = (*stubHandler)(nil)
 
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (sb *syncBuffer) Write(p []byte) (int, error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Write(p)
+}
+
+func (sb *syncBuffer) String() string {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.String()
+}
+
 func defaultConfig() *config.Config {
 	return &config.Config{
 		Server: config.ServerConfig{
@@ -79,7 +97,7 @@ func httpClient() *http.Client {
 var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 	var (
 		cfg    *config.Config
-		logBuf *bytes.Buffer
+		logBuf *syncBuffer
 		logger *slog.Logger
 		ln     net.Listener
 		srv    *apiserver.Server
@@ -89,7 +107,7 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 
 	BeforeEach(func() {
 		cfg = defaultConfig()
-		logBuf = &bytes.Buffer{}
+		logBuf = &syncBuffer{}
 		logger = slog.New(slog.NewJSONHandler(logBuf, nil))
 
 		var err error
@@ -111,9 +129,9 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 		runErrCh := make(chan error, 1)
 		go func() { runErrCh <- srv.Run(ctx, ln) }()
 
-		// Race: either Run() errors (RED) or server starts serving (GREEN).
-		// Use HTTP readiness probe — TCP connect alone isn't enough since
-		// the listener is open but no HTTP server may be attached.
+		// Run() erroring and the server starting to serve race each other, so
+		// poll with an HTTP readiness probe — TCP connect alone isn't enough
+		// since the listener is open but no HTTP server may be attached yet.
 		ready := make(chan struct{})
 		go func() {
 			for {

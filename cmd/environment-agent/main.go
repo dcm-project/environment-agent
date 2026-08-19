@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 	oapigen "github.com/dcm-project/environment-agent/internal/api/server"
@@ -19,20 +21,21 @@ import (
 	"github.com/dcm-project/environment-agent/internal/health"
 	"github.com/dcm-project/environment-agent/internal/health/monitor"
 	"github.com/dcm-project/environment-agent/internal/httperror"
+	"github.com/dcm-project/environment-agent/internal/messaging"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/service"
 	"github.com/dcm-project/environment-agent/internal/provider/store"
+	"github.com/dcm-project/environment-agent/internal/routing"
+	"github.com/dcm-project/environment-agent/internal/routing/retry"
 )
 
-// TODO: replace with real MessagingStatus from the NATS/messaging subsystem.
-type messagingStatus struct{}
-
-func (messagingStatus) IsConnected() bool { return true }
-
-// stubConsumerLagProvider returns 0 until Topic 7 provides real NATS consumer lag.
-type stubConsumerLagProvider struct{}
-
-func (stubConsumerLagProvider) ConsumerLag() int64 { return 0 }
+// registerEmbeddedSetupWait bounds how long RegisterEmbedded waits for
+// JetStream setup before proceeding anyway. Start is non-blocking
+// (AC-MSG-050), so setup may still be in flight when RegisterEmbedded's
+// synchronous initialCheck (DD-290) fires its health CE; this bridges the
+// common case (setup finishes in milliseconds) without reintroducing
+// REQ-MSG-051's much longer CP-stream retry as a startup blocker.
+const registerEmbeddedSetupWait = 3 * time.Second
 
 // serviceTypeLister adapts ProviderService to dcm.ServiceTypeLister.
 type serviceTypeLister struct {
@@ -79,6 +82,14 @@ func run(ctx context.Context) int {
 		logger.Error("invalid configuration", "error", err)
 		return 1
 	}
+	if err := cfg.ValidateHandlerAckWaitInvariant(); err != nil {
+		logger.Error("invalid configuration", "error", err)
+		return 1
+	}
+	if err := cfg.ValidateCancelHandlerAckWaitInvariant(); err != nil {
+		logger.Error("invalid configuration", "error", err)
+		return 1
+	}
 
 	ln, err := net.Listen("tcp", cfg.Server.Address)
 	if err != nil {
@@ -91,7 +102,7 @@ func run(ctx context.Context) int {
 		}
 	}()
 
-	fileStore, err := store.NewFileStore(cfg.Provider.PersistencePath)
+	fileStore, err := store.NewFileStore(cfg.Provider.PersistencePath, logger)
 	if err != nil {
 		logger.Error("failed to initialize provider store", "error", err, "path", cfg.Provider.PersistencePath)
 		return 1
@@ -105,21 +116,94 @@ func run(ctx context.Context) int {
 		logger.Error("failed to load persisted providers", "error", err)
 		return 1
 	}
-	providerSvc.RegisterEmbedded(cfg.Provider.EmbeddedSPs)
+	// RegisterEmbedded is deliberately NOT called here: its synchronous
+	// initialCheck can fire healthMonitor's onTransition callback in-line,
+	// which isn't wired via SetOnTransition until further down. It's called
+	// after that wiring, below.
+
+	// Messaging client — must start before registrar (provides ConsumerLagProvider)
+	msgClient, topics, err := setupMessaging(cfg, logger)
+	if err != nil {
+		logger.Error("invalid topic name", "error", err)
+		return 1
+	}
+
+	// Wire routing before starting messaging so handlers are set
+	denyList := routing.NewResourceSet(cfg.Routing.DenyListMaxSize)
+	forwarder := routing.NewForwarder(routing.ForwarderConfig{Logger: logger})
+	router := routing.NewRouter(routing.RouterDeps{
+		Registry:      registry,
+		HealthTracker: healthTracker,
+		Store:         fileStore,
+		Forwarder:     forwarder,
+		Publisher:     msgClient,
+		DenyList:      denyList,
+		Config:        cfg.Routing,
+		Logger:        logger,
+		AgentName:     cfg.Agent.Name,
+		TopicName:     topics.Main,
+		RetryTopic:    topics.Retry,
+	})
+	msgClient.SetMainHandler(router.HandleRequest)
+	msgClient.SetCancelHandler(router.HandleCancel)
+
+	// Retry processor — constructed before Start so its JSProvider/Publisher
+	// method values are ready to bind once JetStream actually comes up; the
+	// underlying msgClient.JS()/msgClient itself only need to be non-nil,
+	// not yet "started" (see JSProvider: msgClient.JS below).
+	retryProcessor := retry.NewProcessor(retry.ProcessorDeps{
+		Registry:            registry,
+		HealthTracker:       healthTracker,
+		Store:               fileStore,
+		Forwarder:           forwarder,
+		Publisher:           msgClient,
+		JSProvider:          msgClient.JS,
+		DenyList:            denyList,
+		ClaimedResourcesSet: router.ClaimedResourcesSet(),
+		InFlightSet:         router.InFlightSet(),
+		Config: retry.ProcessorConfig{
+			HandlerTimeout: cfg.Routing.HandlerTimeout,
+		},
+		Logger:    logger,
+		AgentName: cfg.Agent.Name,
+		Topics:    topics,
+	})
+	router.SetRetryConsumer(retryProcessor)
+
+	// ProcessOnRestart must drain the main/cancel durable consumers before
+	// live pull-consumption begins, and Start is non-blocking (AC-MSG-050),
+	// so this is wired via SetOnSetupReady rather than run synchronously
+	// after Start — see ClientConfig.DeferConsume.
+	msgClient.SetOnSetupReady(func() {
+		if err := retryProcessor.ProcessOnRestart(ctx); err != nil {
+			logger.Error("failed to process retry on restart", "error", err)
+		}
+		msgClient.StartConsuming()
+	})
+
+	if err := msgClient.Start(ctx); err != nil {
+		logger.Error("failed to start messaging client", "error", err)
+		return 1
+	}
+
+	// Stop messaging before the retry processor (not LIFO-by-construction):
+	// msgClient.Stop() must quiesce in-flight handlers and stop accepting new
+	// messages before it makes sense to wait for retryProcessor's own
+	// in-flight RunTransition goroutines.
+	defer func() {
+		msgClient.Stop()
+		retryProcessor.Stop()
+	}()
 
 	// DCM Registrar — created before monitor starts so callbacks can be wired
 	// before any health transitions fire. Deferred after monitor so LIFO shuts
 	// registrar down first.
-	topicName := cfg.Messaging.TopicName
-	if topicName == "" {
-		topicName = cfg.Agent.Name
-	}
 	registrar, err := dcm.NewRegistrar(
 		dcm.RegistrarConfig{
 			AgentName:                 cfg.Agent.Name,
 			Environment:               cfg.Agent.Environment,
 			Cost:                      cfg.Agent.Cost,
-			TopicName:                 topicName,
+			TopicName:                 topics.Main,
 			RegistrationURL:           cfg.DCM.RegistrationURL,
 			InitialBackoff:            cfg.DCM.InitialBackoff,
 			MaxBackoff:                cfg.DCM.MaxBackoff,
@@ -127,7 +211,7 @@ func run(ctx context.Context) int {
 			PrerequisiteRetryInterval: cfg.DCM.PrerequisiteRetryInterval,
 		},
 		&serviceTypeLister{providerSvc: providerSvc, logger: logger},
-		stubConsumerLagProvider{},
+		msgClient,
 		nil,
 		logger,
 	)
@@ -136,20 +220,31 @@ func run(ctx context.Context) int {
 		return 1
 	}
 
-	// Wire service-type change notifications before starting the periodic
-	// monitor loop. Note: embedded initialCheck transitions (from RegisterEmbedded
-	// above) may fire before this wiring, but the one-time kick below compensates
-	// by forcing a state re-evaluation.
-	healthMonitor.SetOnTransition(func(_ string, from, to v1alpha1.ProviderStatus) {
+	// Wire service-type change notifications BEFORE RegisterEmbedded:
+	// RegisterEmbedded's synchronous initialCheck can fire a transition
+	// in-line, and that must not be missed by an as-yet-unset callback.
+	healthCEPub := health.NewCEPublisher(fileStore, msgClient, logger, cfg.Agent.Name, topics.Main)
+	healthMonitor.SetOnTransition(func(providerID string, from, to v1alpha1.ProviderStatus) {
 		if from == v1alpha1.Unavailable || to == v1alpha1.Unavailable {
 			registrar.NotifyServiceTypeChange()
 		}
+		retryProcessor.RunTransition(ctx, providerID, from, to)
+		healthCEPub.OnTransition(ctx, providerID, from, to)
 	})
 	providerSvc.SetOnChange(registrar.NotifyServiceTypeChange)
+
+	// Now safe to register embedded SPs: any transition their initialCheck
+	// triggers is captured by the callback wired immediately above.
+	readyCtx, readyCancel := context.WithTimeout(ctx, registerEmbeddedSetupWait)
+	msgClient.WaitUntilReady(readyCtx)
+	readyCancel()
+	providerSvc.RegisterEmbedded(cfg.Provider.EmbeddedSPs)
 
 	healthMonitor.Start(ctx)
 	defer healthMonitor.Stop()
 
+	// Explicit kick: the steady-state case (SP already at its initial
+	// status) never fires the transition callback above (from == to).
 	registrar.NotifyServiceTypeChange()
 
 	regCtx, regCancel := context.WithCancel(context.Background())
@@ -159,9 +254,12 @@ func run(ctx context.Context) int {
 		<-registrar.Done()
 	}()
 
-	healthSvc := health.NewService(messagingStatus{})
+	healthSvc := health.NewService(msgClient)
 	strictHandler := handler.New(healthSvc, providerSvc)
 	h := oapigen.NewStrictHandlerWithOptions(strictHandler, nil, oapigen.StrictHTTPServerOptions{
+		RequestErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
+			httperror.WriteInvalidArgument(w, r, logger, err.Error())
+		},
 		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
 			httperror.WriteResponse(w, logger, http.StatusInternalServerError,
 				"INTERNAL", "Internal Server Error",
@@ -176,4 +274,39 @@ func run(ctx context.Context) int {
 	}
 	logger.Info("Environment Agent stopped")
 	return 0
+}
+
+func setupMessaging(cfg *config.Config, logger *slog.Logger) (*messaging.Client, messaging.TopicNames, error) {
+	topics := messaging.DeriveTopicNames(cfg.Agent.Name, cfg.Messaging.TopicName)
+	if err := messaging.ValidateTopicName(topics.Base); err != nil {
+		return nil, messaging.TopicNames{}, fmt.Errorf("invalid topic name: %w", err)
+	}
+	// Base is also used to derive JetStream stream/consumer names below
+	// (via messaging.NewClient), which have stricter naming rules than
+	// subjects — see REQ-MSG-011.
+	if err := messaging.ValidateJetStreamSafeName(topics.Base); err != nil {
+		return nil, messaging.TopicNames{}, fmt.Errorf("invalid topic name: %w", err)
+	}
+	// TopicName is the raw override (or empty), not the derived/prefixed Main
+	// subject — messaging.NewClient calls DeriveTopicNames itself, so passing
+	// the already-prefixed value here would double-prefix it.
+	client := messaging.NewClient(messaging.ClientConfig{
+		URL:                     cfg.Messaging.URL,
+		TopicName:               cfg.Messaging.TopicName,
+		AgentName:               cfg.Agent.Name,
+		AckWait:                 cfg.Messaging.AckWait,
+		CancelAckWait:           cfg.Messaging.CancelAckWait,
+		MaxDeliver:              cfg.Messaging.MaxDeliver,
+		HandlerTimeout:          cfg.Routing.HandlerTimeout,
+		CancelHandlerTimeout:    cfg.Routing.CancelHandlerTimeout,
+		NakDelay:                cfg.Routing.NakDelay,
+		ReconnectInitialBackoff: cfg.Messaging.ReconnectInitialBackoff,
+		ReconnectMaxBackoff:     cfg.Messaging.ReconnectMaxBackoff,
+		// DeferConsume: live main/cancel consumption is started explicitly
+		// below (msgClient.StartConsuming) only after retryProcessor.
+		// ProcessOnRestart has drained those same durable consumers — see
+		// ClientConfig.DeferConsume and the message-stealing race it prevents.
+		DeferConsume: true,
+	}, logger)
+	return client, topics, nil
 }

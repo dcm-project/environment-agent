@@ -18,6 +18,9 @@ profile.cov
 # Dependency directories
 vendor/
 
+# Locally downloaded dev tools
+.bin/
+
 # Go workspace file
 go.work
 go.work.sum
@@ -29,6 +32,11 @@ go.work.sum
 .idea/
 # .vscode/
 
-.ai/reviews/
-.ai/plans/
-.ai/checkpoints/
+.ai/*
+
+!.ai/specs/
+!.ai/decisions/
+!.ai/test-plans/
+
+.cursor/*
+!.cursor/rules

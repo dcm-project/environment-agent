@@ -45,13 +45,13 @@ type mockDCM struct {
 func newMockDCM() *mockDCM {
 	m := &mockDCM{
 		regStatus: http.StatusCreated,
-		regBody:   `{"agentId":"agent-123"}`,
+		regBody:   `{"agent_id":"agent-123"}`,
 		hbStatus:  http.StatusOK,
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v1/agents", m.handleRegistration)
-	mux.HandleFunc("PUT /api/v1/agents/{agentId}/heartbeat", m.handleHeartbeat)
+	mux.HandleFunc("POST /api/v1alpha1/agents", m.handleRegistration)
+	mux.HandleFunc("PUT /api/v1alpha1/agents/{agentId}/heartbeat", m.handleHeartbeat)
 	m.server = httptest.NewServer(mux)
 	return m
 }
@@ -166,6 +166,28 @@ func (c *callCountingLister) AdvertisableServiceTypes() []string {
 	return cp
 }
 
+// panicNTimesLister panics on its first n calls, then behaves like a normal
+// lister, simulating a transiently-broken dependency.
+type panicNTimesLister struct {
+	mu    sync.Mutex
+	calls int
+	n     int
+	types []string
+}
+
+func (p *panicNTimesLister) AdvertisableServiceTypes() []string {
+	p.mu.Lock()
+	p.calls++
+	calls := p.calls
+	p.mu.Unlock()
+	if calls <= p.n {
+		panic("simulated transient lister panic")
+	}
+	cp := make([]string, len(p.types))
+	copy(cp, p.types)
+	return cp
+}
+
 type stubConsumerLagProvider struct {
 	mu  sync.Mutex
 	lag int64
@@ -203,6 +225,60 @@ func defaultRegistrarConfig(mockURL string) dcm.RegistrarConfig {
 
 var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
+// captureHandler records slog records for assertion.
+type captureHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler            { return h }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.records = append(h.records, r)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureHandler) all() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Record(nil), h.records...)
+}
+
+func findRecord(records []slog.Record, msg string) (slog.Record, bool) {
+	for _, r := range records {
+		if r.Message == msg {
+			return r, true
+		}
+	}
+	return slog.Record{}, false
+}
+
+func findRecords(records []slog.Record, msg string) []slog.Record {
+	var out []slog.Record
+	for _, r := range records {
+		if r.Message == msg {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func recordAttr(rec slog.Record, key string) (slog.Value, bool) {
+	var v slog.Value
+	var found bool
+	rec.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			v, found = a.Value, true
+			return false
+		}
+		return true
+	})
+	return v, found
+}
+
 // --- Tests ---
 
 var _ = Describe("DCM Registration", Label("integration"), func() {
@@ -236,10 +312,10 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 		regs := mock.getRegistrations()
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(regs[0].Body, &payload)).To(Succeed())
-		Expect(payload).To(HaveKey("serviceTypes"))
+		Expect(payload).To(HaveKey("service_types"))
 	})
 
-	It("has no agentId before registration (IT-DCM-015)", func() {
+	It("has no agent_id before registration (IT-DCM-015)", func() {
 		lister := &stubServiceTypeLister{types: []string{"container"}}
 		r, err := dcm.NewRegistrar(
 			defaultRegistrarConfig(mock.server.URL),
@@ -254,7 +330,6 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 
 		r.Start(ctx)
 
-		// Companion: Eventually agentId becomes non-empty — fails on stub → RED
 		Eventually(func() bool {
 			_, registered := r.AgentID()
 			return registered
@@ -275,7 +350,6 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 
 		r.Start(ctx)
 
-		// Companion: Eventually mock receives registration POST — fails on no-op Start → RED
 		Eventually(func() int {
 			return len(mock.getRegistrations())
 		}, 2*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 1))
@@ -295,7 +369,6 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 			return len(mock.getRegistrations())
 		}, 500*time.Millisecond, 50*time.Millisecond).Should(Equal(0))
 
-		// Companion: Eventually POST when SP becomes available — fails on no-op Start → RED
 		lister.setTypes([]string{"container"})
 		r.NotifyServiceTypeChange()
 
@@ -335,7 +408,6 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 
 		r.Start(ctx)
 
-		// Companion: first POST must include both types — fails because no POST → RED
 		Eventually(func() int {
 			return len(mock.getRegistrations())
 		}, 3*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 1))
@@ -343,17 +415,20 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 		regs := mock.getRegistrations()
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(regs[0].Body, &payload)).To(Succeed())
-		types, ok := payload["serviceTypes"].([]interface{})
+		types, ok := payload["service_types"].([]interface{})
 		Expect(ok).To(BeTrue())
 		Expect(types).To(HaveLen(2))
 	})
 
 	It("sends correct registration payload (IT-DCM-050)", func() {
 		cfg := dcm.RegistrarConfig{
-			AgentName:         "agent-prod-1",
-			Environment:       "production",
-			Cost:              "medium",
-			TopicName:         "agent-prod-1",
+			AgentName:   "agent-prod-1",
+			Environment: "production",
+			Cost:        "medium",
+			// Realistic value: production always passes the CP-prefixed
+			// subject (messaging.TopicNames.Main), never the bare base name
+			// — see cmd/environment-agent/main.go wiring.
+			TopicName:         "dcm.agent.agent-prod-1",
 			RegistrationURL:   mock.server.URL,
 			InitialBackoff:    10 * time.Millisecond,
 			MaxBackoff:        200 * time.Millisecond,
@@ -374,11 +449,11 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 		Expect(payload["name"]).To(Equal("agent-prod-1"))
 		Expect(payload["environment"]).To(Equal("production"))
 		Expect(payload["cost"]).To(Equal("medium"))
-		Expect(payload["topicName"]).To(Equal("agent-prod-1"))
-		Expect(payload).To(HaveKey("serviceTypes"))
+		Expect(payload["topic_name"]).To(Equal("dcm.agent.agent-prod-1"))
+		Expect(payload).To(HaveKey("service_types"))
 	})
 
-	It("includes resourcesAvailable when available (IT-DCM-060)", func() {
+	It("includes resources_available when available (IT-DCM-060)", func() {
 		cpu := "16"
 		mem := "64GB"
 		resources := &stubResourceCapacityProvider{
@@ -402,7 +477,7 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(mock.getRegistrations()[0].Body, &payload)).To(Succeed())
-		Expect(payload).To(HaveKey("resourcesAvailable"))
+		Expect(payload).To(HaveKey("resources_available"))
 	})
 
 	It("re-registration is idempotent (IT-DCM-070)", func() {
@@ -462,7 +537,8 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 
 		r.Start(ctx)
 
-		// Exact count: must be exactly 1 (not soft <= 1) — prevents accidental GREEN
+		// Exact count (not just >= 1): a second, unwanted registration would
+		// also satisfy a looser bound and go unnoticed.
 		Eventually(func() int {
 			return len(mock.getRegistrations())
 		}, 3*time.Second, 50*time.Millisecond).Should(Equal(1))
@@ -521,12 +597,98 @@ var _ = Describe("DCM Registration", Label("integration"), func() {
 		Expect(gap).To(BeNumerically(">", 0))
 	})
 
+	It("paces retries with real backoff on 429 with a past HTTP-date Retry-After, instead of the "+
+		"pre-fix immediate-retry bug (IT-DCM-106)", func() {
+		mock.mu.Lock()
+		mock.regStatus = http.StatusTooManyRequests
+		mock.retryAfter = time.Now().UTC().Add(-1 * time.Hour).Format(http.TimeFormat)
+		mock.mu.Unlock()
+
+		cfg := defaultRegistrarConfig(mock.server.URL)
+		cfg.InitialBackoff = 200 * time.Millisecond
+		cfg.MaxBackoff = 200 * time.Millisecond
+
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+		time.Sleep(1 * time.Second)
+
+		// A fixed 429 response never succeeds, so the count over a fixed
+		// window is a direct measure of retry pacing. Full jitter over
+		// [0, 200ms] draws a mean wait of 100ms, so this averages ~10
+		// attempts/sec; the pre-fix bug (treating a non-positive
+		// Retry-After as an immediate-retry signal, returning 0 backoff)
+		// produced 900-1100+ attempts/sec in this same window when
+		// verified against the pre-fix code — 40 leaves a wide, non-flaky
+		// margin between the two.
+		count := len(mock.getRegistrations())
+		Expect(count).To(BeNumerically(">", 0), "registrar must still be attempting registration")
+		Expect(count).To(BeNumerically("<", 40),
+			"registrations must be paced by standard backoff, not hot-looping at ~0 delay")
+	})
+
+	It("paces retries with real backoff on 429 with a literal \"0\" Retry-After, "+
+		"instead of treating it as an immediate-retry signal (IT-DCM-107)", func() {
+		mock.mu.Lock()
+		mock.regStatus = http.StatusTooManyRequests
+		mock.retryAfter = "0"
+		mock.mu.Unlock()
+
+		cfg := defaultRegistrarConfig(mock.server.URL)
+		cfg.InitialBackoff = 200 * time.Millisecond
+		cfg.MaxBackoff = 200 * time.Millisecond
+
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+		time.Sleep(1 * time.Second)
+
+		// ParseRetryAfter("0", ...) legitimately returns (0, true) — a
+		// well-formed but non-positive Retry-After, distinct from the
+		// unparseable/past-date cases IT-DCM-106 covers. computeBackoff
+		// must treat this the same way (fall back to standard backoff,
+		// not RetryAfter<=0 => immediate retry as pre-fix code did).
+		count := len(mock.getRegistrations())
+		Expect(count).To(BeNumerically(">", 0), "registrar must still be attempting registration")
+		Expect(count).To(BeNumerically("<", 40),
+			"registrations must be paced by standard backoff, not hot-looping at ~0 delay")
+	})
+
 	It("rejects invalid registration URL (constructor)", func() {
 		cfg := defaultRegistrarConfig("://bad")
 		_, err := dcm.NewRegistrar(
 			cfg, &stubServiceTypeLister{}, &stubConsumerLagProvider{}, nil, discardLogger,
 		)
 		Expect(err).To(HaveOccurred())
+	})
+
+	It("recovers from a panic in the registrar goroutine without crashing the process, "+
+		"and keeps the goroutine alive to make forward progress afterward (IT-DCM-180)", func() {
+		cfg := defaultRegistrarConfig(mock.server.URL)
+		lister := &panicNTimesLister{n: 3, types: []string{"container"}}
+		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() int {
+			return len(mock.getRegistrations())
+		}, 8*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 1),
+			"registration must eventually succeed once the lister stops panicking — proving the "+
+				"registrar goroutine survived 3 recovered panics and kept retrying rather than "+
+				"exiting after the first one")
+
+		Consistently(r.Done(), 200*time.Millisecond).ShouldNot(BeClosed(),
+			"Done() must NOT close merely because a panic was recovered — the goroutine must "+
+				"remain alive (e.g. in its heartbeat loop) afterward")
+
+		cancel()
+		Eventually(r.Done(), 5*time.Second).Should(BeClosed(),
+			"Done() must still close promptly on a real shutdown (context cancellation)")
 	})
 })
 
@@ -559,11 +721,11 @@ var _ = Describe("DCM Heartbeat", Label("integration"), func() {
 		}, 2*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 2))
 
 		for _, hb := range mock.getHeartbeats() {
-			Expect(hb.Path).To(Equal("/api/v1/agents/agent-123/heartbeat"))
+			Expect(hb.Path).To(Equal("/api/v1alpha1/agents/agent-123/heartbeat"))
 			var payload map[string]interface{}
 			Expect(json.Unmarshal(hb.Body, &payload)).To(Succeed())
 			Expect(payload).To(HaveKey("timestamp"))
-			Expect(payload).To(HaveKey("consumerLag"))
+			Expect(payload).To(HaveKey("consumer_lag"))
 		}
 	})
 
@@ -589,6 +751,38 @@ var _ = Describe("DCM Heartbeat", Label("integration"), func() {
 		Expect(len(gaps)).To(BeNumerically(">=", 2))
 	})
 
+	It("sends strictly increasing heartbeat payload timestamps (IT-DCM-135)", func() {
+		// Unlike IT-DCM-130, this asserts on the `timestamp` field inside the
+		// heartbeat body itself, which the control plane requires to be
+		// strictly increasing.
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		r, err := dcm.NewRegistrar(
+			defaultRegistrarConfig(mock.server.URL),
+			lister, &stubConsumerLagProvider{}, nil, discardLogger,
+		)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() int {
+			return len(mock.getHeartbeats())
+		}, 2*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 3))
+
+		hbs := mock.getHeartbeats()
+		payloadTimestamps := make([]time.Time, 0, len(hbs))
+		for _, hb := range hbs {
+			var payload struct {
+				Timestamp time.Time `json:"timestamp"`
+			}
+			Expect(json.Unmarshal(hb.Body, &payload)).To(Succeed())
+			payloadTimestamps = append(payloadTimestamps, payload.Timestamp)
+		}
+		for i := 1; i < len(payloadTimestamps); i++ {
+			Expect(payloadTimestamps[i]).To(BeTemporally(">", payloadTimestamps[i-1]),
+				"heartbeat payload timestamps must be strictly increasing (CP rejects timestamp <= last recorded)")
+		}
+	})
+
 	It("includes consumer lag in heartbeat (IT-DCM-140)", func() {
 		lister := &stubServiceTypeLister{types: []string{"container"}}
 		lag := &stubConsumerLagProvider{lag: 5}
@@ -606,7 +800,7 @@ var _ = Describe("DCM Heartbeat", Label("integration"), func() {
 
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(mock.getHeartbeats()[0].Body, &payload)).To(Succeed())
-		Expect(payload["consumerLag"]).To(BeNumerically("==", 5))
+		Expect(payload["consumer_lag"]).To(BeNumerically("==", 5))
 	})
 
 	It("retries on heartbeat failure (IT-DCM-150)", func() {
@@ -667,12 +861,12 @@ var _ = Describe("Service Type Updates", Label("integration"), func() {
 		regs := mock.getRegistrations()
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(regs[len(regs)-1].Body, &payload)).To(Succeed())
-		types, ok := payload["serviceTypes"].([]interface{})
+		types, ok := payload["service_types"].([]interface{})
 		Expect(ok).To(BeTrue())
 		Expect(types).To(HaveLen(2))
 	})
 
-	It("sends empty serviceTypes when all SPs unavailable (IT-DCM-160)", func() {
+	It("sends empty service_types when all SPs unavailable (IT-DCM-160)", func() {
 		lister := &stubServiceTypeLister{types: []string{"container"}}
 		r, err := dcm.NewRegistrar(
 			defaultRegistrarConfig(mock.server.URL),
@@ -696,12 +890,12 @@ var _ = Describe("Service Type Updates", Label("integration"), func() {
 		regs := mock.getRegistrations()
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(regs[len(regs)-1].Body, &payload)).To(Succeed())
-		types, ok := payload["serviceTypes"].([]interface{})
+		types, ok := payload["service_types"].([]interface{})
 		Expect(ok).To(BeTrue())
 		Expect(types).To(BeEmpty())
 	})
 
-	It("excludes Unavailable SPs from serviceTypes (IT-DCM-170)", func() {
+	It("excludes Unavailable SPs from service_types (IT-DCM-170)", func() {
 		lister := &stubServiceTypeLister{types: []string{"container", "database"}}
 		r, err := dcm.NewRegistrar(
 			defaultRegistrarConfig(mock.server.URL),
@@ -718,9 +912,109 @@ var _ = Describe("Service Type Updates", Label("integration"), func() {
 		regs := mock.getRegistrations()
 		var payload map[string]interface{}
 		Expect(json.Unmarshal(regs[0].Body, &payload)).To(Succeed())
-		types, ok := payload["serviceTypes"].([]interface{})
+		types, ok := payload["service_types"].([]interface{})
 		Expect(ok).To(BeTrue())
 		Expect(types).To(ContainElement("container"))
 		Expect(types).To(ContainElement("database"))
+	})
+})
+
+var _ = Describe("DCM Registrar Lifecycle Logging", Label("integration"), func() {
+	var (
+		mock   *mockDCM
+		ctx    context.Context
+		cancel context.CancelFunc
+		ch     *captureHandler
+	)
+
+	BeforeEach(func() {
+		mock = newMockDCM()
+		DeferCleanup(mock.server.Close)
+		ctx, cancel = context.WithCancel(context.Background()) //nolint:fatcontext // Ginkgo BeforeEach requires closure variable assignment
+		DeferCleanup(cancel)
+		ch = &captureHandler{}
+	})
+
+	It("logs startup, heartbeat success, and re-registration success (IT-DCM-190)", func() {
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		lag := &stubConsumerLagProvider{lag: 7}
+		r, err := dcm.NewRegistrar(
+			defaultRegistrarConfig(mock.server.URL),
+			lister, lag, nil, slog.New(ch),
+		)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() bool {
+			_, ok := findRecord(ch.all(), "DCM registrar starting")
+			return ok
+		}, 2*time.Second, 20*time.Millisecond).Should(BeTrue())
+
+		Eventually(func() bool {
+			_, ok := findRecord(ch.all(), "heartbeat succeeded")
+			return ok
+		}, 2*time.Second, 20*time.Millisecond).Should(BeTrue())
+		hbRec, _ := findRecord(ch.all(), "heartbeat succeeded")
+		Expect(hbRec.Level).To(Equal(slog.LevelDebug))
+		v, ok := recordAttr(hbRec, "agent_id")
+		Expect(ok).To(BeTrue())
+		Expect(v.String()).To(Equal("agent-123"))
+		v, ok = recordAttr(hbRec, "consumer_lag")
+		Expect(ok).To(BeTrue())
+		Expect(v.Int64()).To(Equal(int64(7)))
+
+		lister.setTypes([]string{"container", "database"})
+		r.NotifyServiceTypeChange()
+
+		Eventually(func() bool {
+			_, ok := findRecord(ch.all(), "re-registered with DCM")
+			return ok
+		}, 2*time.Second, 20*time.Millisecond).Should(BeTrue())
+		reRegRec, _ := findRecord(ch.all(), "re-registered with DCM")
+		Expect(reRegRec.Level).To(Equal(slog.LevelInfo))
+		v, ok = recordAttr(reRegRec, "agent_id")
+		Expect(ok).To(BeTrue())
+		Expect(v.String()).To(Equal("agent-123"))
+	})
+
+	It("distinguishes a post-panic restart from a fresh start in the startup log (IT-DCM-195)", func() {
+		// panicNTimesLister panics once from inside run(), forcing the
+		// supervisor to recover and restart run() — the resulting second
+		// "DCM registrar starting" log line must cross-reference the
+		// restart via restart_attempt so operators can tell it apart from
+		// the initial startup log.
+		lister := &panicNTimesLister{n: 1, types: []string{"container"}}
+		r, err := dcm.NewRegistrar(
+			defaultRegistrarConfig(mock.server.URL),
+			lister, &stubConsumerLagProvider{}, nil, slog.New(ch),
+		)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() int {
+			return len(findRecords(ch.all(), "DCM registrar starting"))
+		}, 3*time.Second, 20*time.Millisecond).Should(Equal(2),
+			"expected exactly one fresh-start log and one restart log")
+
+		startRecs := findRecords(ch.all(), "DCM registrar starting")
+		Expect(startRecs).To(HaveLen(2))
+
+		_, hasAttr := recordAttr(startRecs[0], "restart_attempt")
+		Expect(hasAttr).To(BeFalse(), "the initial startup log must not carry restart_attempt")
+
+		v, hasAttr := recordAttr(startRecs[1], "restart_attempt")
+		Expect(hasAttr).To(BeTrue(), "the post-panic restart log must carry restart_attempt")
+		Expect(v.Int64()).To(BeNumerically(">=", 1))
+
+		Eventually(func() bool {
+			_, ok := findRecord(ch.all(), "panic in DCM registrar goroutine, restarting")
+			return ok
+		}, 2*time.Second, 20*time.Millisecond).Should(BeTrue())
+		panicRec, _ := findRecord(ch.all(), "panic in DCM registrar goroutine, restarting")
+		v, hasAttr = recordAttr(panicRec, "restart_attempt")
+		Expect(hasAttr).To(BeTrue(), "the panic log should also carry restart_attempt for cross-reference")
+		Expect(v.Int64()).To(Equal(int64(1)))
 	})
 })

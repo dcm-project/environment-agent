@@ -1,0 +1,33 @@
+---
+description: Environment Agent project context - what it is, tech stack, architecture
+alwaysApply: true
+---
+
+## Project: DCM Environment Agent
+
+Lightweight Go agent that runs in target environments, mediating between the DCM Control Plane and Service Providers (SPs). It registers the environment to DCM, consumes resource operation requests via NATS JetStream, and routes them to the appropriate SP.
+
+Hybrid SP model: embedded SPs (in-process, enabled via config) and external SPs (register via REST API). One SP per service type.
+
+## Tech Stack
+
+- **Language**: Go 1.25, stdlib `log/slog` for logging
+- **HTTP**: go-chi/chi/v5 router, oapi-codegen from OpenAPI spec (`api/v1alpha1/openapi.yaml`)
+- **Messaging**: NATS JetStream (main topic, retry topic, cancel topic)
+- **Events**: CloudEvents SDK v2
+- **Testing**: Ginkgo v2 / Gomega (BDD), real NATS server for integration tests
+- **Config**: caarlos0/env for env-var binding
+
+## Key Packages
+
+- `internal/routing/` — Resource operation router (dispatches CEs to SPs)
+- `internal/provider/` — SP registry, health tracking, store interface
+- `internal/messaging/` — NATS JetStream client, topic consumers
+- `internal/health/` — SP health monitor, state machine
+- `internal/config/` — Configuration structs
+- `api/v1alpha1/` — OpenAPI spec and generated server/types
+
+## Reference Documents
+
+Full spec: `.ai/specs/environment-agent.spec.md`
+Design decisions: `.ai/decisions/environment-agent.decisions.md`

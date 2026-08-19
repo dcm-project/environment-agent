@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -13,10 +14,14 @@ import (
 	"github.com/dcm-project/environment-agent/internal/backoff"
 )
 
-var (
-	ErrNonRetryable  = errors.New("non-retryable DCM error")
-	ErrNotRegistered = errors.New("agent not registered with DCM")
-)
+var ErrNonRetryable = errors.New("non-retryable DCM error")
+
+// registrarPanicRestartDelay bounds how long the supervisor pauses before
+// restarting run() after a recovered panic — avoids a tight crash loop
+// without meaningfully delaying recovery. Deliberately fixed, not derived
+// from InitialBackoff/MaxBackoff, which tune the (expected) DCM HTTP retry
+// cadence rather than this "should never happen" path.
+const registrarPanicRestartDelay = 1 * time.Second
 
 // ServiceTypeLister returns the set of currently advertisable service types
 // (backed by SPs in Ready or Unhealthy state — NOT Unavailable).
@@ -93,11 +98,52 @@ func NewRegistrar(
 // Start begins the async registration + heartbeat loop. Non-blocking, idempotent.
 func (r *Registrar) Start(ctx context.Context) {
 	r.startOnce.Do(func() {
-		go func() {
-			defer close(r.done)
-			r.run(ctx)
-		}()
+		go r.runSupervised(ctx)
 	})
+}
+
+// runSupervised wraps run() in a panic-recovering supervisor loop. A panic
+// must not crash the agent process, and must not leave DCM registration
+// permanently stalled either — so run() is restarted after
+// registrarPanicRestartDelay rather than letting the goroutine exit.
+// Re-entering run() is safe: registration is idempotent (REQ-DCM-080).
+func (r *Registrar) runSupervised(ctx context.Context) {
+	defer close(r.done)
+	attempt := 0
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if r.runRecovering(ctx, attempt) {
+			// run() returned normally — only happens on ctx cancellation
+			// (see run()'s own control flow), so the supervisor is done too.
+			return
+		}
+		attempt++
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(registrarPanicRestartDelay):
+		}
+	}
+}
+
+// runRecovering calls run() with panic recovery. Returns true if run()
+// returned normally (no panic), false if a panic was recovered — the caller
+// decides whether/when to restart based on the return value. attempt is the
+// zero-based restart count (0 for the initial run), threaded through to
+// run() so its startup log can distinguish a fresh start from a restart.
+func (r *Registrar) runRecovering(ctx context.Context, attempt int) (completedNormally bool) {
+	completedNormally = true
+	defer func() {
+		if rec := recover(); rec != nil {
+			completedNormally = false
+			r.logger.Error("panic in DCM registrar goroutine, restarting",
+				"panic", rec, "stack", string(debug.Stack()), "restart_attempt", attempt+1)
+		}
+	}()
+	r.run(ctx, attempt)
+	return completedNormally
 }
 
 // Done returns a channel closed when the registrar goroutine exits.
@@ -120,7 +166,16 @@ func (r *Registrar) AgentID() (string, bool) {
 	return r.agentID, r.registered
 }
 
-func (r *Registrar) run(ctx context.Context) {
+// run executes the registration + heartbeat lifecycle. restartAttempt is 0
+// for the initial start and >0 when re-entered by the supervisor after a
+// recovered panic — logged so operators can distinguish a fresh startup from
+// a post-panic restart purely from the "DCM registrar starting" log line.
+func (r *Registrar) run(ctx context.Context, restartAttempt int) {
+	if restartAttempt > 0 {
+		r.logger.Info("DCM registrar starting", "restart_attempt", restartAttempt)
+	} else {
+		r.logger.Info("DCM registrar starting")
+	}
 	// Prerequisite gate: wait for non-empty service types.
 	// Retries periodically to recover from transient lister errors that return
 	// empty without triggering a notification.
@@ -146,14 +201,12 @@ func (r *Registrar) run(ctx context.Context) {
 	}
 	retryTicker.Stop()
 
-	// Registration loop with backoff
 	if !r.doRegistration(ctx) {
 		// Non-retryable failure or context cancelled — block until shutdown
 		<-ctx.Done()
 		return
 	}
 
-	// Post-registration: heartbeat + service-type update loop
 	ticker := time.NewTicker(r.config.HeartbeatInterval)
 	defer ticker.Stop()
 
@@ -196,7 +249,6 @@ func (r *Registrar) doRegistration(ctx context.Context) bool {
 			return false
 		}
 
-		// Determine backoff duration
 		wait := r.computeBackoff(err, attempt)
 		attempt++
 		r.logger.Warn("DCM registration failed, retrying", "error", err, "attempt", attempt, "backoff", wait)
@@ -217,12 +269,13 @@ func (r *Registrar) doRegistration(ctx context.Context) bool {
 
 func (r *Registrar) computeBackoff(err error, attempt int) time.Duration {
 	var rle *RateLimitError
-	if errors.As(err, &rle) && rle.HasRetryAfter {
-		// ponytail: Retry-After intentionally NOT capped by MaxBackoff — server directive per REQ-DCM-060.
-		// DCM is our own trusted control plane; cap at MaxBackoff if trust boundary changes.
-		if rle.RetryAfter <= 0 {
-			return 0
-		}
+	// Retry-After is intentionally NOT capped by MaxBackoff — it's a server
+	// directive per REQ-DCM-060, and DCM is our own trusted control plane.
+	// Revisit capping if that trust boundary ever changes. Only trusted when
+	// positive: ParseRetryAfter already rejects non-positive values, but a
+	// zero/negative RetryAfter is treated as unusable here too, in case some
+	// other caller ever constructs a bad RateLimitError.
+	if errors.As(err, &rle) && rle.HasRetryAfter && rle.RetryAfter > 0 {
 		return rle.RetryAfter
 	}
 	calculated := backoff.CalculateBackoff(r.config.InitialBackoff, r.config.MaxBackoff, attempt)
@@ -244,7 +297,9 @@ func (r *Registrar) sendHeartbeat(ctx context.Context) {
 
 	if err := r.client.heartbeat(reqCtx, id, payload); err != nil {
 		r.logger.Warn("heartbeat failed", "error", err)
+		return
 	}
+	r.logger.Debug("heartbeat succeeded", "agent_id", id, "consumer_lag", payload.ConsumerLag)
 }
 
 func (r *Registrar) reRegister(ctx context.Context) {
@@ -260,6 +315,7 @@ func (r *Registrar) reRegister(ctx context.Context) {
 	r.agentID = agentID
 	r.registered = true
 	r.mu.Unlock()
+	r.logger.Info("re-registered with DCM", "agent_id", agentID)
 }
 
 func (r *Registrar) buildPayload() registrationPayload {

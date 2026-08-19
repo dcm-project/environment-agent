@@ -121,6 +121,35 @@ var _ = Describe("Slot Registry", Label("unit"), func() {
 			Expect(occupied).To(BeTrue())
 			Expect(holder).To(Equal("db-provider"))
 		})
+
+		// Move must verify the caller actually holds oldType before
+		// deleting it, or it can delete a different provider's active
+		// slot if registry/store ever desync (REQ-SPR-200).
+		It("rejects move when oldType is held by a different provider, leaving that provider's slot intact (UT-SPR-072)", func() {
+			reg := provider.NewRegistry()
+			Expect(reg.Claim("real-holder", "database")).To(Succeed())
+
+			err := reg.Move("impostor", "database", "analytics")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("real-holder"))
+
+			holder, occupied := reg.Lookup("database")
+			Expect(occupied).To(BeTrue())
+			Expect(holder).To(Equal("real-holder"), "the real holder's slot must survive an impostor's Move call")
+
+			_, analyticsOccupied := reg.Lookup("analytics")
+			Expect(analyticsOccupied).To(BeFalse(), "newType must not be claimed when the oldType ownership check fails")
+		})
+
+		It("allows move when oldType is unoccupied (no ownership conflict possible) (UT-SPR-073)", func() {
+			reg := provider.NewRegistry()
+
+			Expect(reg.Move("new-provider", "unclaimed-type", "target")).To(Succeed())
+
+			holder, occupied := reg.Lookup("target")
+			Expect(occupied).To(BeTrue())
+			Expect(holder).To(Equal("new-provider"))
+		})
 	})
 })
 

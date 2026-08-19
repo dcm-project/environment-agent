@@ -13,6 +13,19 @@ const (
 	CheckFailed                             // Connection refused, timeout, non-200, unparseable
 )
 
+func (r HealthCheckResult) String() string {
+	switch r {
+	case CheckHealthy:
+		return "healthy"
+	case CheckUnhealthy:
+		return "unhealthy"
+	case CheckFailed:
+		return "failed"
+	default:
+		return "unknown"
+	}
+}
+
 // StateMachine tracks SP health state transitions and failure counting.
 type StateMachine struct {
 	state            v1alpha1.ProviderStatus

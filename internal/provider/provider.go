@@ -116,13 +116,20 @@ func (r *Registry) Claim(providerName, serviceType string) error {
 }
 
 // Move atomically releases oldType and claims newType for providerName.
-// Returns an error if newType is occupied by a different provider; oldType remains held.
+// Returns an error if newType is occupied by a different provider, or if
+// oldType is held by a different provider — the latter check prevents a
+// registry/store desync from letting one provider's Move call delete a
+// different provider's active slot. oldType remains held (or unoccupied,
+// as it already was) on any error.
 func (r *Registry) Move(providerName, oldType, newType string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if holder, ok := r.slots[newType]; ok && holder != providerName {
 		return fmt.Errorf("service type '%s' is already served by provider '%s'", newType, holder)
+	}
+	if holder, ok := r.slots[oldType]; ok && holder != providerName {
+		return fmt.Errorf("cannot move from service type '%s': it is held by a different provider '%s', not '%s'", oldType, holder, providerName)
 	}
 	delete(r.slots, oldType)
 	r.slots[newType] = providerName

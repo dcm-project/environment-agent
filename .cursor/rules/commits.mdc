@@ -1,0 +1,35 @@
+---
+description: Commit message format and git standards
+alwaysApply: true
+---
+
+## Commit Standards
+
+### Format
+
+```
+<type>(<scope>): <subject>
+
+<optional body - what and why, not how>
+
+Assisted by: Claude Code - <model>
+```
+
+Always use `git commit -s` to add "Signed-off-by" trailer automatically.
+
+### Types
+
+- `feat`: New feature
+- `fix`: Bug fix
+- `refactor`: Code restructuring
+- `test`: Adding/updating tests
+- `docs`: Documentation
+- `chore`: Maintenance tasks
+
+### Rules
+
+- Subject line: imperative mood, no period, max ~72 chars
+- Body: explain what and why, not how
+- Always include the "Assisted by: Claude Code - <model>" trailer (e.g. `opus-4.6`, `sonnet-4`)
+- Never use `git add -f` to bypass .gitignore
+- `.ai/` tracked subdirectories (specs, test-plans, decisions) can be staged normally; other `.ai/` dirs (plans, checkpoints, exploration, reviews, research) are gitignored and must stay local

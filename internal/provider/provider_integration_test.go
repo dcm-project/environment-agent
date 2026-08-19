@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,7 +62,7 @@ func startRealServer() (baseURL string, stop func()) {
 		_ = ln.Close()
 	})
 
-	fileStore, err := store.NewFileStore(cfg.Provider.PersistencePath)
+	fileStore, err := store.NewFileStore(cfg.Provider.PersistencePath, logger)
 	Expect(err).NotTo(HaveOccurred())
 	registry := provider.NewRegistry()
 	healthTracker := provider.NewInMemoryHealthTracker()
@@ -75,6 +76,9 @@ func startRealServer() (baseURL string, stop func()) {
 	healthSvc := health.NewService(noopMessaging{})
 	strictHandler := handler.New(healthSvc, providerSvc)
 	h := server.NewStrictHandlerWithOptions(strictHandler, nil, server.StrictHTTPServerOptions{
+		RequestErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
+			httperror.WriteInvalidArgument(w, r, logger, err.Error())
+		},
 		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
 			httperror.WriteResponse(w, logger, http.StatusInternalServerError,
 				"INTERNAL", "Internal Server Error",
@@ -134,13 +138,13 @@ func validProviderBody() string {
 }
 
 func startWithPersistence(path string) error {
-	fileStore, err := store.NewFileStore(path)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	fileStore, err := store.NewFileStore(path, logger)
 	if err != nil {
 		return err
 	}
 	registry := provider.NewRegistry()
 	healthTracker := provider.NewInMemoryHealthTracker()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	providerSvc := service.New(fileStore, registry, healthTracker, nil, logger)
 	return providerSvc.LoadPersisted()
 }
@@ -382,6 +386,58 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 			Expect(found).To(BeTrue(), "db-provider for database must survive restart")
 		})
 
+		It("embedded SP preserves identity across restart (IT-SPR-085)", func() {
+			tmpDir := GinkgoT().TempDir()
+			GinkgoT().Setenv("AGENT_SP_PERSISTENCE_PATH", filepath.Join(tmpDir, "registrations.json"))
+			GinkgoT().Setenv("AGENT_EMBEDDED_SPS", "test-embedded")
+
+			baseURL1, stop1 := startRealServer()
+			DeferCleanup(stop1)
+
+			client := &http.Client{Timeout: 2 * time.Second}
+			resp, err := client.Get(baseURL1 + "/api/v1alpha1/providers")
+			Expect(err).NotTo(HaveOccurred())
+			var list1 v1alpha1.ProviderList
+			Expect(json.NewDecoder(resp.Body).Decode(&list1)).To(Succeed())
+			_ = resp.Body.Close()
+			Expect(list1.Results).NotTo(BeNil())
+
+			var origID string
+			var origCreateTime time.Time
+			for _, p := range *list1.Results {
+				if p.ServiceType == "test-embedded" {
+					origID = *p.Id
+					origCreateTime = *p.CreateTime
+					break
+				}
+			}
+			Expect(origID).NotTo(BeEmpty(), "embedded SP must be listed")
+
+			stop1()
+
+			baseURL2, stop2 := startRealServer()
+			DeferCleanup(stop2)
+
+			resp, err = client.Get(baseURL2 + "/api/v1alpha1/providers")
+			Expect(err).NotTo(HaveOccurred())
+			var list2 v1alpha1.ProviderList
+			Expect(json.NewDecoder(resp.Body).Decode(&list2)).To(Succeed())
+			_ = resp.Body.Close()
+			Expect(list2.Results).NotTo(BeNil())
+
+			var newID string
+			var newCreateTime time.Time
+			for _, p := range *list2.Results {
+				if p.ServiceType == "test-embedded" {
+					newID = *p.Id
+					newCreateTime = *p.CreateTime
+					break
+				}
+			}
+			Expect(newID).To(Equal(origID), "embedded SP ID must survive restart")
+			Expect(newCreateTime).To(Equal(origCreateTime), "embedded SP create_time must survive restart")
+		})
+
 		It("fails fast on corrupted persistence (IT-SPR-170)", func() {
 			tmpDir := GinkgoT().TempDir()
 			corruptFile := filepath.Join(tmpDir, "registrations.json")
@@ -471,6 +527,15 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 			Expect(resp.StatusCode).To(Equal(http.StatusConflict))
 			Expect(resp.Header.Get("Content-Type")).To(Equal("application/problem+json"))
 
+			// name != service type here, unlike IT-SPR-060, so this can prove
+			// the conflicting provider's name is actually surfaced.
+			var errBody v1alpha1.Error
+			Expect(json.NewDecoder(resp.Body).Decode(&errBody)).To(Succeed())
+			Expect(errBody.Type).To(Equal("CONFLICT"))
+			Expect(errBody.Detail).To(HaveValue(ContainSubstring("other-provider")),
+				"conflict detail must name the provider that already holds the service type")
+			Expect(errBody.Detail).To(HaveValue(ContainSubstring("analytics")))
+
 			By("verifying db-provider still serves database")
 			listResp, err := client.Get(baseURL + "/api/v1alpha1/providers")
 			Expect(err).NotTo(HaveOccurred())
@@ -528,6 +593,45 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 
 			Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 			Expect(resp.Header.Get("Content-Type")).To(Equal("application/problem+json"))
+		})
+	})
+
+	Describe("Strict Handler Decode-Failure Wiring", func() {
+		// No live HTTP payload today reaches the strict handler's own
+		// json.Decode with a body the OpenAPI validator middleware didn't
+		// already reject, so this bypasses chi routing and that middleware
+		// to exercise the strict-handler's RequestErrorHandlerFunc wiring
+		// directly (REQ-HTTP-091 / AC-HTTP-091).
+		It("returns RFC 7807 problem+json when the strict handler's own JSON decode fails (IT-HTTP-110b)", func() {
+			logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+			fileStore, err := store.NewFileStore(filepath.Join(GinkgoT().TempDir(), "registrations.json"), logger)
+			Expect(err).NotTo(HaveOccurred())
+			providerSvc := service.New(fileStore, provider.NewRegistry(), provider.NewInMemoryHealthTracker(), nil, logger)
+			healthSvc := health.NewService(noopMessaging{})
+			strictHandler := handler.New(healthSvc, providerSvc)
+			h := server.NewStrictHandlerWithOptions(strictHandler, nil, server.StrictHTTPServerOptions{
+				RequestErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
+					httperror.WriteInvalidArgument(w, r, logger, err.Error())
+				},
+				ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
+					httperror.WriteResponse(w, logger, http.StatusInternalServerError,
+						"INTERNAL", "Internal Server Error", err.Error(), &r.RequestURI)
+				},
+			})
+
+			// "name": 123 is valid JSON syntax but the wrong type for the
+			// Provider.Name string field — encoding/json fails to decode it.
+			req := httptest.NewRequest(http.MethodPost, "/api/v1alpha1/providers",
+				strings.NewReader(`{"name":123}`))
+			rec := httptest.NewRecorder()
+			h.CreateProvider(rec, req, v1alpha1.CreateProviderParams{})
+
+			Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			Expect(rec.Header().Get("Content-Type")).To(Equal("application/problem+json"))
+
+			var errBody v1alpha1.Error
+			Expect(json.NewDecoder(rec.Body).Decode(&errBody)).To(Succeed())
+			Expect(errBody.Type).To(Equal("INVALID_ARGUMENT"))
 		})
 	})
 
@@ -653,6 +757,34 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 			Expect(p.Id).To(HaveValue(Equal("my-stable-id")))
 		})
 
+		It("returns 409 with the colliding provider's name when a DIFFERENT provider name requests an already-used ?id= (IT-SPR-148)", func() {
+			// Unlike IT-SPR-145 (same name, different ID), this exercises the
+			// cross-provider-ID-collision branch: a new provider name
+			// requesting an ?id= already claimed by a different provider.
+			client := &http.Client{Timeout: 2 * time.Second}
+			firstBody := `{"name":"collision-holder","endpoint":"https://sp.example.com","service_type":"collision-svc-a","schema_version":"v1alpha1"}`
+			secondBody := `{"name":"collision-challenger","endpoint":"https://sp2.example.com","service_type":"collision-svc-b","schema_version":"v1alpha1"}`
+
+			resp1, err := client.Post(baseURL+"/api/v1alpha1/providers?id=shared-id", "application/json", strings.NewReader(firstBody))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp1.StatusCode).To(Equal(http.StatusCreated))
+			_ = resp1.Body.Close()
+
+			resp2, err := client.Post(baseURL+"/api/v1alpha1/providers?id=shared-id", "application/json", strings.NewReader(secondBody))
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = resp2.Body.Close() }()
+
+			Expect(resp2.StatusCode).To(Equal(http.StatusConflict))
+			Expect(resp2.Header.Get("Content-Type")).To(Equal("application/problem+json"))
+
+			var errBody v1alpha1.Error
+			Expect(json.NewDecoder(resp2.Body).Decode(&errBody)).To(Succeed())
+			Expect(errBody.Type).To(Equal("CONFLICT"))
+			Expect(errBody.Detail).To(HaveValue(ContainSubstring("shared-id")))
+			Expect(errBody.Detail).To(HaveValue(ContainSubstring("collision-holder")),
+				"the conflict detail must name the provider that already holds the requested ID")
+		})
+
 		It("succeeds when re-registering with the same ?id= (IT-SPR-147)", func() {
 			client := &http.Client{Timeout: 2 * time.Second}
 			body := `{"name":"same-id-provider","endpoint":"https://sp.example.com","service_type":"same-id-svc","schema_version":"v1alpha1"}`
@@ -752,6 +884,79 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 			Expect(json.NewDecoder(resp.Body).Decode(&errBody)).To(Succeed())
 			Expect(errBody.Type).To(Equal("CONFLICT"))
 			Expect(errBody.Detail).To(HaveValue(ContainSubstring("database")))
+			// name != service type here ("db-provider" vs "database"), so
+			// this disambiguates the conflict detail actually naming the
+			// holder, not merely echoing the type.
+			Expect(errBody.Detail).To(HaveValue(ContainSubstring("db-provider")),
+				"conflict detail must name the provider that already holds the service type")
+		})
+	})
+
+	Describe("Input Normalization", func() {
+		var (
+			baseURL string
+			stop    func()
+		)
+
+		BeforeEach(func() {
+			baseURL, stop = startRealServer()
+			DeferCleanup(stop)
+		})
+
+		// Validation rejects purely empty (post-trim) values but must also
+		// trim the value used for idempotency/collision keys, or
+		// "provider1" and "provider1 " register as distinct providers.
+		It("trims leading/trailing whitespace in name so it cannot bypass idempotency (IT-SPR-149)", func() {
+			client := &http.Client{Timeout: 2 * time.Second}
+
+			resp1, err := client.Post(baseURL+"/api/v1alpha1/providers", "application/json",
+				strings.NewReader(`{"name":"ws-provider","endpoint":"https://sp.example.com","service_type":"ws-svc-a","schema_version":"v1alpha1"}`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp1.StatusCode).To(Equal(http.StatusCreated))
+			_ = resp1.Body.Close()
+
+			resp2, err := client.Post(baseURL+"/api/v1alpha1/providers", "application/json",
+				strings.NewReader(`{"name":"  ws-provider  ","endpoint":"https://sp2.example.com","service_type":"ws-svc-a","schema_version":"v1alpha1"}`))
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = resp2.Body.Close() }()
+
+			Expect(resp2.StatusCode).To(Equal(http.StatusOK),
+				"a whitespace-padded name must match the existing provider (idempotent update), not create a second one")
+
+			listResp, err := client.Get(baseURL + "/api/v1alpha1/providers")
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = listResp.Body.Close() }()
+			var list v1alpha1.ProviderList
+			Expect(json.NewDecoder(listResp.Body).Decode(&list)).To(Succeed())
+			Expect(list.Results).NotTo(BeNil())
+
+			count := 0
+			for _, p := range *list.Results {
+				if p.Name == "ws-provider" {
+					count++
+				}
+			}
+			Expect(count).To(Equal(1), "exactly one provider named (trimmed) 'ws-provider' must exist")
+		})
+
+		// Symmetric case: whitespace around service_type must not bypass the
+		// single-slot-per-service-type invariant (REQ-SPR-200).
+		It("trims leading/trailing whitespace in service_type so it cannot bypass slot collision checks (IT-SPR-149b)", func() {
+			client := &http.Client{Timeout: 2 * time.Second}
+
+			resp1, err := client.Post(baseURL+"/api/v1alpha1/providers", "application/json",
+				strings.NewReader(`{"name":"ws-svc-holder","endpoint":"https://sp.example.com","service_type":"ws-database","schema_version":"v1alpha1"}`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp1.StatusCode).To(Equal(http.StatusCreated))
+			_ = resp1.Body.Close()
+
+			resp2, err := client.Post(baseURL+"/api/v1alpha1/providers", "application/json",
+				strings.NewReader(`{"name":"ws-svc-challenger","endpoint":"https://sp2.example.com","service_type":"  ws-database  ","schema_version":"v1alpha1"}`))
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = resp2.Body.Close() }()
+
+			Expect(resp2.StatusCode).To(Equal(http.StatusConflict),
+				"whitespace-padded service_type must still collide with the existing 'ws-database' slot")
 		})
 	})
 })

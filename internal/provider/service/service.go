@@ -147,9 +147,10 @@ func (s *ProviderService) updateRegistration(ctx context.Context, existing *stor
 		}
 		return nil, err
 	}
-	if oldEndpoint != in.Endpoint {
-		s.trackExternalProvider(existing.ID, in.Endpoint, true)
+	if oldEndpoint != in.Endpoint || oldServiceType != in.ServiceType {
+		s.trackExternalProvider(existing.ID, in.Endpoint, in.ServiceType, true)
 	}
+	s.logger.Info("external SP updated", "service_type", in.ServiceType, "provider_id", existing.ID, "name", existing.Name)
 	return s.toAPI(existing), nil
 }
 
@@ -179,6 +180,8 @@ func (s *ProviderService) assignProviderID(ctx context.Context, requestedID *str
 // createRegistration claims the service type slot and persists a new provider record.
 func (s *ProviderService) createRegistration(ctx context.Context, id string, in RegistrationInput) (*v1alpha1.Provider, error) {
 	if err := s.registry.Claim(in.Name, in.ServiceType); err != nil {
+		s.logger.Warn("external SP registration rejected: service type conflict",
+			"service_type", in.ServiceType, "name", in.Name, "error", err)
 		return nil, &DomainError{Code: ErrCodeConflict, Message: err.Error()}
 	}
 
@@ -200,7 +203,8 @@ func (s *ProviderService) createRegistration(ctx context.Context, id string, in 
 		s.registry.Release(in.ServiceType)
 		return nil, err
 	}
-	s.trackExternalProvider(id, in.Endpoint, true)
+	s.trackExternalProvider(id, in.Endpoint, in.ServiceType, true)
+	s.logger.Info("external SP registered", "service_type", in.ServiceType, "provider_id", id, "name", in.Name)
 	return s.toAPI(&sp), nil
 }
 
@@ -236,16 +240,21 @@ func (s *ProviderService) LoadPersisted() error {
 	if err != nil {
 		return err
 	}
+	restored, conflicts := 0, 0
 	for _, p := range providers {
 		if p.Type != string(v1alpha1.External) {
 			continue
 		}
 		if err := s.registry.Claim(p.Name, p.ServiceType); err != nil {
 			s.logger.Warn("conflict loading persisted provider", "name", p.Name, "error", err)
+			conflicts++
 			continue
 		}
-		s.trackExternalProvider(p.ID, p.Endpoint, false)
+		s.trackExternalProvider(p.ID, p.Endpoint, p.ServiceType, false)
+		s.logger.Info("persisted provider restored", "name", p.Name, "service_type", p.ServiceType, "type", p.Type)
+		restored++
 	}
+	s.logger.Info("finished loading persisted providers", "restored", restored, "conflicts", conflicts)
 	return nil
 }
 
@@ -253,10 +262,10 @@ func (s *ProviderService) LoadPersisted() error {
 // When initialCheck is true, performs an immediate health check so a healthy SP
 // becomes Ready without waiting for the next poll tick. LoadPersisted passes false
 // to avoid blocking startup with N sequential HTTP checks.
-func (s *ProviderService) trackExternalProvider(id, endpoint string, initialCheck bool) {
+func (s *ProviderService) trackExternalProvider(id, endpoint, serviceType string, initialCheck bool) {
 	s.health.SetState(id, v1alpha1.Unhealthy, time.Time{})
 	if s.mon != nil {
-		s.mon.RegisterProvider(id, monitor.NewExternalChecker(endpoint), v1alpha1.Unhealthy, initialCheck)
+		s.mon.RegisterProvider(id, monitor.NewExternalChecker(endpoint), serviceType, v1alpha1.Unhealthy, initialCheck)
 	}
 }
 
@@ -301,7 +310,14 @@ func (s *ProviderService) removeStaleEmbedded(enabled map[string]bool) {
 	}
 	for _, p := range all {
 		if p.Type == string(v1alpha1.Embedded) && !enabled[p.ServiceType] {
-			s.registry.Release(p.ServiceType)
+			// Only release the slot if this stale embedded provider is still
+			// its holder — an unconditional Release could free a slot an
+			// external provider has since claimed for the same service type.
+			// Embedded provider Name always equals its ServiceType
+			// (registerEmbeddedType), so this is a direct name comparison.
+			if holder, ok := s.registry.Lookup(p.ServiceType); ok && holder == p.Name {
+				s.registry.Release(p.ServiceType)
+			}
 			s.cleanupEmbeddedRecord(p)
 		}
 	}
@@ -313,6 +329,8 @@ func (s *ProviderService) removeStaleEmbedded(enabled map[string]bool) {
 func (s *ProviderService) cleanupEmbeddedRecord(p store.StoredProvider) {
 	if err := s.store.Delete(context.Background(), p.Name); err != nil {
 		s.logger.Error("failed to delete embedded record", "name", p.Name, "error", err)
+	} else {
+		s.logger.Info("embedded SP removed", "service_type", p.ServiceType, "provider_id", p.ID, "name", p.Name)
 	}
 	s.health.DeleteState(p.ID)
 	if s.mon != nil {
@@ -343,17 +361,7 @@ func (s *ProviderService) registerEmbeddedType(st string) {
 	}
 
 	now := time.Now().UTC()
-	id := provider.GenerateProviderID()
-	createTime := now
-	if existing != nil && existing.Type == string(v1alpha1.Embedded) {
-		if existing.ID != "" {
-			id = existing.ID
-		}
-		if !existing.CreateTime.IsZero() {
-			createTime = existing.CreateTime
-		}
-	}
-
+	id, createTime := resolveEmbeddedIdentity(existing, now)
 	sp := store.StoredProvider{
 		ID:            id,
 		Name:          st,
@@ -364,20 +372,44 @@ func (s *ProviderService) registerEmbeddedType(st string) {
 		CreateTime:    createTime,
 		UpdateTime:    now,
 	}
+	persisted := true
 	if err := s.store.Save(context.Background(), sp); err != nil {
 		s.logger.Error("failed to save embedded SP", "service_type", st, "error", err)
 		if existing == nil {
 			s.registry.Release(st)
 			return
 		}
-		// existing != nil: previous record still in store, register health/monitor for it
+		persisted = false
 	}
 	checker := monitor.NewEmbeddedChecker(monitor.DefaultEmbeddedCheckFn(st))
 	if s.mon != nil {
-		s.mon.RegisterProvider(sp.ID, checker, v1alpha1.Ready, true)
+		s.mon.RegisterProvider(sp.ID, checker, st, v1alpha1.Ready, true)
 	} else {
-		s.health.SetState(sp.ID, v1alpha1.Ready, now)
+		s.health.SetState(sp.ID, v1alpha1.Ready, sp.UpdateTime)
 	}
+	if persisted {
+		s.logger.Info("embedded SP registered", "service_type", st, "provider_id", sp.ID)
+	} else {
+		s.logger.Warn("embedded SP registered with stale persisted state (save failed)", "service_type", st, "provider_id", sp.ID)
+	}
+}
+
+// resolveEmbeddedIdentity returns the provider ID and creation time for an
+// embedded registration. Reuses values from an existing embedded record when
+// available to preserve identity across restarts.
+func resolveEmbeddedIdentity(existing *store.StoredProvider, now time.Time) (string, time.Time) {
+	if existing == nil || existing.Type != string(v1alpha1.Embedded) {
+		return provider.GenerateProviderID(), now
+	}
+	id := existing.ID
+	if id == "" {
+		id = provider.GenerateProviderID()
+	}
+	createTime := existing.CreateTime
+	if createTime.IsZero() {
+		createTime = now
+	}
+	return id, createTime
 }
 
 func (s *ProviderService) toAPI(sp *store.StoredProvider) *v1alpha1.Provider {

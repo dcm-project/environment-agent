@@ -31,25 +31,3 @@ func WriteResponse(w http.ResponseWriter, logger *slog.Logger, statusCode int, e
 		logger.Error("failed to write error response", "error", err)
 	}
 }
-
-// StatusForType returns the HTTP status code for the given error type string.
-func StatusForType(errType string) int {
-	switch errType {
-	case "INVALID_ARGUMENT":
-		return http.StatusBadRequest
-	case "UNAUTHORIZED":
-		return http.StatusUnauthorized
-	case "NOT_FOUND":
-		return http.StatusNotFound
-	case "CONFLICT":
-		return http.StatusConflict
-	case "UNPROCESSABLE_ENTITY":
-		return http.StatusUnprocessableEntity
-	case "INTERNAL":
-		return http.StatusInternalServerError
-	case "UNAVAILABLE":
-		return http.StatusServiceUnavailable
-	default:
-		return http.StatusInternalServerError
-	}
-}

@@ -25,25 +25,28 @@ func (e *RateLimitError) Error() string { return "dcm rate limited" }
 func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
 
 type registrationPayload struct {
-	Name               string                     `json:"name"`
-	Environment        string                     `json:"environment"`
-	Cost               string                     `json:"cost"`
-	TopicName          string                     `json:"topicName"`
-	ServiceTypes       []string                   `json:"serviceTypes"`
-	ResourcesAvailable *v1alpha1.ResourceCapacity `json:"resourcesAvailable,omitempty"`
+	Name         string   `json:"name"`
+	Environment  string   `json:"environment"`
+	Cost         string   `json:"cost"`
+	TopicName    string   `json:"topic_name"`
+	ServiceTypes []string `json:"service_types"`
+	// ResourcesAvailable is sent for forward-compatibility, but currently
+	// ignored by the control plane (its OpenAPI schema doesn't model this
+	// field). Kept omitempty so absence is silent, not an error.
+	ResourcesAvailable *v1alpha1.ResourceCapacity `json:"resources_available,omitempty"`
 }
 
 type heartbeatPayload struct {
 	Timestamp   time.Time `json:"timestamp"`
-	ConsumerLag int64     `json:"consumerLag"`
+	ConsumerLag int64     `json:"consumer_lag"`
 }
 
 type registrationResponse struct {
-	AgentID string `json:"agentId"`
+	AgentID string `json:"agent_id"`
 }
 
-// ponytail: hand-rolled HTTP client — replace with generated control-plane client
-// once the DCM agent registration OpenAPI spec is published and a Go client is generated.
+// dcmClient is hand-rolled pending a generated control-plane client once the
+// DCM agent registration OpenAPI spec is published.
 type dcmClient struct {
 	baseURL    *url.URL
 	httpClient *http.Client
@@ -69,7 +72,7 @@ func (c *dcmClient) register(ctx context.Context, payload registrationPayload) (
 		return "", fmt.Errorf("marshal registration payload: %w", err)
 	}
 
-	endpoint := c.baseURL.JoinPath("api", "v1", "agents").String()
+	endpoint := c.baseURL.JoinPath("api", "v1alpha1", "agents").String()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create registration request: %w", err)
@@ -92,7 +95,7 @@ func (c *dcmClient) handleRegistrationResponse(resp *http.Response) (string, err
 			return "", fmt.Errorf("decode registration response: %w", err)
 		}
 		if result.AgentID == "" {
-			return "", fmt.Errorf("DCM returned empty agentId")
+			return "", fmt.Errorf("DCM returned empty agent_id")
 		}
 		return result.AgentID, nil
 	}
@@ -121,8 +124,9 @@ func (c *dcmClient) heartbeat(ctx context.Context, agentID string, payload heart
 		return fmt.Errorf("marshal heartbeat payload: %w", err)
 	}
 
-	// ponytail: agentID from trusted DCM control plane — no path-traversal sanitization needed beyond empty check above
-	endpoint := c.baseURL.JoinPath("api", "v1", "agents", agentID, "heartbeat").String()
+	// agentID comes from the trusted DCM control plane, so no path-traversal
+	// sanitization beyond the empty check above is needed.
+	endpoint := c.baseURL.JoinPath("api", "v1alpha1", "agents", agentID, "heartbeat").String()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create heartbeat request: %w", err)

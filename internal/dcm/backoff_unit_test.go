@@ -58,4 +58,21 @@ var _ = Describe("ParseRetryAfter", Label("unit"), func() {
 		Expect(ok).To(BeTrue())
 		Expect(d).To(Equal(999999999 * time.Second))
 	})
+
+	It("returns (0, false) for an HTTP-date in the past (UT-DCM-038)", func() {
+		now := time.Date(2025, 12, 1, 15, 55, 0, 0, time.UTC)
+		d, ok := dcm.ParseRetryAfter("Thu, 01 Dec 2025 15:50:00 GMT", now)
+		Expect(ok).To(BeFalse())
+		Expect(d).To(Equal(time.Duration(0)))
+	})
+
+	It("returns (0, false) for an HTTP-date exactly equal to now (UT-DCM-039)", func() {
+		// http.ParseTime truncates to whole seconds (RFC1123 has no
+		// sub-second precision), so `now` must also be whole-seconds to
+		// land exactly on the d > 0 boundary rather than the past-date one.
+		now := time.Date(2025, 12, 1, 15, 55, 0, 0, time.UTC)
+		d, ok := dcm.ParseRetryAfter("Mon, 01 Dec 2025 15:55:00 GMT", now)
+		Expect(ok).To(BeFalse())
+		Expect(d).To(Equal(time.Duration(0)))
+	})
 })

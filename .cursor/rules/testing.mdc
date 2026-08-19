@@ -1,0 +1,39 @@
+---
+description: Testing patterns - Ginkgo/Gomega BDD, integration tests, test philosophy
+globs:
+  - "**/*_test.go"
+  - "**/test/**"
+alwaysApply: false
+---
+
+## Framework
+
+Ginkgo v2 + Gomega. Use `Describe`/`Context`/`It` structure with `Expect()` assertions.
+
+## BDD Philosophy
+
+- Test observable behaviors, not implementation details
+- Prefer integration tests over unit tests — they cover more real behavior with less coupling
+- Unit tests only for isolated pure logic with non-trivial algorithmic behavior
+- **Caller-trust principle**: do not test conditions that callers already prevent. If upper layer guarantees a precondition, skip that test at the lower layer.
+
+## Integration Tests
+
+- Use real NATS server (embedded `nats-server`) — no mocks for messaging
+- Test files use `_integration_test.go` suffix or live under `test/`
+- Setup/teardown in `BeforeSuite`/`AfterSuite`
+
+## Test Structure
+
+```go
+var _ = Describe("Router", func() {
+    Context("when SP is ready", func() {
+        It("dispatches to the SP forwarder", func() {
+            // Arrange - set up SP, register service type
+            // Act - route a CE
+            // Assert - verify dispatch happened
+            Expect(result).To(Equal(expected))
+        })
+    })
+})
+```
