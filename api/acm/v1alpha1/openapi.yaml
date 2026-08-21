@@ -1,0 +1,598 @@
+openapi: 3.0.4
+info:
+  title: ACM Cluster Service Provider API
+  description: |
+    Service provider API for managing OpenShift clusters via Red Hat Advanced Cluster Management (ACM) and HyperShift.
+
+    This API is part of the Distributed Cloud Management (DCM) project and provides cluster lifecycle management
+    capabilities including creation, deletion, and status monitoring.
+
+    ## DCM Registration Metadata
+    - **Name:** acm-cluster-sp
+    - **ServiceType:** cluster
+    - **SupportedPlatforms:** kubevirt, baremetal
+    - **SupportedVersions:** Dynamic (based on ClusterImageSets available on ACM Hub)
+    - **Operations:** CREATE, DELETE, READ
+  version: 1.0.0
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    name: DCM Project
+    url: https://github.com/dcm-project
+
+servers:
+  - url: /
+    description: Root
+
+tags:
+  - name: Clusters
+    description: Cluster management operations
+  - name: Health
+    description: Health check operations
+
+paths:
+  /api/v1alpha1/clusters:
+    post:
+      operationId: createCluster
+      summary: Create a new cluster
+      description: |
+        Creates a new OpenShift cluster via ACM/HyperShift. The cluster creation is asynchronous;
+        this endpoint returns immediately with a PENDING status. Use GET /clusters/{clusterId}
+        to poll for cluster readiness.
+      tags:
+        - Clusters
+      parameters:
+        - name: id
+          in: query
+          description: >-
+            Client-assigned resource identifier (AEP-133). If omitted,
+            the server generates a UUID. Must be unique among all
+            resources managed by this SP.
+          required: false
+          schema:
+            type: string
+            pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Cluster'
+      responses:
+        '201':
+          description: Cluster creation initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cluster'
+        '400':
+          description: Invalid request
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Cluster already exists
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthenticated
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Permission denied
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unsupported platform or version
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    get:
+      operationId: listClusters
+      summary: List all clusters
+      description: Returns a paginated list of all clusters managed by this service provider.
+      tags:
+        - Clusters
+      parameters:
+        - name: page_token
+          in: query
+          description: Token for fetching the next page of results
+          required: false
+          schema:
+            type: string
+        - name: max_page_size
+          in: query
+          description: Maximum number of results to return per page
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: List of clusters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClusterList'
+        '400':
+          description: Invalid request
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthenticated
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Permission denied
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1alpha1/clusters/{clusterId}:
+    get:
+      operationId: getCluster
+      summary: Get cluster details
+      description: Returns the details of a specific cluster including its current status.
+      tags:
+        - Clusters
+      parameters:
+        - $ref: '#/components/parameters/ClusterIdPath'
+      responses:
+        '200':
+          description: Cluster details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cluster'
+        '401':
+          description: Unauthenticated
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Permission denied
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Cluster not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      operationId: deleteCluster
+      summary: Delete a cluster
+      description: |
+        Initiates deletion of a cluster. The deletion is asynchronous; this endpoint returns
+        immediately. The cluster will be removed from the system once deletion completes.
+      tags:
+        - Clusters
+      parameters:
+        - $ref: '#/components/parameters/ClusterIdPath'
+      responses:
+        '204':
+          description: Cluster deletion initiated
+        '401':
+          description: Unauthenticated
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Permission denied
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Cluster not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1alpha1/clusters/health:
+    get:
+      operationId: getHealth
+      summary: Health check
+      description: Returns the health status of the service provider.
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Health status of the service provider
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+components:
+  parameters:
+    ClusterIdPath:
+      name: clusterId
+      in: path
+      required: true
+      description: DCM-level cluster resource identifier (id field)
+      schema:
+        type: string
+        pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+
+  schemas:
+    Cluster:
+      type: object
+      description: A cluster resource managed by ACM/HyperShift
+      x-aep-resource:
+        singular: cluster
+        plural: clusters
+        type: acm-cluster-service-provider.dcm.io/cluster
+        patterns:
+          - clusters/{cluster}
+      required:
+        - spec
+      properties:
+        id:
+          type: string
+          pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+          description: >-
+            DCM-level resource identifier. Server-generated UUID if not
+            client-specified via the ?id= query parameter on creation.
+            Used in URL paths and the path field.
+          readOnly: true
+          example: 123e4567-e89b-12d3-a456-426614174000
+        path:
+          type: string
+          description: Resource path for this cluster
+          readOnly: true
+          example: clusters/123e4567-e89b-12d3-a456-426614174000
+        spec:
+          $ref: '#/components/schemas/ClusterSpec'
+        status:
+          type: string
+          description: Current status of the cluster
+          enum:
+            - PENDING
+            - PROVISIONING
+            - READY
+            - FAILED
+            - DELETING
+            - DELETED
+            - UNAVAILABLE
+          x-enum-varnames:
+            - ClusterStatusPENDING
+            - ClusterStatusPROVISIONING
+            - ClusterStatusREADY
+            - ClusterStatusFAILED
+            - ClusterStatusDELETING
+            - ClusterStatusDELETED
+            - ClusterStatusUNAVAILABLE
+          readOnly: true
+        status_message:
+          type: string
+          description: Human-readable message about the current status
+          readOnly: true
+        api_endpoint:
+          type: string
+          description: Kubernetes API endpoint URL (available when READY)
+          readOnly: true
+        console_uri:
+          type: string
+          description: OpenShift console URI (available when READY)
+          readOnly: true
+        kubeconfig:
+          type: string
+          description: >-
+            Base64-encoded kubeconfig for cluster access. Populated when
+            cluster status is READY. Empty during PENDING, PROVISIONING,
+            or FAILED states.
+          readOnly: true
+        create_time:
+          type: string
+          format: date-time
+          description: Timestamp when the cluster was created
+          readOnly: true
+        update_time:
+          type: string
+          format: date-time
+          description: Timestamp when the cluster was last updated
+          readOnly: true
+
+    ClusterSpec:
+      type: object
+      description: Service-type-specific input specification for a cluster
+      required:
+        - service_type
+        - version
+        - metadata
+      properties:
+        service_type:
+          type: string
+          description: Service type identifier. Must be "cluster" for this SP.
+          enum:
+            - cluster
+        version:
+          type: string
+          description: >-
+            Kubernetes minor version for the cluster (e.g., "1.30").
+            Mapped internally to an OpenShift version via the
+            compatibility matrix (OCP 4.x = K8s 1.(x+13)) and resolved
+            to a ClusterImageSet on the ACM Hub.
+        nodes:
+          $ref: '#/components/schemas/ClusterNodes'
+        metadata:
+          $ref: '#/components/schemas/ClusterMetadata'
+        provider_hints:
+          $ref: '#/components/schemas/ProviderHints'
+
+    ClusterNodes:
+      type: object
+      description: Node configuration for the cluster
+      properties:
+        control_plane:
+          $ref: '#/components/schemas/ControlPlaneSpec'
+        workers:
+          $ref: '#/components/schemas/WorkerSpec'
+
+    ControlPlaneSpec:
+      type: object
+      description: Control plane node specification
+      properties:
+        count:
+          type: integer
+          description: Number of control plane nodes
+          enum: [1, 3, 5]
+        cpu:
+          type: integer
+          description: Number of CPU cores per control plane node
+          minimum: 2
+        memory:
+          type: string
+          description: Memory per control plane node (e.g., "16GB", "32GB")
+          pattern: '^[1-9][0-9]*(MB|GB|TB)$'
+          example: "16GB"
+        storage:
+          type: string
+          description: Storage per control plane node (e.g., "120GB", "500GB")
+          pattern: '^[1-9][0-9]*(MB|GB|TB)$'
+          example: "120GB"
+
+    WorkerSpec:
+      type: object
+      description: Worker node specification
+      properties:
+        count:
+          type: integer
+          description: Number of worker nodes
+          minimum: 1
+        cpu:
+          type: integer
+          description: Number of CPU cores per worker node
+          minimum: 1
+        memory:
+          type: string
+          description: Memory per worker node (e.g., "16GB", "32GB")
+          pattern: '^[1-9][0-9]*(MB|GB|TB)$'
+          example: "16GB"
+        storage:
+          type: string
+          description: Storage per worker node (e.g., "120GB", "500GB")
+          pattern: '^[1-9][0-9]*(MB|GB|TB)$'
+          example: "120GB"
+
+    ClusterMetadata:
+      type: object
+      description: Metadata for the cluster
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: >-
+            Human-readable cluster name. Used as the K8s HostedCluster
+            metadata.name. Must be unique within the target namespace.
+          pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+        labels:
+          type: object
+          description: Key-value labels for the cluster
+          additionalProperties:
+            type: string
+
+    ProviderHints:
+      type: object
+      description: Provider-specific configuration hints
+      additionalProperties: true
+      properties:
+        acm:
+          $ref: '#/components/schemas/ACMProviderHints'
+
+    ACMProviderHints:
+      type: object
+      description: ACM-specific provider hints
+      properties:
+        platform:
+          type: string
+          description: Target platform for the cluster
+          enum:
+            - kubevirt
+            - baremetal
+          default: kubevirt
+        base_domain:
+          type: string
+          description: Base domain for the cluster (e.g., "example.com")
+        release_image:
+          type: string
+          description: Optional override for the release image
+        infra_env:
+          type: string
+          description: Name of the InfraEnv to use (for baremetal)
+        agent_labels:
+          type: object
+          description: Labels to match agents (for baremetal)
+          additionalProperties:
+            type: string     
+
+    ClusterList:
+      type: object
+      description: Paginated list of clusters
+      properties:
+        clusters:
+          type: array
+          description: List of clusters
+          items:
+            $ref: '#/components/schemas/Cluster'
+        next_page_token:
+          type: string
+          description: Token to fetch the next page of results
+
+    Health:
+      type: object
+      description: Health status singleton resource
+      x-aep-resource:
+        singular: health
+        plural: healths
+        singleton: true
+        type: acm-cluster-service-provider.dcm.io/health
+        patterns:
+          - health
+      required:
+        - type
+        - status
+        - path
+        - version
+        - uptime
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          readOnly: true
+          description: Resource type identifier
+          example: "acm-cluster-service-provider.dcm.io/health"
+        status:
+          type: string
+          description: Health status
+          readOnly: true
+          example: "healthy"
+        path:
+          type: string
+          readOnly: true
+          description: Canonical path of the resource
+          example: "health"
+        version:
+          type: string
+          readOnly: true
+          description: SP build version string
+          example: "1.0.0"
+        uptime:
+          type: integer
+          readOnly: true
+          description: Seconds since SP started
+          example: 3600
+
+    Error:
+      type: object
+      description: |
+        RFC 9457 compliant error response (Problem Details for HTTP APIs).
+
+        Defined problem types:
+
+          | Type URI | Title | HTTP Status |
+          |----------|-------|-------------|
+          | .../problems/invalid-argument | Invalid argument | 400 |
+          | .../problems/not-found | Not found | 404 |
+          | .../problems/already-exists | Already exists | 409 |
+          | .../problems/unprocessable-entity | Unprocessable entity | 422 |
+          | .../problems/internal | Internal Server Error | 500 |
+          | .../problems/unavailable | Service unavailable | 503 |
+          | .../problems/permission-denied | Permission denied | 403 |
+          | .../problems/unauthenticated | Unauthenticated | 401 |
+
+        Note: permission-denied and unauthenticated are defined in the enum
+        but not yet emitted by any handler. Titles follow the humanized-slug
+        convention for forward-compatibility with K8s Container SP.
+      required:
+        - type
+        - title
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: URI reference identifying the error type
+          enum:
+            - https://dcm-project.github.io/problems/invalid-argument
+            - https://dcm-project.github.io/problems/not-found
+            - https://dcm-project.github.io/problems/already-exists
+            - https://dcm-project.github.io/problems/permission-denied
+            - https://dcm-project.github.io/problems/unauthenticated
+            - https://dcm-project.github.io/problems/internal
+            - https://dcm-project.github.io/problems/unavailable
+            - https://dcm-project.github.io/problems/unprocessable-entity
+          x-enum-varnames:
+            - ErrorTypeINVALIDARGUMENT
+            - ErrorTypeNOTFOUND
+            - ErrorTypeALREADYEXISTS
+            - ErrorTypePERMISSIONDENIED
+            - ErrorTypeUNAUTHENTICATED
+            - ErrorTypeINTERNAL
+            - ErrorTypeUNAVAILABLE
+            - ErrorTypeUNPROCESSABLEENTITY
+        title:
+          type: string
+          description: Short, human-readable summary of the problem
+        status:
+          type: integer
+          format: int32
+          minimum: 100
+          maximum: 599
+          description: HTTP status code
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence
+        instance:
+          type: string
+          format: uri-reference
+          description: URI reference for this specific error occurrence
