@@ -406,9 +406,11 @@ to the control-plane's response consumer.
 
 ### DD-250: Embedded SP operation handlers deferred (v1alpha1)
 
-**Decision:** Embedded SPs register correctly (REQ-SPR-010–050) and are health-monitored, but no embedded SP ever actually serves a create/delete operation in v1alpha1 — `routing.NewForwarder` is constructed with no `Embedded` field (`cmd/environment-agent/main.go`), so `Forwarder.embedded` is always empty and any operation routed to an embedded SP fails with a 503. No concrete `routing.EmbeddedHandler` implementation exists anywhere except a test fake.
+**Decision:** Embedded SPs register correctly (REQ-SPR-010–050) and are health-monitored. The forwarder supports in-process CREATE/DELETE via `routing.EmbeddedHandler`, but **only the ACM cluster service type (`cluster`) has a production embedded handler** (see DD-490). Other configured embedded types (e.g. `container`, `kubevirt`) still have no real handler — routing to them fails with 503. Generic integration tests continue to use a test fake.
 
-**Rationale:** A full requirements-coverage audit confirmed this is not a wiring bug but a genuinely unbuilt feature — the interface and `EMBEDDED_SPS` config exist as scaffolding for a future capability. The agent is fully functional today via external SPs, which is the only registration path actually exercised in practice. Building real embedded-SP operational logic (e.g. an in-process container/cluster/kubevirt handler) is a substantial feature, not a bug fix, and is out of scope for this hardening pass.
+**Rationale:** A full requirements-coverage audit (2026-08-07) found embedded operational logic was unbuilt scaffolding. ACM cluster was the first concrete embedded SP because environment-agent needs in-process cluster lifecycle without a separate SP process. Additional embedded types remain deferred until there is a concrete domain implementation to embed.
+
+**Supersedes (partially):** The 2026-08-07 audit conclusion that *no* embedded SP serves create/delete — accurate for that date, narrowed by DD-490 for `cluster` only.
 
 **Related requirements:** REQ-RTE-030, REQ-SPR-040, REQ-SPR-050, REQ-RCM-230
 
@@ -416,7 +418,7 @@ to the control-plane's response consumer.
 
 **Decision:** `REQ-DCM-030`'s `resources_available` field is permanently omitted from DCM registration/heartbeat payloads — `main.go` passes a literal `nil` `resourceProvider` to `dcm.NewRegistrar`. The registrar's conditional logic correctly omits the field when the provider is nil; there is simply no implementation anywhere that computes real resource capacity to plug into that provider interface.
 
-**Rationale:** Confirmed by the 2026-08-07 audit. No embedded SP or subsystem in v1alpha1 currently has a well-defined notion of "resource capacity" to report (this only becomes meaningful once real embedded SP operational logic exists — see DD-250). Defining that data source now, without a concrete consumer, would be speculative. Deferred until a real capacity source exists.
+**Rationale:** Confirmed by the 2026-08-07 audit. No embedded SP or subsystem in v1alpha1 currently has a well-defined notion of "resource capacity" to report (this only becomes meaningful once additional embedded SP operational logic exists beyond cluster — see DD-250, DD-490). Defining that data source now, without a concrete consumer, would be speculative. Deferred until a real capacity source exists.
 
 **Related requirements:** REQ-DCM-030
 
@@ -903,3 +905,34 @@ messages — cancel-subject had no equivalent bound, despite `HandleCancel` call
 shorter default (10s).
 
 **Related requirements:** REQ-RCM-180
+
+### DD-490: Embedded ACM cluster service provider (v1alpha1)
+
+**Decision:** When `AGENT_EMBEDDED_SPS` includes `cluster`, the agent wires an in-process ACM
+cluster SP via `internal/embedded/acmcluster`, importing
+`github.com/dcm-project/acm-cluster-service-provider/pkg/runtime`.
+
+- **Registration:** Agent calls `RegisterEmbedded`; ACM runtime uses `DisableRegistration: true`
+  (no outbound SPM/DCM registration from the SP).
+- **Operations:** CREATE/DELETE only through `routing.EmbeddedHandler`; no GET/LIST on the
+  embedded handler (READ remains the standalone SP HTTP API).
+- **Health:** ACM `HealthChecker` exposed via `SetEmbeddedCheckers`; plain kind clusters without
+  HyperShift CRDs typically report Unhealthy while still appearing in `GET /providers`.
+- **Config:** Embedded ACM env loading uses `runtime.LoadConfig(true, AGENT_MESSAGING_URL)` —
+  `SP_ENDPOINT` and standalone registration vars are not required. Cluster vars (`KUBECONFIG`,
+  `SP_PULL_SECRET`, `SP_CLUSTER_NAMESPACE`, etc.) still apply.
+- **Standalone ACM SP:** External process mode is unchanged; its registration client still targets
+  SPM today and will move to the agent `POST /providers` API in a follow-up PR.
+
+**Module dependency:** `go.mod` declares
+`github.com/dcm-project/acm-cluster-service-provider v0.0.0` with an interim committed
+`replace => ../acm-cluster-service-provider` until the ACM repo merges `pkg/runtime` and publishes a
+tag or pseudo-version. Remove the `replace` once a resolvable module version is available. CI and
+other clones without a sibling ACM checkout require the same layout or `go.work.example` until then.
+
+**Rationale:** Embedding avoids an extra SP process and HTTP hop for cluster lifecycle on agents
+that already run with hub kubeconfig access. Keeping ACM logic in its own module preserves a single
+source of truth; the agent only owns registration, routing, and health orchestration.
+
+**Related requirements:** REQ-SPR-010, REQ-SPR-030, REQ-SPR-040, REQ-HMN-020, REQ-RTE-030,
+REQ-RTE-210
