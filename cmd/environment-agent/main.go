@@ -17,6 +17,7 @@ import (
 	"github.com/dcm-project/environment-agent/internal/apiserver"
 	"github.com/dcm-project/environment-agent/internal/config"
 	"github.com/dcm-project/environment-agent/internal/dcm"
+	"github.com/dcm-project/environment-agent/internal/embedded/acmcluster"
 	"github.com/dcm-project/environment-agent/internal/handler"
 	"github.com/dcm-project/environment-agent/internal/health"
 	"github.com/dcm-project/environment-agent/internal/health/monitor"
@@ -130,7 +131,24 @@ func run(ctx context.Context) int {
 
 	// Wire routing before starting messaging so handlers are set
 	denyList := routing.NewResourceSet(cfg.Routing.DenyListMaxSize)
-	forwarder := routing.NewForwarder(routing.ForwarderConfig{Logger: logger})
+
+	acmBundle, err := acmcluster.Setup(ctx, cfg, logger)
+	if err != nil {
+		logger.Error("failed to setup embedded ACM cluster SP", "error", err)
+		return 1
+	}
+	if acmBundle != nil {
+		defer func() {
+			if closeErr := acmBundle.Close(); closeErr != nil {
+				logger.Error("failed to close embedded ACM cluster SP", "error", closeErr)
+			}
+		}()
+	}
+
+	forwarder := routing.NewForwarder(routing.ForwarderConfig{
+		Embedded: acmcluster.EmbeddedHandlers(acmBundle),
+		Logger:   logger,
+	})
 	router := routing.NewRouter(routing.RouterDeps{
 		Registry:      registry,
 		HealthTracker: healthTracker,
@@ -238,7 +256,11 @@ func run(ctx context.Context) int {
 	readyCtx, readyCancel := context.WithTimeout(ctx, registerEmbeddedSetupWait)
 	msgClient.WaitUntilReady(readyCtx)
 	readyCancel()
+	providerSvc.SetEmbeddedCheckers(acmcluster.EmbeddedCheckers(acmBundle))
 	providerSvc.RegisterEmbedded(cfg.Provider.EmbeddedSPs)
+	if acmBundle != nil {
+		acmBundle.Start(ctx)
+	}
 
 	healthMonitor.Start(ctx)
 	defer healthMonitor.Stop()

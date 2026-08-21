@@ -25,8 +25,9 @@ type ProviderService struct {
 	mon      *monitor.Monitor // nil-safe: if nil, no monitoring
 	logger   *slog.Logger
 
-	onChangeMu sync.RWMutex
-	onChange   func()
+	onChangeMu       sync.RWMutex
+	onChange         func()
+	embeddedCheckers map[string]monitor.Checker
 }
 
 // New creates a ProviderService with the given dependencies.
@@ -269,6 +270,13 @@ func (s *ProviderService) trackExternalProvider(id, endpoint, serviceType string
 	}
 }
 
+// SetEmbeddedCheckers supplies in-process health checkers keyed by service type.
+// Must be called before RegisterEmbedded. Unlisted service types use the
+// default env-var-based embedded health check.
+func (s *ProviderService) SetEmbeddedCheckers(checkers map[string]monitor.Checker) {
+	s.embeddedCheckers = checkers
+}
+
 // RegisterEmbedded registers embedded SPs for the given service types.
 // Removes stale embedded records not in the current enabled list.
 //
@@ -381,7 +389,7 @@ func (s *ProviderService) registerEmbeddedType(st string) {
 		}
 		persisted = false
 	}
-	checker := monitor.NewEmbeddedChecker(monitor.DefaultEmbeddedCheckFn(st))
+	checker := s.embeddedChecker(st)
 	if s.mon != nil {
 		s.mon.RegisterProvider(sp.ID, checker, st, v1alpha1.Ready, true)
 	} else {
@@ -397,6 +405,15 @@ func (s *ProviderService) registerEmbeddedType(st string) {
 // resolveEmbeddedIdentity returns the provider ID and creation time for an
 // embedded registration. Reuses values from an existing embedded record when
 // available to preserve identity across restarts.
+func (s *ProviderService) embeddedChecker(serviceType string) monitor.Checker {
+	if s.embeddedCheckers != nil {
+		if checker, ok := s.embeddedCheckers[serviceType]; ok && checker != nil {
+			return checker
+		}
+	}
+	return monitor.NewEmbeddedChecker(monitor.DefaultEmbeddedCheckFn(serviceType))
+}
+
 func resolveEmbeddedIdentity(existing *store.StoredProvider, now time.Time) (string, time.Time) {
 	if existing == nil || existing.Type != string(v1alpha1.Embedded) {
 		return provider.GenerateProviderID(), now
