@@ -57,6 +57,22 @@ Never edit generated files (`*.gen.go`) directly.
 make image-build   # Build container image using podman/docker
 ```
 
+### Local deployment (Kind + Compose)
+
+See [deploy/DEPLOY.md](deploy/DEPLOY.md) for full setup. Requires Kind with a running cluster:
+
+```bash
+make compose-up
+make kind-connect
+make kubeconfig-for-compose
+export AGENT_KUBECONFIG_HOST="$(pwd)/deploy/.kube/config"
+make compose-up
+make deploy-verify
+```
+
+For integration with the control-plane stack, see
+[control-plane deploy/docs/environment-agent-kind.md](https://github.com/dcm-project/control-plane/blob/main/deploy/docs/environment-agent-kind.md).
+
 ## API Endpoints
 
 | Method | Endpoint                              | Description                         |

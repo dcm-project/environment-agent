@@ -8,6 +8,20 @@ CONTAINER_ENGINE ?= $(shell \
 		echo docker; \
 	fi)
 
+ifeq ($(CONTAINER_ENGINE),)
+$(error No supported container engine found. Please install podman or docker, or set CONTAINER_ENGINE explicitly.)
+endif
+
+COMPOSE_FILE := deploy/compose.yaml
+COMPOSE_PROJECT_NAME ?= environment-agent
+COMPOSE_NETWORK := $(COMPOSE_PROJECT_NAME)_default
+
+COMPOSE ?= $(shell command -v podman-compose >/dev/null 2>&1 && echo podman-compose || \
+	(command -v docker-compose >/dev/null 2>&1 && echo docker-compose || \
+	(echo "$(CONTAINER_ENGINE) compose")))
+
+export COMPOSE_PROJECT_NAME
+
 # CONTAINER_IMAGE_NAME: FQDN (without tag) of the container image. Set to override.
 CONTAINER_IMAGE_NAME ?= quay.io/dcm-project/${BINARY_NAME}
 
@@ -21,6 +35,31 @@ build:
 
 run:
 	go run ./cmd/$(BINARY_NAME)
+
+# Standalone stack: NATS + environment-agent (see deploy/DEPLOY.md).
+compose-up:
+	$(COMPOSE) -f $(COMPOSE_FILE) up -d --build
+	./deploy/scripts/ensure-nats-stream.sh
+
+# Tear down compose stacks. Disconnect Kind first so network removal succeeds.
+compose-down:
+	@./deploy/scripts/kind-disconnect.sh
+	$(COMPOSE) -f $(COMPOSE_FILE) down -v --remove-orphans
+
+kind-connect:
+	COMPOSE_NETWORK=$(COMPOSE_NETWORK) ./deploy/scripts/kind-connect.sh
+
+kubeconfig-for-compose:
+	./deploy/scripts/kubeconfig-for-compose.sh
+
+install-kubevirt:
+	./deploy/scripts/install-kubevirt.sh
+
+deploy-verify:
+	./deploy/scripts/verify.sh
+
+publish-creates:
+	./deploy/scripts/publish-create-requests.sh
 
 clean:
 	rm -rf bin/
@@ -180,7 +219,9 @@ check-container-engine:
 image-build: check-container-engine
 	$(CONTAINER_ENGINE) build -t $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG) .
 
-.PHONY: build run clean fmt vet lint test test-unit test-integration test-race test-e2e test-all coverage ci tidy check-tidy \
+.PHONY: build run compose-up compose-down kind-connect \
+	kubeconfig-for-compose install-kubevirt deploy-verify publish-creates \
+	clean fmt vet lint test test-unit test-integration test-race test-e2e test-all coverage ci tidy check-tidy \
 	generate-types generate-spec generate-server generate-client \
 	generate-cluster-types generate-cluster-spec generate-cluster-api \
 	generate-container-types generate-container-spec generate-container-server generate-container-api \

@@ -1,0 +1,52 @@
+# DCM Environment Agent stack (standalone): NATS JetStream + environment-agent.
+#
+# Image version: defaults to :main. Pin with ENVIRONMENT_AGENT_VERSION in .env.
+# Local dev: `make compose-up` builds the agent from the repo Containerfile.
+#
+# For control-plane + agent on one stack, see the control-plane deploy repo.
+
+x-agent-common: &agent-common
+  AGENT_NAME: ${AGENT_NAME:-local-agent}
+  AGENT_ENVIRONMENT: ${AGENT_ENVIRONMENT:-dev}
+  AGENT_COST: ${AGENT_COST:-low}
+  # Base URL only — the agent appends /api/v1alpha1/agents for registration.
+  DCM_REGISTRATION_URL: ${DCM_REGISTRATION_URL:-http://host.docker.internal:8080}
+  AGENT_MESSAGING_URL: ${AGENT_MESSAGING_URL:-nats://nats:4222}
+  AGENT_EMBEDDED_SPS: ${AGENT_EMBEDDED_SPS}
+  AGENT_KUBECONFIG: /kubeconfig
+  SP_K8S_NAMESPACE: ${SP_K8S_NAMESPACE:-default}
+  SP_K8S_EXTERNAL_SVC_TYPE: ${SP_K8S_EXTERNAL_SVC_TYPE:-NodePort}
+  KUBERNETES_NAMESPACE: ${KUBERNETES_NAMESPACE:-default}
+  AGENT_SP_PERSISTENCE_PATH: /app/data/registrations
+
+services:
+  nats:
+    image: docker.io/library/nats:2-alpine
+    command: ["--jetstream", "--store_dir=/data"]
+    ports:
+      - "4222:4222"
+    volumes:
+      - nats_data:/data
+
+  environment-agent:
+    build:
+      context: ..
+      dockerfile: Containerfile
+    image: quay.io/dcm-project/environment-agent:${ENVIRONMENT_AGENT_VERSION:-main}
+    pull_policy: always
+    environment:
+      <<: *agent-common
+    ports:
+      - "${AGENT_PORT:-8081}:8080"
+    volumes:
+      # Host path only (AGENT_KUBECONFIG_HOST). In-container path is always /kubeconfig.
+      - ${AGENT_KUBECONFIG_HOST:-~/.kube/config}:/kubeconfig:ro,z
+    depends_on:
+      nats:
+        condition: service_started
+    extra_hosts:
+      # Lets the agent reach a control-plane running on the host (default DCM_REGISTRATION_URL).
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  nats_data: {}
