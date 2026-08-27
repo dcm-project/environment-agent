@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Connect the Kind control-plane node to a compose network so agent containers can reach the API server.
+# Connect the Kind control-plane node to the compose network (kubernetes alias).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=kind-env.sh
 source "${SCRIPT_DIR}/kind-env.sh"
+kind_resolve_from_context || exit 1
 
 COMPOSE_NETWORK="${COMPOSE_NETWORK:-environment-agent_default}"
 ALIAS="${KIND_NETWORK_ALIAS:-kubernetes}"

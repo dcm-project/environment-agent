@@ -1,21 +1,34 @@
 # Shared Kind cluster detection for deploy scripts.
-# Override with KIND_CLUSTER_NAME or kubectl current-context (kind-<name>).
+# Uses kubectl current-context (must be kind-<cluster-name>).
 
-if [[ -n "${KIND_CLUSTER_NAME:-}" ]]; then
-	: # use env
-elif command -v kubectl >/dev/null 2>&1; then
-	_ctx="$(kubectl config current-context 2>/dev/null || true)"
-	if [[ "${_ctx}" =~ ^kind-(.*)$ ]]; then
-		KIND_CLUSTER_NAME="${BASH_REMATCH[1]}"
-	else
-		KIND_CLUSTER_NAME="kind"
+KIND_NODE=""
+KIND_CONTEXT=""
+
+kind_resolve_from_context() {
+	if ! command -v kubectl >/dev/null 2>&1; then
+		echo "Error: kubectl is required to detect the Kind cluster" >&2
+		return 1
 	fi
-else
-	KIND_CLUSTER_NAME="kind"
-fi
 
-KIND_NODE="${KIND_CLUSTER_NAME}-control-plane"
-KIND_CONTEXT="kind-${KIND_CLUSTER_NAME}"
+	local ctx
+	ctx="$(kubectl config current-context 2>/dev/null || true)"
+	if [[ -z "${ctx}" ]]; then
+		echo "Error: no kubectl current-context; set one with kubectl config use-context kind-<cluster-name>" >&2
+		return 1
+	fi
+
+	if [[ "${ctx}" =~ ^kind-(.*)$ ]]; then
+		local name="${BASH_REMATCH[1]}"
+		KIND_NODE="${name}-control-plane"
+		KIND_CONTEXT="${ctx}"
+		return 0
+	fi
+
+	echo "Error: kubectl current-context must be a Kind context (kind-<cluster-name>)" >&2
+	echo "  Current: ${ctx}" >&2
+	echo "  Example: kubectl config use-context kind-dcm-local" >&2
+	return 1
+}
 
 # Pick the container engine that can see both the Kind node and the compose network.
 # Kind and compose must use the same runtime (docker vs podman).
@@ -60,7 +73,7 @@ kind_pick_engine() {
 		echo "  Kind node is on ${kind_engine}, but '${network}' was not found on that runtime." >&2
 		echo "  Recreate the stack with the same runtime (e.g. COMPOSE=\"docker compose\" CONTAINER_ENGINE=docker make compose-up)." >&2
 	else
-		echo "  Start compose first (make compose-up), or set KIND_CLUSTER_NAME (node: <name>-control-plane)." >&2
+		echo "  Start compose first (make compose-up), or ensure the Kind node '${node}' exists." >&2
 	fi
 	return 1
 }

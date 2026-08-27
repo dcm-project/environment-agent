@@ -62,11 +62,11 @@ make image-build   # Build container image using podman/docker
 See [deploy/DEPLOY.md](deploy/DEPLOY.md) for full setup. Requires Kind with a running cluster:
 
 ```bash
+cp deploy/.env.example deploy/.env
+make install-kubevirt          # when vm is in AGENT_EMBEDDED_SPS
+make kubeconfig-for-compose
 make compose-up
 make kind-connect
-make kubeconfig-for-compose
-export AGENT_KUBECONFIG_HOST="$(pwd)/deploy/.kube/config"
-make compose-up
 make deploy-verify
 ```
 

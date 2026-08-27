@@ -5,6 +5,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=kind-env.sh
 source "${SCRIPT_DIR}/kind-env.sh"
+if ! kind_resolve_from_context; then
+	exit 0
+fi
 
 NETWORKS="${COMPOSE_NETWORKS:-environment-agent_default control-plane_default deploy_default}"
 

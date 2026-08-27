@@ -1,6 +1,6 @@
 # DCM Environment Agent stack (standalone): NATS JetStream + environment-agent.
 #
-# Image version: defaults to :main. Pin with ENVIRONMENT_AGENT_VERSION in .env.
+# Image version: defaults to :main. Pin with ENVIRONMENT_AGENT_VERSION in deploy/.env.
 # Local dev: `make compose-up` builds the agent from the repo Containerfile.
 #
 # For control-plane + agent on one stack, see the control-plane deploy repo.
@@ -28,6 +28,27 @@ services:
     volumes:
       - nats_data:/data
 
+  # One-shot: CP-owned JetStream streams for standalone dev (agent cannot create these).
+  nats-init:
+    image: docker.io/natsio/nats-box:0.14.3
+    depends_on:
+      nats:
+        condition: service_started
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        ensure() {
+          nats --server nats://nats:4222 stream info "$$1" >/dev/null 2>&1 && return 0
+          echo "Creating JetStream stream $$1 (subjects: $$2)"
+          nats --server nats://nats:4222 stream add "$$1" \
+            --subjects "$$2" --storage file --retention "$$3" \
+            --discard old --max-age 72h --defaults
+        }
+        ensure dcm-agent-requests 'dcm.agent.>' limits
+        ensure dcm-status 'dcm.*' limits
+        ensure dcm-agent-responses dcm.agents.responses work
+
   environment-agent:
     build:
       context: ..
@@ -39,11 +60,13 @@ services:
     ports:
       - "${AGENT_PORT:-8081}:8080"
     volumes:
-      # Host path only (AGENT_KUBECONFIG_HOST). In-container path is always /kubeconfig.
-      - ${AGENT_KUBECONFIG_HOST:-~/.kube/config}:/kubeconfig:ro,z
+      # Host path (AGENT_KUBECONFIG_HOST). Run make kubeconfig-for-compose before compose-up.
+      - ${AGENT_KUBECONFIG_HOST:-.kube/config}:/kubeconfig:ro
     depends_on:
       nats:
         condition: service_started
+      nats-init:
+        condition: service_completed_successfully
     extra_hosts:
       # Lets the agent reach a control-plane running on the host (default DCM_REGISTRATION_URL).
       - "host.docker.internal:host-gateway"

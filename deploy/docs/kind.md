@@ -12,9 +12,26 @@ matches [control-plane deploy/docs/k8s-container-sp-kind.md](https://github.com/
 - Kind installed with a running cluster (`kubectl cluster-info` succeeds)
 - `kubectl` context set to your Kind cluster (e.g. `kind-kind` for the default cluster)
 
-Scripts derive the cluster name from the current context (`kind-<name>`) or from
-`KIND_CLUSTER_NAME`. The Kind node container is `<cluster-name>-control-plane`
-(e.g. `kind-control-plane` for the default cluster).
+Deploy scripts use `kubectl config current-context` and require a Kind context name
+`kind-<cluster-name>` (e.g. `kind-dcm-local` → node `dcm-local-control-plane`). They fail if
+kubectl is missing, there is no current context, or the context is not `kind-<name>`.
+
+## KubeVirt (embedded vm SP)
+
+When `vm` is in `AGENT_EMBEDDED_SPS`, install KubeVirt **before** `make compose-up`. The agent
+registers embedded SPs on startup; the vm SP expects KubeVirt CRDs and the operator to be present.
+
+```bash
+make install-kubevirt
+```
+
+Default operator version: `v1.5.0` (`KUBEVIRT_VERSION` to override).
+
+Confirm (adjust context if needed):
+
+```bash
+kubectl get kv -n kubevirt
+```
 
 ## Connect Kind to compose
 
@@ -23,6 +40,8 @@ Start compose **before** connecting Kind so the target network exists.
 **Standalone agent stack:**
 
 ```bash
+make install-kubevirt          # when vm is in AGENT_EMBEDDED_SPS
+make kubeconfig-for-compose
 make compose-up
 make kind-connect
 ```
@@ -67,33 +86,9 @@ podman exec kind-control-plane \
 
 ## Compose-friendly kubeconfig
 
-```bash
-make kubeconfig-for-compose
-export AGENT_KUBECONFIG_HOST="$(pwd)/deploy/.kube/config"
-```
-
-Restart compose after changing `AGENT_KUBECONFIG_HOST`:
-
-```bash
-make compose-up
-# or restart after kubeconfig change
-```
-
-## KubeVirt (embedded vm SP)
-
-The VM SP requires KubeVirt on the Kind cluster:
-
-```bash
-make install-kubevirt
-```
-
-Default operator version: `v1.5.0` (`KUBEVIRT_VERSION` to override).
-
-Confirm (adjust context if needed):
-
-```bash
-kubectl get kv -n kubevirt
-```
+`make kubeconfig-for-compose` writes `deploy/.kube/config` (API URL `https://kubernetes:6443`).
+Run it before `compose-up` so the agent bind-mounts the file. Set `AGENT_KUBECONFIG_HOST=.kube/config`
+in `deploy/.env` (default in `.env.example`).
 
 ## Container SP external services
 
@@ -117,7 +112,7 @@ Before `make compose-down`, Kind is disconnected automatically.
 - Confirm Kind is on the compose network:
   `podman inspect kind-control-plane --format '{{json .NetworkSettings.Networks}}'`
 - Regenerate kubeconfig and restart compose.
-- Set `KIND_CLUSTER_NAME` if scripts target the wrong node container.
+- Confirm `kubectl config current-context` is `kind-<cluster-name>` for your cluster.
 
 **Registration loops / agent unhealthy**
 

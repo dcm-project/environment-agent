@@ -5,15 +5,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-if [[ -f .env ]]; then
-	set -a
-	# shellcheck disable=SC1091
-	source .env
-	set +a
-fi
-
+# Host-side defaults (compose .env uses nats://nats:4222).
 export AGENT_MESSAGING_URL="${AGENT_MESSAGING_URL:-nats://127.0.0.1:4222}"
-FIXTURES_DIR="${DEPLOY_FIXTURES_DIR:-${ROOT}/deploy/fixtures}"
+SAMPLES_DIR="${DEPLOY_SAMPLES_DIR:-${ROOT}/deploy/samples}"
 AGENT_URL="${AGENT_URL:-http://localhost:8081}"
 AGENT_NAME="${AGENT_NAME:-local-agent}"
 TOPIC_BASE="${AGENT_TOPIC_NAME:-$AGENT_NAME}"
@@ -103,9 +97,6 @@ publish_create() {
 	echo "published ${service_type} create: resource_id=${resource_id} subject=${SUBJECT}"
 }
 
-echo "==> Ensuring JetStream stream dcm-agent-requests"
-"${ROOT}/deploy/scripts/ensure-nats-stream.sh"
-
 if ! curl -sf "${AGENT_URL}/api/v1alpha1/health" >/dev/null 2>&1; then
 	echo "warning: agent not healthy at ${AGENT_URL} — start with: make compose-up" >&2
 	echo "         (publish will still run; agent must be up to route requests)" >&2
@@ -115,8 +106,8 @@ container_id="${CONTAINER_RESOURCE_ID:-local-container-$(uuidgen | tr -d '-' | c
 vm_id="${VM_RESOURCE_ID:-local-vm-$(uuidgen | tr -d '-' | cut -c1-8)}"
 
 echo "==> Publishing to subject ${SUBJECT} (stream dcm-agent-requests)"
-publish_create container "${FIXTURES_DIR}/container-create-spec.json" "$container_id"
-publish_create vm "${FIXTURES_DIR}/vm-create-spec.json" "$vm_id"
+publish_create container "${SAMPLES_DIR}/container-create-spec.json" "$container_id"
+publish_create vm "${SAMPLES_DIR}/vm-create-spec.json" "$vm_id"
 
 echo "Done. Watch agent logs or cluster resources:"
 echo "  kubectl get deploy,svc -l dcm.project/managed-by=dcm"
