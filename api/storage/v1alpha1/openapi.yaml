@@ -1,0 +1,440 @@
+openapi: 3.0.4
+info:
+  title: Kubernetes Storage Service Provider API
+  description: |
+    REST API for managing persistent storage volumes (PersistentVolumeClaims)
+    on Kubernetes clusters on behalf of DCM.
+    This API follows AEP standards for consistency across DCM services.
+  version: 1.0.0
+  contact:
+    name: DCM Project
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: /
+    description: K8s Storage Service Provider
+
+tags:
+  - name: Health
+    description: Health check operations
+  - name: Volumes
+    description: Volume lifecycle management operations
+
+paths:
+  /api/v1alpha1/volumes:
+    get:
+      summary: List Volumes
+      description: List all storage volume instances with pagination support
+      operationId: listVolumes
+      tags:
+        - Volumes
+      parameters:
+        - name: max_page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 1000
+            default: 50
+          description: Maximum number of resources per page
+        - name: page_token
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Token for the next page of results
+      responses:
+        '200':
+          description: Volumes retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VolumeList'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    post:
+      summary: Create Volume
+      description: Create a new storage volume instance (PersistentVolumeClaim)
+      operationId: createVolume
+      tags:
+        - Volumes
+      parameters:
+        - name: id
+          in: query
+          description: |
+            Optional client-specified DCM instance ID. When provided, it MUST
+            match spec.metadata.name. When omitted, the instance ID is taken from
+            spec.metadata.name (AEP-122).
+          required: false
+          schema:
+            type: string
+            pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+            minLength: 1
+            maxLength: 63
+          example: app-data-volume
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Volume'
+      responses:
+        '201':
+          description: Volume created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Volume'
+        '400':
+          description: Invalid request payload
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Volume with the same instance ID (PVC name) already exists
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Requested StorageClass does not exist
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1alpha1/volumes/health:
+    get:
+      summary: Health Check
+      description: Returns the health status of the service
+      operationId: getHealth
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /api/v1alpha1/volumes/{volume_id}:
+    get:
+      summary: Get Volume
+      description: Retrieve a specific volume instance by DCM instance ID
+      operationId: getVolume
+      tags:
+        - Volumes
+      parameters:
+        - $ref: '#/components/parameters/VolumeIdPath'
+      responses:
+        '200':
+          description: Volume retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Volume'
+        '404':
+          description: Volume not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      summary: Delete Volume
+      description: Delete a specific volume instance (PVC)
+      operationId: deleteVolume
+      tags:
+        - Volumes
+      parameters:
+        - $ref: '#/components/parameters/VolumeIdPath'
+      responses:
+        '204':
+          description: Volume deleted successfully
+        '404':
+          description: Volume not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  parameters:
+    VolumeIdPath:
+      name: volume_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+      description: DCM instance ID (dcm-instance-id label)
+      example: app-data-volume
+
+  schemas:
+    Health:
+      type: object
+      description: Health status singleton resource
+      x-aep-resource:
+        singular: health
+        plural: healths
+        singleton: true
+        type: k8s-storage-service-provider.dcm.io/health
+        patterns:
+          - health
+      required:
+        - type
+        - status
+        - path
+        - version
+        - uptime
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          readOnly: true
+          description: Resource type identifier
+          example: "k8s-storage-service-provider.dcm.io/health"
+        status:
+          type: string
+          description: Health status
+          example: "healthy"
+        path:
+          type: string
+          readOnly: true
+          description: Canonical path of the resource
+          example: "health"
+        version:
+          type: string
+          readOnly: true
+          description: Service provider build version
+          example: "1.0.0"
+        uptime:
+          type: integer
+          readOnly: true
+          description: Seconds since the service provider started
+          example: 3600
+
+    StorageStatus:
+      type: string
+      enum:
+        - PROVISIONING
+        - RUNNING
+        - FAILED
+        - DELETING
+        - DELETED
+      description: Current status of the storage instance (CloudEvents payload uses this enum)
+
+    VolumeAccessMode:
+      type: string
+      enum:
+        - ReadWriteOnce
+        - ReadOnlyMany
+        - ReadWriteMany
+      description: |
+        PVC access mode. Controls attachment scope and permissions at creation
+        time (Kubernetes-specific; see service type definitions).
+      example: ReadWriteOnce
+
+    VolumeMode:
+      type: string
+      enum:
+        - Filesystem
+        - Block
+      description: PVC volume mode
+
+    VolumeMetadata:
+      type: object
+      description: Resource metadata for identification
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: DCM instance ID and Kubernetes PVC name (AEP-122)
+          pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+          minLength: 1
+          maxLength: 63
+        labels:
+          type: object
+          description: Custom key-value pairs for tagging and filtering
+          additionalProperties:
+            type: string
+        namespace:
+          type: string
+          readOnly: true
+          description: Kubernetes namespace where the PVC was created
+        storage_class:
+          type: string
+          readOnly: true
+          description: StorageClass name bound to the PVC
+        volume_name:
+          type: string
+          readOnly: true
+          description: Bound PersistentVolume name when available
+
+    KubernetesProviderHints:
+      type: object
+      description: Kubernetes-specific PVC settings
+      additionalProperties: false
+      properties:
+        storage_class:
+          type: string
+          description: StorageClass name (overrides SP default)
+        volume_mode:
+          $ref: '#/components/schemas/VolumeMode'
+        access_mode:
+          $ref: '#/components/schemas/VolumeAccessMode'
+
+    ProviderHints:
+      type: object
+      description: Provider-specific hints from the catalog
+      additionalProperties: true
+      properties:
+        kubernetes:
+          $ref: '#/components/schemas/KubernetesProviderHints'
+
+    StorageSpec:
+      type: object
+      description: Storage specification for creating a PVC (implements the portable storage service type)
+      required:
+        - service_type
+        - metadata
+        - capacity
+      properties:
+        service_type:
+          type: string
+          description: Service type identifier (must be "storage")
+          enum: [storage]
+        metadata:
+          $ref: '#/components/schemas/VolumeMetadata'
+        capacity:
+          type: string
+          description: Requested storage capacity (e.g., "100Gi")
+          pattern: '^[0-9]+(\.[0-9]+)?(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$'
+          example: "100Gi"
+        provider_hints:
+          $ref: '#/components/schemas/ProviderHints'
+
+    Volume:
+      type: object
+      description: Volume resource representing a PVC instance
+      x-aep-resource:
+        type: k8s-storage-service-provider.dcm.io/volume
+        singular: volume
+        plural: volumes
+        patterns:
+          - volumes/{volume_id}
+      required:
+        - spec
+      properties:
+        id:
+          type: string
+          readOnly: true
+          description: DCM instance ID (dcm-instance-id label)
+          pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+          minLength: 1
+          maxLength: 63
+          example: app-data-volume
+        path:
+          type: string
+          readOnly: true
+          description: Resource path identifier
+          example: "volumes/app-data-volume"
+        spec:
+          $ref: '#/components/schemas/StorageSpec'
+        status:
+          readOnly: true
+          allOf:
+            - $ref: '#/components/schemas/StorageStatus'
+        create_time:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when the volume was created
+        update_time:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when the volume was last updated
+
+    VolumeList:
+      type: object
+      description: Paginated list of volume instances
+      properties:
+        volumes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Volume'
+        next_page_token:
+          type: string
+          description: Token for retrieving the next page of results
+
+    Error:
+      type: object
+      description: RFC 9457 compliant error response
+      required:
+        - type
+        - title
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: Error type code
+          enum:
+            - INVALID_ARGUMENT
+            - NOT_FOUND
+            - ALREADY_EXISTS
+            - PERMISSION_DENIED
+            - UNAUTHENTICATED
+            - INTERNAL
+            - UNAVAILABLE
+            - FAILED_PRECONDITION
+        title:
+          type: string
+          description: Short human-readable summary
+        status:
+          type: integer
+          format: int32
+          description: HTTP status code
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence
+        instance:
+          type: string
+          format: uri-reference
+          description: Unique identifier for this error occurrence
