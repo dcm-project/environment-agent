@@ -9,7 +9,7 @@ Use this model when:
   [control-plane Helm chart](https://github.com/dcm-project/control-plane/blob/main/deploy/helm/dcm/README.md))
 - The agent runs as a Pod on the cluster (not in a compose stack on the host)
 
-For Kind with the agent **outside** the cluster on compose, see [kind.md](kind.md).
+For Kind with the agent **outside** the cluster on compose, see [compose-kind.md](compose-kind.md).
 
 ## Prerequisites
 

@@ -5,17 +5,16 @@ Standalone compose stack: NATS + environment-agent. For control-plane + agent to
 
 ## Deployment models
 
-| Model | When | Guide |
-|-------|------|--------|
-| **Compose outside the cluster** | Local dev with Kind; agent in Docker/Podman compose | Quick start below + [Kind networking](docs/kind.md) |
-| **In-cluster** | Agent Pod on the same cluster as container/VM workloads | [In-cluster agent](docs/in-cluster.md) |
+| Model | When                                                | Guide |
+|-------|-----------------------------------------------------|--------|
+| **Compose outside the cluster** | Local dev with Kind; agent in Docker/Podman compose | Quick start below + [Compose + Kind](docs/compose-kind.md) |
+| **In-cluster** | Agent Pod on the same cluster as SP workloads       | [In-cluster agent](docs/in-cluster.md) |
 
 ## Prerequisites
 
 - [Docker](https://www.docker.com/) or [Podman](https://podman.io/)
-- [Kind](https://kind.sigs.k8s.io/) with a **running cluster** (`kubectl cluster-info` succeeds) and `kubectl`
+- [Kind](https://kind.sigs.k8s.io/) with a running cluster (`kubectl cluster-info` succeeds) and `kubectl`
   context set (e.g. `kind-dcm-local` for cluster `dcm-local`)
-- [Go 1.25+](https://go.dev/) (optional — compose builds the image from the repo)
 
 Create a cluster if you do not have one (example):
 
@@ -23,9 +22,8 @@ Create a cluster if you do not have one (example):
 kind create cluster --name dcm-local
 ```
 
+## Quick start (Agent on host and not on cluster)
 Kind and compose must use the **same container runtime** (Docker vs Podman).
-
-## Quick start (compose outside the cluster)
 
 ```bash
 cp deploy/.env.example deploy/.env
@@ -36,7 +34,6 @@ make kind-connect              # join Kind to compose network (after compose-up)
 make deploy-verify
 ```
 
-
 Agent API: `http://localhost:8081`. Registration defaults to control-plane on the host at
 `http://host.docker.internal:8080` (retries until reachable).
 
@@ -44,9 +41,9 @@ Agent API: `http://localhost:8081`. Registration defaults to control-plane on th
 make compose-down              # disconnects Kind, tears down volumes
 ```
 
-## Quick start (in-cluster on Kind)
+## Quick start (Agent on cluster)
 
-See [in-cluster.md](docs/in-cluster.md) for full detail. Minimal flow:
+See [in-cluster.md](docs/in-cluster.md) for full detail.
 
 ```bash
 kind create cluster --name dcm-local
@@ -58,6 +55,30 @@ make k8s-verify
 
 ```bash
 kubectl delete namespace dcm
+```
+
+## Test with sample create requests
+
+After the agent is healthy, publish sample container and VM `dcm.request.create` CloudEvents to
+NATS (`deploy/samples/`). The agent routes them to the embedded SPs on Kind.
+
+**Compose stack** (NATS running on `localhost:4222` and agent on `localhost:8081`):
+
+```bash
+make publish-creates
+```
+
+**In-cluster** (`make k8s-verify` must succeed first to resolve agent and NATS URLs via NodePort):
+
+```bash
+make k8s-publish-creates
+```
+
+Watch workloads on Kind:
+
+```bash
+kubectl get deploy,svc -l dcm.project/managed-by=dcm
+kubectl get virtualmachines -A -l dcm.project/managed-by=dcm
 ```
 
 ## Configuration
@@ -75,15 +96,6 @@ project directory, so `.env` and paths like `.kube/config` resolve there automat
 | `DCM_REGISTRATION_URL` | `http://host.docker.internal:8080` | Base URL only |
 | `SP_K8S_EXTERNAL_SVC_TYPE` | `NodePort` | Required for container SP on Kind |
 
-**Namespaces:** container and vm SPs default to `default`. If you set `SP_K8S_NAMESPACE` or
-`KUBERNETES_NAMESPACE` in `.env`, create those namespaces on the Kind cluster before creating
-resources (`kubectl create namespace <name>`).
-
-**VM SP:** when `vm` is in `AGENT_EMBEDDED_SPS`, run `make install-kubevirt` on the Kind cluster
-**before** `make compose-up` so KubeVirt is ready when the agent starts and registers the vm SP.
-
-See `deploy/.env.example` for the full list.
-
 ## Scripts
 
 | Script | Purpose |
@@ -97,12 +109,8 @@ See `deploy/.env.example` for the full list.
 | `verify.sh` | Health and provider checks |
 | `publish-create-requests.sh` | Sample NATS create requests (`deploy/samples/`) |
 
-```bash
-make publish-creates
-```
-
 ## Further reading
 
 - [Agent in the same cluster as workloads](docs/in-cluster.md)
-- [Kind cluster setup](docs/kind.md)
+- [Compose + Kind setup](docs/compose-kind.md)
 - [Control-plane deploy integration](https://github.com/dcm-project/control-plane/blob/main/deploy/docs/environment-agent-kind.md)
