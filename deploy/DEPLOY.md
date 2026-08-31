@@ -3,6 +3,13 @@
 Standalone compose stack: NATS + environment-agent. For control-plane + agent together, see
 [control-plane deploy/docs/environment-agent-kind.md](https://github.com/dcm-project/control-plane/blob/main/deploy/docs/environment-agent-kind.md).
 
+## Deployment models
+
+| Model | When | Guide |
+|-------|------|--------|
+| **Compose outside the cluster** | Local dev with Kind; agent in Docker/Podman compose | Quick start below + [Kind networking](docs/kind.md) |
+| **In-cluster** | Agent Pod on the same cluster as container/VM workloads | [In-cluster agent](docs/in-cluster.md) |
+
 ## Prerequisites
 
 - [Docker](https://www.docker.com/) or [Podman](https://podman.io/)
@@ -18,7 +25,7 @@ kind create cluster --name dcm-local
 
 Kind and compose must use the **same container runtime** (Docker vs Podman).
 
-## Quick start
+## Quick start (compose outside the cluster)
 
 ```bash
 cp deploy/.env.example deploy/.env
@@ -35,6 +42,22 @@ Agent API: `http://localhost:8081`. Registration defaults to control-plane on th
 
 ```bash
 make compose-down              # disconnects Kind, tears down volumes
+```
+
+## Quick start (in-cluster on Kind)
+
+See [in-cluster.md](docs/in-cluster.md) for full detail. Minimal flow:
+
+```bash
+kind create cluster --name dcm-local
+kubectl config use-context kind-dcm-local
+make install-kubevirt          # when vm is in AGENT_EMBEDDED_SPS
+make k8s-deploy
+make k8s-verify
+```
+
+```bash
+kubectl delete namespace dcm
 ```
 
 ## Configuration
@@ -66,6 +89,8 @@ See `deploy/.env.example` for the full list.
 | Script | Purpose |
 |--------|---------|
 | `kubeconfig-for-compose.sh` | Write `deploy/.kube/config` for compose |
+| `k8s-deploy.sh` | Apply `deploy/k8s/` in-cluster stack |
+| `make k8s-verify` / `make k8s-publish-creates` | Verify agent and publish samples via NodePorts |
 | `kind-connect.sh` | Join Kind to compose network |
 | `kind-disconnect.sh` | Disconnect Kind before `compose-down` |
 | `install-kubevirt.sh` | KubeVirt on Kind (vm SP) |
@@ -78,5 +103,6 @@ make publish-creates
 
 ## Further reading
 
+- [Agent in the same cluster as workloads](docs/in-cluster.md)
 - [Kind cluster setup](docs/kind.md)
 - [Control-plane deploy integration](https://github.com/dcm-project/control-plane/blob/main/deploy/docs/environment-agent-kind.md)

@@ -73,6 +73,9 @@ make deploy-verify
 For integration with the control-plane stack, see
 [control-plane deploy/docs/environment-agent-kind.md](https://github.com/dcm-project/control-plane/blob/main/deploy/docs/environment-agent-kind.md).
 
+To run the agent on the same cluster as embedded SP workloads, see
+[deploy/docs/in-cluster.md](deploy/docs/in-cluster.md) (`make k8s-deploy` on Kind).
+
 ## API Endpoints
 
 | Method | Endpoint                              | Description                         |

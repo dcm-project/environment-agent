@@ -54,6 +54,21 @@ kind-connect:
 install-kubevirt:
 	./deploy/scripts/install-kubevirt.sh
 
+k8s-deploy:
+	./deploy/scripts/k8s-deploy.sh
+
+# NodePorts from deploy/k8s/ (agent 30081, NATS 30422; reach via Kind node IP on Linux).
+K8S_AGENT_NODE_PORT ?= 30081
+K8S_NATS_NODE_PORT ?= 30422
+
+k8s-verify:
+	@AGENT_URL="$$(bash deploy/scripts/k8s-host-urls.sh agent)" && \
+	AGENT_URL="$$AGENT_URL" $(MAKE) deploy-verify
+
+k8s-publish-creates:
+	@eval "$$(bash deploy/scripts/k8s-host-urls.sh export)" && \
+	AGENT_URL="$$AGENT_URL" AGENT_MESSAGING_URL="$$AGENT_MESSAGING_URL" $(MAKE) publish-creates
+
 deploy-verify:
 	./deploy/scripts/verify.sh
 
@@ -216,10 +231,10 @@ check-container-engine:
 	fi
 
 image-build: check-container-engine
-	$(CONTAINER_ENGINE) build -t $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG) .
+		$(CONTAINER_ENGINE) build -f Containerfile -t $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG) .
 
 .PHONY: build run compose-up compose-down kubeconfig-for-compose kind-connect \
-	install-kubevirt deploy-verify publish-creates \
+	install-kubevirt k8s-deploy k8s-verify k8s-publish-creates deploy-verify publish-creates \
 	clean fmt vet lint test test-unit test-integration test-race test-e2e test-all coverage ci tidy check-tidy \
 	generate-types generate-spec generate-server generate-client \
 	generate-cluster-types generate-cluster-spec generate-cluster-api \

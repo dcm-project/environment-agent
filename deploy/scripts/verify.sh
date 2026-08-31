@@ -26,7 +26,7 @@ if ! curl_health >/dev/null 2>&1; then
 			echo "  logs: podman logs ${name}" >&2
 		fi
 	fi
-	echo "  hint: if logs show 'permission denied' on /kubeconfig, run make kubeconfig-for-compose" >&2
+	echo "  hint: compose stack:- run make kubeconfig-for-compose; in-cluster:- run make k8s-verify " >&2
 	exit 1
 fi
 

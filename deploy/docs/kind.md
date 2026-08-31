@@ -1,8 +1,9 @@
 # Kind Cluster Setup for Embedded SPs
 
-Embedded container and VM Service Providers need a Kubernetes API reachable from the agent compose container. Kind runs
-the cluster in a container on a separate network from compose by default, so this guide connects your existing Kind
-cluster to the compose network and generates a kubeconfig that works in-container.
+Embedded container and VM Service Providers need a Kubernetes API reachable from the agent. This
+guide covers **compose outside the cluster** (Kind on a separate Docker network). When the agent
+runs **in the same cluster** as workloads, see [in-cluster.md](in-cluster.md) instead — no
+`kind-connect` or compose kubeconfig.
 
 The pattern
 matches [control-plane deploy/docs/k8s-container-sp-kind.md](https://github.com/dcm-project/control-plane/blob/main/deploy/docs/k8s-container-sp-kind.md).

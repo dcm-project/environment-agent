@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: environment-agent
+  namespace: dcm
+  labels:
+    app: environment-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: environment-agent
+  template:
+    metadata:
+      labels:
+        app: environment-agent
+    spec:
+      serviceAccountName: environment-agent
+      containers:
+        - name: environment-agent
+          image: quay.io/dcm-project/environment-agent:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: AGENT_NAME
+              value: local-agent
+            - name: AGENT_ENVIRONMENT
+              value: dev
+            - name: AGENT_COST
+              value: low
+            - name: AGENT_EMBEDDED_SPS
+              value: container,vm
+            # Required; agent retries until reachable. Point at host control-plane when running one.
+            - name: DCM_REGISTRATION_URL
+              value: http://host.docker.internal:8080
+            - name: AGENT_MESSAGING_URL
+              value: nats://nats:4222
+            - name: SP_K8S_NAMESPACE
+              value: default
+            - name: SP_K8S_EXTERNAL_SVC_TYPE
+              value: NodePort
+            - name: KUBERNETES_NAMESPACE
+              value: default
+            - name: AGENT_SP_PERSISTENCE_PATH
+              value: /var/lib/environment-agent/data/registrations.json
+          volumeMounts:
+            - name: registrations
+              mountPath: /var/lib/environment-agent/data
+      volumes:
+        - name: registrations
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: environment-agent
+  namespace: dcm
+  labels:
+    app: environment-agent
+spec:
+  type: NodePort
+  selector:
+    app: environment-agent
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      nodePort: 30081

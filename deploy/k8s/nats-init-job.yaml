@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-init
+  namespace: dcm
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: nats-init
+          image: docker.io/natsio/nats-box:0.14.3
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              ensure() {
+                nats --server nats://nats:4222 stream info "$$1" >/dev/null 2>&1 && return 0
+                echo "Creating JetStream stream $$1 (subjects: $$2)"
+                nats --server nats://nats:4222 stream add "$$1" \
+                  --subjects "$$2" --storage file --retention "$$3" \
+                  --discard old --max-age 72h --defaults
+              }
+              ensure dcm-agent-requests 'dcm.agent.>' limits
+              ensure dcm-status 'dcm.*' limits
+              ensure dcm-agent-responses dcm.agents.responses work
