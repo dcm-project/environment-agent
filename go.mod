@@ -5,7 +5,7 @@ go 1.25.5
 require (
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/cloudevents/sdk-go/v2 v2.16.2
-	github.com/getkin/kin-openapi v0.144.0
+	github.com/getkin/kin-openapi v0.149.0
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/nats-io/nats-server/v2 v2.14.4
@@ -59,7 +59,7 @@ require (
 	github.com/openshift/api v0.0.0-20260120150926-4c643a652d54 // indirect
 	github.com/openshift/custom-resource-status v1.1.2 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
 	github.com/speakeasy-api/jsonpath v0.6.3 // indirect
 	github.com/speakeasy-api/openapi v1.24.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
