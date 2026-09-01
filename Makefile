@@ -8,10 +8,6 @@ CONTAINER_ENGINE ?= $(shell \
 		echo docker; \
 	fi)
 
-ifeq ($(CONTAINER_ENGINE),)
-$(error No supported container engine found. Please install podman or docker, or set CONTAINER_ENGINE explicitly.)
-endif
-
 COMPOSE_FILE := deploy/compose.yaml
 COMPOSE_PROJECT_NAME ?= environment-agent
 COMPOSE_NETWORK := $(COMPOSE_PROJECT_NAME)_default
@@ -42,7 +38,7 @@ compose-up:
 
 # Tear down compose stacks. Disconnect Kind first so network removal succeeds.
 compose-down:
-	@./deploy/scripts/kind-disconnect.sh
+	@COMPOSE_NETWORK=$(COMPOSE_NETWORK) ./deploy/scripts/kind-disconnect.sh
 	$(COMPOSE) -f $(COMPOSE_FILE) down -v --remove-orphans
 
 kubeconfig-for-compose:

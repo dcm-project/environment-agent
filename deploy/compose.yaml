@@ -17,44 +17,65 @@ x-agent-common: &agent-common
   SP_K8S_NAMESPACE: ${SP_K8S_NAMESPACE:-default}
   SP_K8S_EXTERNAL_SVC_TYPE: ${SP_K8S_EXTERNAL_SVC_TYPE:-NodePort}
   KUBERNETES_NAMESPACE: ${KUBERNETES_NAMESPACE:-default}
-  AGENT_SP_PERSISTENCE_PATH: /app/data/registrations
+  AGENT_SP_PERSISTENCE_PATH: /app/data/registrations.json
+
+x-nats-init-script: &nats-init-script |
+  wait_for_nats() {
+    i=0
+    while [ "$i" -lt 60 ]; do
+      if nats --server nats://nats:4222 server check connection >/dev/null 2>&1; then
+        return 0
+      fi
+      i=$((i + 1))
+      sleep 1
+    done
+    echo "NATS not ready after 60s" >&2
+    return 1
+  }
+  ensure() {
+    nats --server nats://nats:4222 stream info "$$1" >/dev/null 2>&1 && return 0
+    echo "Creating JetStream stream $$1 (subjects: $$2)"
+    nats --server nats://nats:4222 stream add "$$1" \
+      --subjects "$$2" --storage file --retention "$$3" \
+      --discard old --max-age 72h --defaults
+  }
+  wait_for_nats
+  ensure dcm-agent-requests 'dcm.agent.>' limits
+  ensure dcm-status 'dcm.*' limits
+  ensure dcm-agent-responses dcm.agents.responses work
 
 services:
   nats:
     image: docker.io/library/nats:2-alpine
-    command: ["--jetstream", "--store_dir=/data"]
+    command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
     ports:
       - "4222:4222"
     volumes:
       - nats_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
 
   # One-shot: CP-owned JetStream streams for standalone dev (agent cannot create these).
   nats-init:
     image: docker.io/natsio/nats-box:0.14.3
     depends_on:
       nats:
-        condition: service_started
+        condition: service_healthy
     restart: "no"
     entrypoint: ["/bin/sh", "-ec"]
     command:
-      - |
-        ensure() {
-          nats --server nats://nats:4222 stream info "$$1" >/dev/null 2>&1 && return 0
-          echo "Creating JetStream stream $$1 (subjects: $$2)"
-          nats --server nats://nats:4222 stream add "$$1" \
-            --subjects "$$2" --storage file --retention "$$3" \
-            --discard old --max-age 72h --defaults
-        }
-        ensure dcm-agent-requests 'dcm.agent.>' limits
-        ensure dcm-status 'dcm.*' limits
-        ensure dcm-agent-responses dcm.agents.responses work
+      - *nats-init-script
 
   environment-agent:
     build:
       context: ..
       dockerfile: Containerfile
     image: quay.io/dcm-project/environment-agent:${ENVIRONMENT_AGENT_VERSION:-main}
-    pull_policy: always
+    pull_policy: missing
     environment:
       <<: *agent-common
     ports:
@@ -62,9 +83,10 @@ services:
     volumes:
       # Host path (AGENT_KUBECONFIG_HOST). Run make kubeconfig-for-compose before compose-up.
       - ${AGENT_KUBECONFIG_HOST:-.kube/config}:/kubeconfig:ro
+      - agent_data:/app/data
     depends_on:
       nats:
-        condition: service_started
+        condition: service_healthy
       nats-init:
         condition: service_completed_successfully
     extra_hosts:
@@ -73,3 +95,4 @@ services:
 
 volumes:
   nats_data: {}
+  agent_data: {}

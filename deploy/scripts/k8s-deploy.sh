@@ -29,9 +29,8 @@ if [[ "${LOAD_INTO_KIND}" == "1" ]] && [[ -n "${KIND_CLUSTER}" ]] && command -v 
 	kind load docker-image "${IMAGE}" --name "${KIND_CLUSTER}"
 fi
 
-echo "==> Applying manifests"
+echo "==> Applying manifests (image: ${IMAGE})"
 kubectl apply -k "${K8S_DIR}"
-kubectl -n dcm set image deployment/environment-agent environment-agent="${IMAGE}"
 
 echo "==> Waiting for NATS"
 kubectl -n dcm wait --for=condition=available deployment/nats --timeout=120s

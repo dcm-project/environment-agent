@@ -9,7 +9,11 @@ if ! kind_resolve_from_context; then
 	exit 0
 fi
 
-NETWORKS="${COMPOSE_NETWORKS:-environment-agent_default control-plane_default deploy_default}"
+if [[ -n "${COMPOSE_NETWORK:-}" ]]; then
+	NETWORKS="${COMPOSE_NETWORK}"
+else
+	NETWORKS="${COMPOSE_NETWORKS:-environment-agent_default control-plane_default deploy_default}"
+fi
 
 pick_engine_for_node() {
 	if [[ -n "${CONTAINER_ENGINE:-}" ]]; then

@@ -5,3 +5,9 @@ resources:
   - nats.yaml
   - rbac.yaml
   - environment-agent.yaml
+
+# Image tag should match ENVIRONMENT_AGENT_VERSION in deploy/scripts/k8s-deploy.sh (default: dev).
+images:
+  - name: quay.io/dcm-project/environment-agent
+    newName: quay.io/dcm-project/environment-agent
+    newTag: dev

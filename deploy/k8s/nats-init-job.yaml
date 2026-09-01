@@ -14,13 +14,26 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |
+              wait_for_nats() {
+                i=0
+                while [ "$i" -lt 60 ]; do
+                  if nats --server nats://nats:4222 server check connection >/dev/null 2>&1; then
+                    return 0
+                  fi
+                  i=$((i + 1))
+                  sleep 1
+                done
+                echo "NATS not ready after 60s" >&2
+                return 1
+              }
               ensure() {
-                nats --server nats://nats:4222 stream info "$$1" >/dev/null 2>&1 && return 0
-                echo "Creating JetStream stream $$1 (subjects: $$2)"
-                nats --server nats://nats:4222 stream add "$$1" \
-                  --subjects "$$2" --storage file --retention "$$3" \
+                nats --server nats://nats:4222 stream info "$1" >/dev/null 2>&1 && return 0
+                echo "Creating JetStream stream $1 (subjects: $2)"
+                nats --server nats://nats:4222 stream add "$1" \
+                  --subjects "$2" --storage file --retention "$3" \
                   --discard old --max-age 72h --defaults
               }
+              wait_for_nats
               ensure dcm-agent-requests 'dcm.agent.>' limits
               ensure dcm-status 'dcm.*' limits
               ensure dcm-agent-responses dcm.agents.responses work

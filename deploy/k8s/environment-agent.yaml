@@ -32,9 +32,10 @@ spec:
               value: low
             - name: AGENT_EMBEDDED_SPS
               value: container,vm
-            # Required; agent retries until reachable. Point at host control-plane when running one.
+            # Required; agent retries until reachable. Use an in-cluster control-plane Service
+            # when DCM runs on the same cluster (see deploy/docs/in-cluster.md).
             - name: DCM_REGISTRATION_URL
-              value: http://host.docker.internal:8080
+              value: http://dcm-control-plane:8080
             - name: AGENT_MESSAGING_URL
               value: nats://nats:4222
             - name: SP_K8S_NAMESPACE
