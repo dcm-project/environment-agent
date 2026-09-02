@@ -94,16 +94,16 @@ the default image tag `dev` (`ENVIRONMENT_AGENT_VERSION`) and `make image-build`
 switch between compose and in-cluster without rebuilding under a different tag. For production
 deployments, pin `ENVIRONMENT_AGENT_VERSION`  to a release image.
 
-| Variable | Default                       | Notes |
-|----------|-------------------------------|------------------------|
-| `AGENT_EMBEDDED_SPS` | _empty_ | e.g. `container`, `vm`, `cluster`|
+| Variable | Default | Notes |
+|----------|-------|------------------------|
+| `AGENT_EMBEDDED_SPS` | _empty_ (set in .env) | e.g. `container`, `vm`, `cluster`|
 | `ENVIRONMENT_AGENT_VERSION` | `dev` | Local image tag for compose and `k8s-deploy`. Pin a release tag for production |
 | `AGENT_KUBECONFIG_HOST` | `.kube/config` | Written by `make kubeconfig-for-compose` |
 | `SP_K8S_NAMESPACE` | `default` | Container SP workloads — create on the cluster if changed |
 | `KUBERNETES_NAMESPACE` | `default` | VM SP workloads — create on the cluster if changed |
 | `AGENT_PORT` | `8081` | Host port for agent API |
 | `DCM_REGISTRATION_URL` | `http://host.docker.internal:8080` | Standalone compose default (CP on host base URL only). See [in-cluster.md](docs/in-cluster.md) for other models. |
-| `SP_K8S_EXTERNAL_SVC_TYPE` | `NodePort`| Required for container SP on Kind |
+| `SP_K8S_EXTERNAL_SVC_TYPE` | `NodePort` | Required for container SP on Kind |
 
 ## Scripts
 
