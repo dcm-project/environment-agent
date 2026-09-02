@@ -1,0 +1,511 @@
+openapi: 3.0.4
+info:
+  title: Network Service Provider API
+  description: |
+    REST API for managing network service instances on behalf of DCM.
+    This API follows AEP standards for consistency across DCM services.
+  version: 1.0.0
+  contact:
+    name: DCM Project
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: /
+    description: Network Service Provider
+
+tags:
+  - name: Health
+    description: Health check operations
+  - name: Networks
+    description: Network lifecycle management operations
+
+paths:
+  /api/v1alpha1/networks:
+    get:
+      summary: List Networks
+      description: List all network service instances with pagination support
+      operationId: listNetworks
+      tags:
+        - Networks
+      parameters:
+        - name: max_page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 1000
+            default: 50
+          description: Maximum number of resources per page
+        - name: page_token
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Token for the next page of results
+      responses:
+        '200':
+          description: Networks retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkList'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    post:
+      summary: Create Network
+      description: Create a new network service instance
+      operationId: createNetwork
+      tags:
+        - Networks
+      parameters:
+        - name: id
+          in: query
+          description: |
+            Optional client-specified ID for the network. If not provided,
+            the server will generate an ID.
+
+            Requirements (per AEP-122):
+            - 1-63 characters long
+            - Start with a lowercase letter or digit
+            - Contain only lowercase letters, numbers, and hyphens
+            - End with letter or number
+          required: false
+          schema:
+            type: string
+            pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+            minLength: 1
+            maxLength: 63
+          example: web-frontend-service
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Network'
+      responses:
+        '201':
+          description: Network created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Network'
+        '400':
+          description: Invalid request payload, missing required fields, or invalid port numbers
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Service with same name already exists or NodePort conflict
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1alpha1/networks/health:
+    get:
+      summary: Health Check
+      description: Returns the health status of the service
+      operationId: getHealth
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /api/v1alpha1/networks/{network_id}:
+    get:
+      summary: Get Network
+      description: Retrieve a specific network service instance by DCM instance ID
+      operationId: getNetwork
+      tags:
+        - Networks
+      parameters:
+        - $ref: '#/components/parameters/NetworkIdPath'
+      responses:
+        '200':
+          description: Network retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Network'
+        '404':
+          description: Network not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      summary: Delete Network
+      description: Delete a specific network service instance
+      operationId: deleteNetwork
+      tags:
+        - Networks
+      parameters:
+        - $ref: '#/components/parameters/NetworkIdPath'
+      responses:
+        '204':
+          description: Network deleted successfully
+        '404':
+          description: Network not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  parameters:
+    NetworkIdPath:
+      name: network_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+      description: DCM instance ID (dcm-instance-id label)
+      example: web-frontend-service
+
+  schemas:
+    Health:
+      type: object
+      description: Health status singleton resource
+      x-aep-resource:
+        singular: health
+        plural: healths
+        singleton: true
+        type: network-service-provider.dcm.io/health
+        patterns:
+          - health
+      required:
+        - type
+        - status
+        - path
+        - version
+        - uptime
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          readOnly: true
+          description: Resource type identifier
+          example: "network-service-provider.dcm.io/health"
+        status:
+          type: string
+          description: Health status
+          example: "healthy"
+        path:
+          type: string
+          readOnly: true
+          description: Canonical path of the resource
+          example: "health"
+        version:
+          type: string
+          readOnly: true
+          description: Service provider build version
+          example: "1.0.0"
+        uptime:
+          type: integer
+          readOnly: true
+          description: Seconds since the service provider started
+          example: 3600
+
+    NetworkStatus:
+      type: string
+      enum:
+        - PENDING
+        - READY
+        - DELETED
+      description: |
+        Current status of the network service instance.
+        PENDING: Service waiting for external endpoint assignment.
+        READY: Service is operational and ready to route traffic.
+        DELETED: Service resource not found.
+
+    PortSpec:
+      type: object
+      description: Port definition for a network service
+      required:
+        - port
+      properties:
+        name:
+          type: string
+          description: Port name (required when multiple ports are defined)
+          example: "http"
+        protocol:
+          type: string
+          enum:
+            - TCP
+            - UDP
+          default: TCP
+          description: Network protocol
+          example: "TCP"
+        port:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 65535
+          description: Service port number
+          example: 80
+        target_port:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 65535
+          description: Target port on the backing pods
+          example: 8080
+        node_port:
+          type: integer
+          format: int32
+          readOnly: true
+          minimum: 30000
+          maximum: 32767
+          description: Allocated NodePort value (response only, auto-assigned or from provider_hints)
+          example: 31234
+
+    NetworkMetadata:
+      type: object
+      description: Resource metadata for identification
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: Service name (DNS-1035 label)
+          pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+          minLength: 1
+          maxLength: 63
+        labels:
+          type: object
+          description: Custom key-value pairs for tagging and filtering
+          additionalProperties:
+            type: string
+        namespace:
+          type: string
+          readOnly: true
+          description: Namespace where the service was created
+
+    KubernetesProviderHints:
+      type: object
+      description: Platform-specific service settings (request only)
+      additionalProperties: false
+      properties:
+        selector:
+          type: object
+          description: Label selector to match target pods
+          additionalProperties:
+            type: string
+        cluster_ip:
+          type: string
+          description: |
+            Specific cluster IP value. Can be a valid IP within the cluster CIDR,
+            "None" for headless services, or omitted for auto-assignment.
+        node_ports:
+          type: object
+          description: |
+            Map of port names to NodePort values (30000-32767).
+            When present with no routing_level, creates NodePort Service.
+            With routing_level "network", specifies node_ports for LoadBalancer backend.
+          additionalProperties:
+            type: integer
+            format: int32
+            minimum: 30000
+            maximum: 32767
+
+    ProviderHints:
+      type: object
+      description: Provider-specific hints from the catalog
+      additionalProperties: true
+      properties:
+        kubernetes:
+          $ref: '#/components/schemas/KubernetesProviderHints'
+
+    KubernetesState:
+      type: object
+      readOnly: true
+      description: |
+        Kubernetes-specific runtime state (response only).
+        Contains the actual K8s Service type created and runtime information.
+      properties:
+        type:
+          type: string
+          enum:
+            - ClusterIP
+            - NodePort
+            - LoadBalancer
+          description: The actual Kubernetes Service type created
+        cluster_ip:
+          type: string
+          description: Auto-assigned or user-specified cluster IP
+        external_ips:
+          type: array
+          items:
+            type: string
+          description: External IPs or hostnames for LoadBalancer services (from .status.loadBalancer.ingress[])
+        selector:
+          type: object
+          description: Label selectors used for pod routing
+          additionalProperties:
+            type: string
+
+    NetworkSpec:
+      type: object
+      description: |
+        Network specification for creating a Kubernetes Service.
+        Implements the portable network service type schema.
+      required:
+        - service_type
+        - metadata
+        - ports
+      properties:
+        service_type:
+          type: string
+          description: Service type identifier (must be "network")
+          enum: [network]
+        metadata:
+          $ref: '#/components/schemas/NetworkMetadata'
+        ports:
+          type: array
+          description: Port definitions for the service
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/PortSpec'
+        routing_level:
+          type: string
+          description: |
+            Traffic routing level. "network" for transport-level (TCP/UDP),
+            "application" for HTTP/HTTPS. Determines the Kubernetes Service type
+            together with the presence of node_ports in provider_hints.
+          enum:
+            - network
+            - application
+        provider_hints:
+          $ref: '#/components/schemas/ProviderHints'
+
+    Network:
+      type: object
+      description: Network resource representing a Kubernetes Service instance
+      x-aep-resource:
+        type: network-service-provider.dcm.io/network
+        singular: network
+        plural: networks
+        patterns:
+          - networks/{network_id}
+      required:
+        - spec
+      properties:
+        id:
+          type: string
+          readOnly: true
+          description: DCM instance ID (dcm-instance-id label)
+          pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+          minLength: 1
+          maxLength: 63
+          example: web-frontend-service
+        path:
+          type: string
+          readOnly: true
+          description: Resource path identifier
+          example: "networks/web-frontend-service"
+        spec:
+          $ref: '#/components/schemas/NetworkSpec'
+        status:
+          readOnly: true
+          allOf:
+            - $ref: '#/components/schemas/NetworkStatus'
+        kubernetes:
+          $ref: '#/components/schemas/KubernetesState'
+        create_time:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when the network service was created
+        update_time:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when the network service was last updated
+
+    NetworkList:
+      type: object
+      description: Paginated list of network service instances
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Network'
+        next_page_token:
+          type: string
+          description: Token for retrieving the next page of results
+
+    Error:
+      type: object
+      description: RFC 7807 compliant error response
+      required:
+        - type
+        - title
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: Error type code
+          enum:
+            - INVALID_ARGUMENT
+            - NOT_FOUND
+            - ALREADY_EXISTS
+            - PERMISSION_DENIED
+            - UNAUTHENTICATED
+            - INTERNAL
+            - UNAVAILABLE
+            - FAILED_PRECONDITION
+        title:
+          type: string
+          description: Short human-readable summary
+        status:
+          type: integer
+          format: int32
+          description: HTTP status code
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence
+        instance:
+          type: string
+          format: uri-reference
+          description: Unique identifier for this error occurrence
