@@ -26,9 +26,12 @@ This deploys NATS and the environment-agent **inside** the Kind cluster (`deploy
 ### 1. Create a Kind cluster
 
 ```bash
-kind create cluster --name dcm-local
+kind create cluster --name dcm-local --config deploy/k8s/kind-local.yaml
 kubectl config use-context kind-dcm-local
 ```
+
+The `deploy/k8s/kind-local.yaml` maps NodePorts `30081` and `30422` to localhost
+so `make k8s-verify` works on Docker Desktop and similar hosts.
 
 ### 2. Install KubeVirt (when `vm` is in `AGENT_EMBEDDED_SPS`)
 
@@ -46,9 +49,10 @@ From the environment-agent repo root:
 ```bash
 make k8s-deploy
 ```
-
 This builds `quay.io/dcm-project/environment-agent:dev`, loads it into the current Kind
 cluster, applies `deploy/k8s/`, runs `nats-init`, and waits for the agent Deployment.
+Compose and in-cluster share the same default tag (`dev`). 
+To pin a release image, set `ENVIRONMENT_AGENT_VERSION`.
 
 ### 4. Verify
 
@@ -175,7 +179,7 @@ spec:
   serviceAccountName: environment-agent
   containers:
     - name: environment-agent
-      image: quay.io/dcm-project/environment-agent:main
+      image: quay.io/dcm-project/environment-agent:<release-tag>
       # No kubeconfig volume — in-cluster auth only
       volumeMounts:
         - name: registrations
@@ -207,9 +211,18 @@ make k8s-publish-creates
 **Agent not reachable when `make k8s-verify` fails**
 
 - Confirm the agent pod is running: `kubectl -n dcm get pods,svc`
-- On Kind, reach the agent via the node IP and NodePort `30081`:
+- Recreate the cluster with `deploy/k8s/kind-local.yaml` so NodePorts are on localhost
+- Otherwise try the node IP and NodePort `30081`:
 
 ```bash
 NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
 curl "http://${NODE_IP}:30081/api/v1alpha1/health"
+```
+
+- Fallback: port-forward and verify manually:
+
+```bash
+kubectl -n dcm port-forward svc/environment-agent 8081:8080
+curl http://127.0.0.1:8081/api/v1alpha1/health
+AGENT_URL=http://127.0.0.1:8081 make deploy-verify
 ```

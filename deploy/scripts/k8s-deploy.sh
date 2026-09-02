@@ -29,8 +29,27 @@ if [[ "${LOAD_INTO_KIND}" == "1" ]] && [[ -n "${KIND_CLUSTER}" ]] && command -v 
 	kind load docker-image "${IMAGE}" --name "${KIND_CLUSTER}"
 fi
 
+apply_manifests() {
+	local work_dir
+	work_dir=$(mktemp -d)
+	# shellcheck disable=SC2064
+	trap "rm -rf '${work_dir}'" RETURN
+	cp -a "${K8S_DIR}/." "${work_dir}/"
+
+	if command -v kustomize >/dev/null 2>&1; then
+		(cd "${work_dir}" && kustomize edit set image "quay.io/dcm-project/environment-agent=${IMAGE}")
+		kubectl apply -k "${work_dir}"
+		return
+	fi
+
+	echo "warning: kustomize not found; applying with sed image substitution" >&2
+	kubectl kustomize "${work_dir}" \
+		| sed "s|image: quay.io/dcm-project/environment-agent:.*|image: ${IMAGE}|g" \
+		| kubectl apply -f -
+}
+
 echo "==> Applying manifests (image: ${IMAGE})"
-kubectl apply -k "${K8S_DIR}"
+apply_manifests
 
 echo "==> Waiting for NATS"
 kubectl -n dcm wait --for=condition=available deployment/nats --timeout=120s
@@ -50,5 +69,5 @@ if bash "${SCRIPT_DIR}/k8s-host-urls.sh" check; then
 	echo "  make k8s-publish-creates"
 else
 	echo ""
-	echo "  fix host access, then: make k8s-verify"
+	echo "  fix host access (see deploy/docs/in-cluster.md), then: make k8s-verify"
 fi

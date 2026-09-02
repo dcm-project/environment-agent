@@ -8,7 +8,7 @@ When the agent runs in the same cluster as workloads, see [in-cluster.md](in-clu
 ### Create a Kind cluster
 
 ```bash
-kind create cluster --name dcm-local
+kind create cluster --name dcm-local --config deploy/k8s/kind-local.yaml
 kubectl config use-context kind-dcm-local
 ```
 

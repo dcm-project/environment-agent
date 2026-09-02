@@ -1,6 +1,6 @@
 # DCM Environment Agent stack (standalone): NATS JetStream + environment-agent.
 #
-# Image version: defaults to :main. Pin with ENVIRONMENT_AGENT_VERSION in deploy/.env.
+# Image version: defaults to :dev for local builds. Pin with ENVIRONMENT_AGENT_VERSION in deploy/.env.
 # Local dev: `make compose-up` builds the agent from the repo Containerfile.
 #
 # For control-plane + agent on one stack, see the control-plane deploy repo.
@@ -74,7 +74,7 @@ services:
     build:
       context: ..
       dockerfile: Containerfile
-    image: quay.io/dcm-project/environment-agent:${ENVIRONMENT_AGENT_VERSION:-main}
+    image: quay.io/dcm-project/environment-agent:${ENVIRONMENT_AGENT_VERSION:-dev}
     pull_policy: missing
     environment:
       <<: *agent-common

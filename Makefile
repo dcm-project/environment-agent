@@ -11,12 +11,15 @@ CONTAINER_ENGINE ?= $(shell \
 COMPOSE_FILE := deploy/compose.yaml
 COMPOSE_PROJECT_NAME ?= environment-agent
 COMPOSE_NETWORK := $(COMPOSE_PROJECT_NAME)_default
+# Local dev image tag shared by compose-up and k8s-deploy (override for release builds).
+ENVIRONMENT_AGENT_VERSION ?= dev
 
 COMPOSE ?= $(shell command -v podman-compose >/dev/null 2>&1 && echo podman-compose || \
 	(command -v docker-compose >/dev/null 2>&1 && echo docker-compose || \
 	(echo "$(CONTAINER_ENGINE) compose")))
 
 export COMPOSE_PROJECT_NAME
+export ENVIRONMENT_AGENT_VERSION
 
 # CONTAINER_IMAGE_NAME: FQDN (without tag) of the container image. Set to override.
 CONTAINER_IMAGE_NAME ?= quay.io/dcm-project/${BINARY_NAME}
@@ -38,20 +41,20 @@ compose-up:
 
 # Tear down compose stacks. Disconnect Kind first so network removal succeeds.
 compose-down:
-	@COMPOSE_NETWORK=$(COMPOSE_NETWORK) ./deploy/scripts/kind-disconnect.sh
+	@COMPOSE_NETWORK=$(COMPOSE_NETWORK) bash deploy/scripts/kind-disconnect.sh
 	$(COMPOSE) -f $(COMPOSE_FILE) down -v --remove-orphans
 
 kubeconfig-for-compose:
-	./deploy/scripts/kubeconfig-for-compose.sh
+	bash deploy/scripts/kubeconfig-for-compose.sh
 
 kind-connect:
-	COMPOSE_NETWORK=$(COMPOSE_NETWORK) ./deploy/scripts/kind-connect.sh
+	COMPOSE_NETWORK=$(COMPOSE_NETWORK) bash deploy/scripts/kind-connect.sh
 
 install-kubevirt:
-	./deploy/scripts/install-kubevirt.sh
+	bash deploy/scripts/install-kubevirt.sh
 
 k8s-deploy:
-	./deploy/scripts/k8s-deploy.sh
+	bash deploy/scripts/k8s-deploy.sh
 
 # NodePorts from deploy/k8s/ (agent 30081, NATS 30422; reach via Kind node IP on Linux).
 K8S_AGENT_NODE_PORT ?= 30081
@@ -66,10 +69,10 @@ k8s-publish-creates:
 	AGENT_URL="$$AGENT_URL" AGENT_MESSAGING_URL="$$AGENT_MESSAGING_URL" $(MAKE) publish-creates
 
 deploy-verify:
-	./deploy/scripts/verify.sh
+	bash deploy/scripts/verify.sh
 
 publish-creates:
-	./deploy/scripts/publish-create-requests.sh
+	bash deploy/scripts/publish-create-requests.sh
 
 clean:
 	rm -rf bin/
@@ -227,7 +230,7 @@ check-container-engine:
 	fi
 
 image-build: check-container-engine
-		$(CONTAINER_ENGINE) build -f Containerfile -t $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG) .
+	$(CONTAINER_ENGINE) build -f Containerfile -t $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG) .
 
 .PHONY: build run compose-up compose-down kubeconfig-for-compose kind-connect \
 	install-kubevirt k8s-deploy k8s-verify k8s-publish-creates deploy-verify publish-creates \
