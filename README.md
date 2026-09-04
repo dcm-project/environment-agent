@@ -59,7 +59,8 @@ make image-build   # Build container image using podman/docker
 
 ### Local deployment (Kind + Compose)
 
-See [deploy/DEPLOY.md](deploy/DEPLOY.md) for full setup. Requires Kind with a running cluster:
+See [deploy/DEPLOY.md](deploy/DEPLOY.md) for full setup. This requires Kind with a running cluster and the
+[utilities](https://github.com/dcm-project/utilities) repo as a sibling directory (`../utilities`):
 
 ```bash
 cp deploy/.env.example deploy/.env

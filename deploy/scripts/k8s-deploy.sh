@@ -11,8 +11,9 @@ IMAGE="${CONTAINER_IMAGE_NAME:-quay.io/dcm-project/environment-agent}:${TAG}"
 BUILD_IMAGE="${BUILD_IMAGE:-1}"
 LOAD_INTO_KIND="${LOAD_INTO_KIND:-1}"
 
-# shellcheck source=kind-env.sh
-source "${SCRIPT_DIR}/kind-env.sh"
+UTILITIES_DIR="${UTILITIES_DIR:-${ROOT}/../utilities}"
+# shellcheck disable=SC1091
+source "${UTILITIES_DIR}/scripts/kind/kind-env.sh"
 if kind_resolve_from_context; then
 	KIND_CLUSTER="${KIND_CONTEXT#kind-}"
 else

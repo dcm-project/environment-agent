@@ -5,13 +5,15 @@ guide covers the scenario where Agent runs in compose on a host, not on Kind.
 Embedded SP workloads run on the Kind cluster. 
 When the agent runs in the same cluster as workloads, see [in-cluster.md](in-cluster.md).
 
+Kind helper scripts (`kind-connect`, `kubeconfig-for-compose`, `install-kubevirt`) come from the
+[utilities](https://github.com/dcm-project/utilities) repo (`../utilities` by default)
+
 ### Create a Kind cluster
 
 ```bash
-kind create cluster --name dcm-local --config deploy/k8s/kind-local.yaml
+kind create cluster --name dcm-local
 kubectl config use-context kind-dcm-local
 ```
-
 
 ## KubeVirt (embedded vm SP)
 

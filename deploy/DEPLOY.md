@@ -15,6 +15,8 @@ Standalone compose stack: NATS + environment-agent. For control-plane + agent to
 - [Docker](https://www.docker.com/) or [Podman](https://podman.io/)
 - [Kind](https://kind.sigs.k8s.io/) with a running cluster (`kubectl cluster-info` succeeds) and `kubectl`
   context set (e.g. `kind-dcm-local` for cluster `dcm-local`)
+- [utilities](https://github.com/dcm-project/utilities) repo as a sibling directory (`../utilities`) for
+  Kind, compose network, and KubeVirt helper scripts
 
 ## Create a cluster (if you do not have one):
 
@@ -109,15 +111,11 @@ deployments, pin `ENVIRONMENT_AGENT_VERSION`  to a release image.
 
 | Script | Purpose |
 |--------|---------|
-| `kubeconfig-for-compose.sh` | Write `deploy/.kube/config` for compose |
-| `kind-local.yaml` | Kind config with host port mappings for in-cluster NodePorts |
 | `k8s-deploy.sh` | Apply `deploy/k8s/` in-cluster stack |
-| `make k8s-verify` / `make k8s-publish-creates` | Verify agent and publish samples via NodePorts |
-| `kind-connect.sh` | Join Kind to compose network |
-| `kind-disconnect.sh` | Disconnect Kind before `compose-down` |
-| `install-kubevirt.sh` | KubeVirt on Kind (vm SP) |
 | `verify.sh` | Health and provider checks |
 | `publish-create-requests.sh` | Sample NATS create requests (`deploy/samples/`) |
+
+Shared Kind, compose, KubeVirt helpers live in [dcm-project/utilities](https://github.com/dcm-project/utilities)
 
 ## Further reading
 

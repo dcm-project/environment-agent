@@ -11,6 +11,11 @@ CONTAINER_ENGINE ?= $(shell \
 COMPOSE_FILE := deploy/compose.yaml
 COMPOSE_PROJECT_NAME ?= environment-agent
 COMPOSE_NETWORK := $(COMPOSE_PROJECT_NAME)_default
+UTILITIES_DIR ?= ../utilities
+KIND_SCRIPTS_DIR ?= $(UTILITIES_DIR)/scripts/kind
+COMPOSE_SCRIPTS_DIR ?= $(UTILITIES_DIR)/scripts/compose
+KUBEVIRT_SCRIPTS_DIR ?= $(UTILITIES_DIR)/scripts/kubevirt
+COMPOSE_NETWORKS ?= deploy_default $(COMPOSE_NETWORK)
 # Local dev image tag shared by compose-up and k8s-deploy (override for release builds).
 ENVIRONMENT_AGENT_VERSION ?= dev
 
@@ -40,18 +45,31 @@ compose-up:
 	$(COMPOSE) -f $(COMPOSE_FILE) up -d --build
 
 # Tear down compose stacks. Disconnect Kind first so network removal succeeds.
-compose-down:
-	@COMPOSE_NETWORK=$(COMPOSE_NETWORK) bash deploy/scripts/kind-disconnect.sh
+compose-down: kind-disconnect disconnect-compose-networks
 	$(COMPOSE) -f $(COMPOSE_FILE) down -v --remove-orphans
+	$(MAKE) remove-compose-networks
 
 kubeconfig-for-compose:
-	bash deploy/scripts/kubeconfig-for-compose.sh
+	DEPLOY_ROOT="$(CURDIR)" bash $(KIND_SCRIPTS_DIR)/kubeconfig-for-compose.sh
 
 kind-connect:
-	COMPOSE_NETWORK=$(COMPOSE_NETWORK) bash deploy/scripts/kind-connect.sh
+	COMPOSE_NETWORK=$(COMPOSE_NETWORK) CONTAINER_ENGINE=$(CONTAINER_ENGINE) \
+		bash $(KIND_SCRIPTS_DIR)/kind-connect.sh
+
+kind-disconnect:
+	@COMPOSE_NETWORK=$(COMPOSE_NETWORK) CONTAINER_ENGINE=$(CONTAINER_ENGINE) \
+		bash $(KIND_SCRIPTS_DIR)/kind-disconnect.sh || true
+
+disconnect-compose-networks:
+	@COMPOSE_NETWORKS="$(COMPOSE_NETWORKS)" CONTAINER_ENGINE=$(CONTAINER_ENGINE) \
+		bash $(COMPOSE_SCRIPTS_DIR)/network-teardown.sh disconnect || true
+
+remove-compose-networks:
+	@COMPOSE_NETWORKS="$(COMPOSE_NETWORKS)" CONTAINER_ENGINE=$(CONTAINER_ENGINE) \
+		bash $(COMPOSE_SCRIPTS_DIR)/network-teardown.sh remove || true
 
 install-kubevirt:
-	bash deploy/scripts/install-kubevirt.sh
+	bash $(KUBEVIRT_SCRIPTS_DIR)/install-kubevirt.sh
 
 k8s-deploy:
 	bash deploy/scripts/k8s-deploy.sh
@@ -232,8 +250,8 @@ check-container-engine:
 image-build: check-container-engine
 	$(CONTAINER_ENGINE) build -f Containerfile -t $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG) .
 
-.PHONY: build run compose-up compose-down kubeconfig-for-compose kind-connect \
-	install-kubevirt k8s-deploy k8s-verify k8s-publish-creates deploy-verify publish-creates \
+.PHONY: build run compose-up compose-down kubeconfig-for-compose kind-connect kind-disconnect \
+	disconnect-compose-networks remove-compose-networks install-kubevirt k8s-deploy k8s-verify k8s-publish-creates deploy-verify publish-creates \
 	clean fmt vet lint test test-unit test-integration test-race test-e2e test-all coverage ci tidy check-tidy \
 	generate-types generate-spec generate-server generate-client \
 	generate-cluster-types generate-cluster-spec generate-cluster-api \

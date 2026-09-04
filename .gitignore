@@ -29,7 +29,7 @@ go.work.sum
 .env
 deploy/.env
 
-# Generated kubeconfig for compose + Kind (see deploy/scripts/kubeconfig-for-compose.sh)
+# Generated kubeconfig for compose + Kind (see make kubeconfig-for-compose)
 deploy/.kube/
 
 # --- Editor/IDE ---
