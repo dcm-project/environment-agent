@@ -16,7 +16,7 @@ For Kind with the agent **outside** the cluster on compose, see [compose-kind.md
 - Kubernetes 1.24+ or OpenShift 4.12+
 - **KubeVirt** installed on the cluster when `vm` is in `AGENT_EMBEDDED_SPS` (install before the
   agent Pod starts so vm SP registration succeeds)
-- Workload namespaces exist if you change defaults (`SP_K8S_NAMESPACE`, `KUBERNETES_NAMESPACE`)
+- Workload namespaces exist if you change defaults (`SP_CONTAINER_NAMESPACE`, `SP_VM_NAMESPACE`, `SP_STORAGE_NAMESPACE`)
 - Outbound reachability from the agent Pod to control-plane HTTP and NATS
 
 ## Try it on Kind (step by step)
@@ -78,7 +78,7 @@ kind delete cluster --name dcm-local
 
 ## Configuration
 
-Do **not** set `AGENT_KUBECONFIG` and do **not** mount a kubeconfig file. When unset, embedded SPs
+Do **not** set `SP_DEFAULT_KUBECONFIG` and do **not** mount a kubeconfig file. When unset, embedded SPs
 use in-cluster configuration (see `internal/config/config.go` and `internal/openshift/kubeconfig/rest.go`).
 
 Typical environment variables for a Pod in namespace `dcm`:
@@ -93,11 +93,11 @@ env:
     value: "http://dcm-control-plane:8080"
   - name: AGENT_MESSAGING_URL
     value: "nats://dcm-nats:4222"
-  - name: SP_K8S_NAMESPACE
+  - name: SP_CONTAINER_NAMESPACE
     value: default
   - name: SP_K8S_EXTERNAL_SVC_TYPE
     value: LoadBalancer
-  - name: KUBERNETES_NAMESPACE
+  - name: SP_VM_NAMESPACE
     value: default
   - name: AGENT_SP_PERSISTENCE_PATH
     value: /var/lib/environment-agent/data/registrations.json
@@ -108,7 +108,7 @@ env:
 Bind the agent Pod to a `ServiceAccount` with permissions in each namespace where SPs create
 workloads (not only the agent's own namespace).
 
-**Container SP** (namespace = `SP_K8S_NAMESPACE`):
+**Container SP** (namespace = `SP_CONTAINER_NAMESPACE`):
 
 ```yaml
 rules:
@@ -120,7 +120,7 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ```
 
-**VM SP** (namespace = `KUBERNETES_NAMESPACE`):
+**VM SP** (namespace = `SP_VM_NAMESPACE`):
 
 ```yaml
 rules:

@@ -38,11 +38,11 @@ spec:
               value: http://dcm-control-plane:8080
             - name: AGENT_MESSAGING_URL
               value: nats://nats:4222
-            - name: SP_K8S_NAMESPACE
+            - name: SP_CONTAINER_NAMESPACE
               value: default
             - name: SP_K8S_EXTERNAL_SVC_TYPE
               value: NodePort
-            - name: KUBERNETES_NAMESPACE
+            - name: SP_VM_NAMESPACE
               value: default
             - name: AGENT_SP_PERSISTENCE_PATH
               value: /var/lib/environment-agent/data/registrations.json
