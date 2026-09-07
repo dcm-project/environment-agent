@@ -28,11 +28,11 @@ x-agent-common: &agent-common
 x-nats-init-script: &nats-init-script |
   wait_for_nats() {
     i=0
-    while [ "$i" -lt 60 ]; do
+    while [ "$$i" -lt 60 ]; do
       if nats --server nats://nats:4222 server check connection >/dev/null 2>&1; then
         return 0
       fi
-      i=$((i + 1))
+      i=$$((i + 1))
       sleep 1
     done
     echo "NATS not ready after 60s" >&2
