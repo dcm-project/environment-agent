@@ -14,6 +14,9 @@ info:
 servers:
   - url: /api/v1alpha1
 
+security:
+  - bearerAuth: []
+
 tags:
   - name: provider
     description: Service Provider registration and management operations
@@ -28,6 +31,7 @@ paths:
       summary: Health check
       operationId: getHealth
       description: Liveness health check for the Environment Agent
+      security: []
       responses:
         '200':
           description: OK
@@ -42,7 +46,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: "Unauthorized — reserved; authentication deferred to future version"
+          description: "Unauthorized — missing or invalid JWT Bearer token"
           content:
             application/problem+json:
               schema:
@@ -86,7 +90,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: "Unauthorized — reserved; authentication deferred to future version"
+          description: "Unauthorized — missing or invalid JWT Bearer token"
           content:
             application/problem+json:
               schema:
@@ -144,7 +148,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: "Unauthorized — reserved; authentication deferred to future version"
+          description: "Unauthorized — missing or invalid JWT Bearer token"
           content:
             application/problem+json:
               schema:
@@ -202,7 +206,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: "Unauthorized — reserved; authentication deferred to future version"
+          description: "Unauthorized — missing or invalid JWT Bearer token"
           content:
             application/problem+json:
               schema:
@@ -221,6 +225,11 @@ paths:
                 $ref: '#/components/schemas/Error'
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
   schemas:
     Provider:
       type: object

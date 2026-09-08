@@ -9,7 +9,9 @@ import (
 	"runtime/debug"
 	"time"
 
+	"github.com/dcm-project/environment-agent/internal/auth"
 	"github.com/dcm-project/environment-agent/internal/httperror"
+	"github.com/dcm-project/environment-agent/internal/requestctx"
 )
 
 // PanicRecovery returns middleware that catches panics and returns RFC 7807 INTERNAL errors.
@@ -37,22 +39,22 @@ func PanicRecovery(logger *slog.Logger) func(http.Handler) http.Handler {
 
 // RequestLogger returns middleware that logs each HTTP request at INFO level.
 // Uses defer so the log line is emitted even when a panic propagates through.
+// Delegates to auth.LogRequest, shared with the auth middleware's rejection
+// paths so every request produces one equivalent audit entry (REQ-AUTH-120).
 func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
+			start, ok := requestctx.StartTimeFromContext(r.Context())
+			if !ok {
+				start = time.Now()
+			}
 			srw := &statusRecordingResponseWriter{ResponseWriter: w, code: http.StatusOK}
 			panicked := true
 			defer func() {
 				if panicked {
 					srw.code = http.StatusInternalServerError
 				}
-				logger.Info("request",
-					"method", r.Method,
-					"path", r.URL.Path,
-					"status", srw.code,
-					"duration", time.Since(start).String(),
-				)
+				auth.LogRequest(r.Context(), logger, r, srw.code, start)
 			}()
 			next.ServeHTTP(srw, r)
 			panicked = false

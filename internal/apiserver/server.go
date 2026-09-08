@@ -27,16 +27,22 @@ type Server struct {
 	logger   *slog.Logger
 	listener net.Listener
 	handler  server.ServerInterface
+	authMW   func(http.Handler) http.Handler
 	srv      *http.Server
 }
 
 // New creates a new Server with the given dependencies.
 // The listener is passed to Run(), not to the constructor.
-func New(cfg *config.Config, logger *slog.Logger, handler server.ServerInterface) *Server {
+// authMW is the authentication middleware; if nil, an identity middleware is used.
+func New(cfg *config.Config, logger *slog.Logger, handler server.ServerInterface, authMW func(http.Handler) http.Handler) *Server {
+	if authMW == nil {
+		authMW = func(next http.Handler) http.Handler { return next }
+	}
 	return &Server{
 		cfg:     cfg,
 		logger:  logger,
 		handler: handler,
+		authMW:  authMW,
 	}
 }
 
@@ -48,8 +54,9 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 
 	r.Use(PanicRecovery(s.logger))
 	r.Use(requestctx.Middleware)
-	r.Use(RequestLogger(s.logger))
 	r.Use(RequestTimeout(s.cfg.Server.RequestTimeout, s.logger))
+	r.Use(s.authMW)
+	r.Use(RequestLogger(s.logger))
 
 	spec, err := v1alpha1.GetSpec()
 	if err != nil {
@@ -59,7 +66,8 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 
 	r.Use(nethttpmiddleware.OapiRequestValidatorWithOptions(spec, &nethttpmiddleware.Options{
 		Options: openapi3filter.Options{
-			RegexCompiler: noopRegexCompiler,
+			RegexCompiler:      noopRegexCompiler,
+			AuthenticationFunc: openapi3filter.NoopAuthenticationFunc,
 		},
 		SilenceServersWarning: true,
 		ErrorHandlerWithOpts: func(_ context.Context, valErr error, w http.ResponseWriter, req *http.Request, _ nethttpmiddleware.ErrorHandlerOpts) {
