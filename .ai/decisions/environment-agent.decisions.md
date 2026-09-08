@@ -958,3 +958,61 @@ on, while a Deployment's `Progressing` condition is inherently reversible. A fut
 must not port storage's latch to this code path.
 
 **Related requirements:** REQ-CNT-500
+
+---
+
+### DD-510: Audit-log emission centralized in `RequestTimeout`, not `RequestLogger`/`writeAuthError` (HIGH)
+
+**Decision:** `apiserver.RequestTimeout` is now the single point in the middleware chain that
+calls `auth.LogRequest`. `apiserver.RequestLogger` and `auth.writeAuthError` no longer call
+`auth.LogRequest` directly; they instead record the final status (and, for `RequestLogger`, the
+authenticated claims read from context) into a new shared `*requestctx.Outcome`, a per-request
+mutable holder that `requestctx.Middleware` creates once and stores as a pointer in the context
+— the same pointer-in-context technique already used by this file for `ctxKey{}`/`startTimeKey{}`,
+so every downstream middleware that derives a new context via `r.WithContext` still mutates the
+one shared struct. `RequestTimeout` reads it back after `next.ServeHTTP` returns (or, on a
+recovered panic, immediately before re-panicking) and logs the status that will actually reach
+the client — its own 503 override, or whatever was recorded — together with any claims. No
+locking guards the `Outcome`: a single request's middleware chain runs on one goroutine, and
+every write happens-before the one read, by construction of the `http.Handler` call chain.
+`RequestTimeout`'s prior `if timeout <= 0 { return next }` short-circuit is removed: it now
+always wraps the request (buffering the response, and emitting exactly one audit log entry)
+even when timeout enforcement itself is disabled; only the `context.WithTimeout` call and its
+deadline enforcement remain conditional on `timeout > 0`.
+
+**Rationale:** `RequestLogger` sits inside `RequestTimeout` in the chain (`PanicRecovery` ->
+`requestctx.Middleware` -> `RequestTimeout` -> auth -> `RequestLogger` -> handler) and writes into
+`RequestTimeout`'s buffered `ResponseWriter`, not the real one. Before this change,
+`RequestLogger` logged synchronously the instant the handler returned, using whatever status it
+observed on its own writer — before `RequestTimeout` had checked whether the deadline had already
+passed. If it had, `RequestTimeout` discards the buffer and sends its own 503, but the audit log
+had already recorded the buffered (now-discarded) status — e.g. a request that timed out at 503
+could be logged as 200. `auth.writeAuthError` had the identical bug for the 401 rejection path:
+it logged 401 the instant it rejected, but that 401 was itself written into the same
+soon-to-be-discarded buffer, so a client that actually received 503 could have its rejection
+logged as 401. Centralizing emission in `RequestTimeout` — the only middleware that knows,
+after the fact, whether its own 503 or the buffered status is what the client actually got —
+eliminates this status mismatch entirely; see `IT-AUTH-130` for the empirical confirmation that
+the client-visible status in the race case is deterministically `RequestTimeout`'s 503, never a
+stale buffered value.
+
+**No-fallback consequence for isolated `auth.Middleware` unit tests:** by design, there is no
+fallback direct-emission path for when the `Outcome` holder is absent from context (e.g. because
+`auth.Middleware` is exercised standalone, without `requestctx.Middleware` and `RequestTimeout`
+wrapping it, as several pre-existing unit tests in `internal/auth/middleware_test.go` did).
+Under this design, `auth.Middleware` called in total isolation can never emit an audit log line —
+there is nothing above it in that call to read the `Outcome` and log. `UT-AUTH-100`, `UT-AUTH-101`,
+and `UT-AUTH-102` (formerly asserting synchronous emission from `writeAuthError` directly) were
+restructured to drive the middleware through a small in-memory chain
+(`requestctx.Middleware` + `RequestTimeout` + `auth.Middleware` + `RequestLogger`) built inline in
+the test, so they still exercise the real emission path as fast, unit-scoped tests rather than
+becoming slower integration tests; the assertions themselves (exactly one entry, same fields) are
+unchanged. `UT-AUTH-104` (the pre-existing "health bypass doesn't log" test) is retained, renamed,
+and generalized: it now documents that calling `auth.Middleware` in isolation never logs, for any
+path, not just the bypass — and guards against a fallback emission path being silently
+reintroduced. Future readers: an isolated `httptest.NewRecorder()` call against `auth.Middleware`
+will never produce a "request" audit log line by design; that behavior is only observable through
+the full chain (or an inline reconstruction of it), never from `auth.Middleware` alone.
+
+**Related requirements:** REQ-HTTP-060, REQ-AUTH-070, REQ-AUTH-080, REQ-AUTH-120, REQ-HTTP-071,
+REQ-HTTP-110
