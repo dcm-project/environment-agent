@@ -85,7 +85,7 @@ func startRealServer() (baseURL string, stop func()) {
 				err.Error(), &r.RequestURI)
 		},
 	})
-	srv := apiserver.New(cfg, logger, h)
+	srv := apiserver.New(cfg, logger, h, nil)
 
 	runErrCh := make(chan error, 1)
 	go func() { runErrCh <- srv.Run(ctx, ln) }()
