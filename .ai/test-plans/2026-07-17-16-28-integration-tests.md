@@ -113,6 +113,40 @@ Unless overridden, tests use:
 
 ---
 
+### IT-AUTH-120: Missing-credential rejection produces one request audit log entry
+
+- **Validates AC:** AC-AUTH-110
+- **Test Infrastructure:** Real HTTP server wired with the real `auth.Middleware` (mock `JWTValidator`), log capture
+- **Given** the agent is running with authentication enabled
+- **When** `GET /api/v1alpha1/providers` is sent without an `Authorization` header
+- **Then** the response MUST be HTTP 401
+- **And** exactly one INFO-level request audit log entry MUST be emitted for that request, with method=`GET`, path=`/api/v1alpha1/providers`, status=`401`, and a non-zero duration
+- **And** the middleware ordering (auth before `RequestLogger`) MUST remain unchanged
+
+---
+
+### IT-AUTH-121: Invalid-credential rejection produces one request audit log entry
+
+- **Validates AC:** AC-AUTH-110
+- **Test Infrastructure:** Real HTTP server wired with the real `auth.Middleware` (mock `JWTValidator` returning an error), log capture
+- **Given** the agent is running with authentication enabled
+- **When** `GET /api/v1alpha1/providers` is sent with `Authorization: Bearer invalid-token`
+- **Then** the response MUST be HTTP 401
+- **And** exactly one INFO-level request audit log entry MUST be emitted for that request
+
+---
+
+### IT-AUTH-122: Successful authenticated request retains JWT identity in the audit log
+
+- **Validates AC:** AC-AUTH-110, AC-AUTH-070
+- **Test Infrastructure:** Real HTTP server wired with the real `auth.Middleware` (mock `JWTValidator` returning claims), log capture
+- **Given** the agent is running with authentication enabled
+- **When** `GET /api/v1alpha1/providers` is sent with a valid Bearer token whose claims include `sub=user-123` and `preferred_username=jdoe`
+- **Then** the response MUST be HTTP 200
+- **And** exactly one INFO-level request audit log entry MUST be emitted including `sub=user-123` and `preferred_username=jdoe`
+
+---
+
 ### IT-HTTP-080: Panic recovery returns RFC 7807 INTERNAL error
 
 - **Validates AC:** AC-HTTP-070
@@ -2401,6 +2435,7 @@ Unless overridden, tests use:
 | AC-HTTP-040 | IT-HTTP-040 |
 | AC-HTTP-050 | IT-HTTP-060 |
 | AC-HTTP-060 | IT-HTTP-070 |
+| AC-AUTH-110 | IT-AUTH-120, IT-AUTH-121, IT-AUTH-122 |
 | AC-HTTP-070 | IT-HTTP-080 |
 | AC-HTTP-080 | IT-HTTP-030, IT-HTTP-090 |
 | AC-HTTP-090 | IT-HTTP-100 |
