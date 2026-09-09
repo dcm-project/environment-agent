@@ -66,6 +66,17 @@ make image-build   # Build container image using podman/docker
 | POST   | /api/v1alpha1/providers               | External SP registration            |
 | GET    | /api/v1alpha1/providers/{provider_id} | Get a single SP by ID               |
 
+Embedded SPs do **not** expose their service-type REST APIs (for example
+`/api/v1alpha1/volumes`) on the agent. The agent forwards **create** and
+**delete** in-process (or to external SP HTTP endpoints). **List and get**
+of provisioned instances go through the control-plane SP Resource Manager:
+
+- `GET /api/v1alpha1/service-type-instances?service_type=<type>`
+- `GET /api/v1alpha1/service-type-instances/{instance_id}`
+
+Instance status is updated when embedded SPs publish CloudEvents to NATS and
+the SPRM status consumer processes them.
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE) for details.

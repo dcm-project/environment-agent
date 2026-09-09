@@ -6,7 +6,7 @@ import (
 	"github.com/dcm-project/environment-agent/internal/health/monitor"
 )
 
-// storageHealthChecker checks backing Kubernetes connectivity for agent SP health.
+// storageHealthChecker checks backing platform connectivity for agent SP health.
 type storageHealthChecker interface {
 	CheckHealth(ctx context.Context) error
 }

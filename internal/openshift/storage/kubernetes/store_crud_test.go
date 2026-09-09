@@ -119,6 +119,12 @@ func minimalVolumeSpec(name string) v1alpha1.StorageSpec {
 	}
 }
 
+func withK8sProviderHints(spec v1alpha1.StorageSpec, hints map[string]string) v1alpha1.StorageSpec {
+	ph := v1alpha1.ProviderHints{"kubernetes": hints}
+	spec.ProviderHints = &ph
+	return spec
+}
+
 func createStorageClass(client *fake.Clientset, name string) {
 	sc := &storagev1.StorageClass{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -154,17 +160,11 @@ var _ = Describe("K8s Volume Store CRUD", func() {
 		It("applies provider hints for storage class, access mode, and volume mode", func() {
 			s, client := newTestStore(defaultConfig())
 			createStorageClass(client, "fast-ssd")
-			accessMode := v1alpha1.ReadWriteMany
-			volumeMode := v1alpha1.Block
-			sc := "fast-ssd"
-			spec := minimalVolumeSpec("hinted-vol")
-			spec.ProviderHints = &v1alpha1.ProviderHints{
-				Kubernetes: &v1alpha1.KubernetesProviderHints{
-					StorageClass: &sc,
-					AccessMode:   &accessMode,
-					VolumeMode:   &volumeMode,
-				},
-			}
+			spec := withK8sProviderHints(minimalVolumeSpec("hinted-vol"), map[string]string{
+				"storage_class": "fast-ssd",
+				"access_mode":   "ReadWriteMany",
+				"volume_mode":   "Block",
+			})
 
 			_, err := s.Create(context.Background(), spec, "hinted-vol")
 			Expect(err).NotTo(HaveOccurred())
@@ -241,11 +241,9 @@ var _ = Describe("K8s Volume Store CRUD", func() {
 
 		It("returns failed precondition when StorageClass does not exist", func() {
 			s, _ := newTestStore(defaultConfig())
-			sc := "missing-sc"
-			spec := minimalVolumeSpec("app-data")
-			spec.ProviderHints = &v1alpha1.ProviderHints{
-				Kubernetes: &v1alpha1.KubernetesProviderHints{StorageClass: &sc},
-			}
+			spec := withK8sProviderHints(minimalVolumeSpec("app-data"), map[string]string{
+				"storage_class": "missing-sc",
+			})
 
 			_, err := s.Create(context.Background(), spec, "app-data")
 			Expect(err).To(HaveOccurred())
@@ -266,11 +264,9 @@ var _ = Describe("K8s Volume Store CRUD", func() {
 
 		It("returns invalid argument for unsupported volume mode", func() {
 			s, _ := newTestStore(defaultConfig())
-			badMode := v1alpha1.VolumeMode("Raw")
-			spec := minimalVolumeSpec("app-data")
-			spec.ProviderHints = &v1alpha1.ProviderHints{
-				Kubernetes: &v1alpha1.KubernetesProviderHints{VolumeMode: &badMode},
-			}
+			spec := withK8sProviderHints(minimalVolumeSpec("app-data"), map[string]string{
+				"volume_mode": "Raw",
+			})
 
 			_, err := s.Create(context.Background(), spec, "app-data")
 			Expect(err).To(HaveOccurred())

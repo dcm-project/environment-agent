@@ -135,20 +135,22 @@ func buildPVC(spec v1alpha1.StorageSpec, cfg K8sConfig, labels map[string]string
 		pvc.Spec.StorageClassName = &storageClass
 	}
 
-	if spec.ProviderHints != nil && spec.ProviderHints.Kubernetes != nil {
-		if vm := spec.ProviderHints.Kubernetes.VolumeMode; vm != nil {
-			mode, err := resolveVolumeMode(*vm)
-			if err != nil {
-				return nil, err
-			}
-			pvc.Spec.VolumeMode = &mode
+	hints, err := k8sHintsFromSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	if hints != nil && hints.VolumeMode != nil {
+		mode, err := resolveVolumeMode(*hints.VolumeMode)
+		if err != nil {
+			return nil, err
 		}
+		pvc.Spec.VolumeMode = &mode
 	}
 
 	return pvc, nil
 }
 
-func resolveVolumeMode(vm v1alpha1.VolumeMode) (corev1.PersistentVolumeMode, error) {
+func resolveVolumeMode(vm string) (corev1.PersistentVolumeMode, error) {
 	mode := corev1.PersistentVolumeMode(vm)
 	switch mode {
 	case corev1.PersistentVolumeFilesystem, corev1.PersistentVolumeBlock:
@@ -159,9 +161,12 @@ func resolveVolumeMode(vm v1alpha1.VolumeMode) (corev1.PersistentVolumeMode, err
 }
 
 func resolveAccessMode(spec v1alpha1.StorageSpec, defaultMode string) (corev1.PersistentVolumeAccessMode, error) {
-	if spec.ProviderHints != nil && spec.ProviderHints.Kubernetes != nil &&
-		spec.ProviderHints.Kubernetes.AccessMode != nil {
-		mode := corev1.PersistentVolumeAccessMode(*spec.ProviderHints.Kubernetes.AccessMode)
+	hints, err := k8sHintsFromSpec(spec)
+	if err != nil {
+		return "", err
+	}
+	if hints != nil && hints.AccessMode != nil {
+		mode := corev1.PersistentVolumeAccessMode(*hints.AccessMode)
 		switch mode {
 		case corev1.ReadWriteOnce, corev1.ReadOnlyMany, corev1.ReadWriteMany:
 			return mode, nil
@@ -182,11 +187,11 @@ func resolveAccessMode(spec v1alpha1.StorageSpec, defaultMode string) (corev1.Pe
 }
 
 func resolveStorageClass(spec v1alpha1.StorageSpec, defaultClass string) string {
-	if spec.ProviderHints != nil && spec.ProviderHints.Kubernetes != nil &&
-		spec.ProviderHints.Kubernetes.StorageClass != nil {
-		return *spec.ProviderHints.Kubernetes.StorageClass
+	hints, err := k8sHintsFromSpec(spec)
+	if err != nil || hints == nil || hints.StorageClass == nil {
+		return defaultClass
 	}
-	return defaultClass
+	return *hints.StorageClass
 }
 
 func storageClassFromPVC(pvc *corev1.PersistentVolumeClaim) string {
@@ -197,27 +202,27 @@ func storageClassFromPVC(pvc *corev1.PersistentVolumeClaim) string {
 }
 
 func providerHintsFromPVC(pvc *corev1.PersistentVolumeClaim) *v1alpha1.ProviderHints {
-	var k8sHints v1alpha1.KubernetesProviderHints
+	var hints k8sProviderHints
 	hasHints := false
 
 	if sc := storageClassFromPVC(pvc); sc != "" {
-		k8sHints.StorageClass = &sc
+		hints.StorageClass = &sc
 		hasHints = true
 	}
 	if pvc.Spec.VolumeMode != nil {
-		vm := v1alpha1.VolumeMode(*pvc.Spec.VolumeMode)
-		k8sHints.VolumeMode = &vm
+		vm := string(*pvc.Spec.VolumeMode)
+		hints.VolumeMode = &vm
 		hasHints = true
 	}
 	if len(pvc.Spec.AccessModes) > 0 {
-		am := v1alpha1.VolumeAccessMode(pvc.Spec.AccessModes[0])
-		k8sHints.AccessMode = &am
+		am := string(pvc.Spec.AccessModes[0])
+		hints.AccessMode = &am
 		hasHints = true
 	}
 	if !hasHints {
 		return nil
 	}
-	return &v1alpha1.ProviderHints{Kubernetes: &k8sHints}
+	return providerHintsFromK8s(hints)
 }
 
 func userLabelsFromPVC(pvc *corev1.PersistentVolumeClaim) map[string]string {

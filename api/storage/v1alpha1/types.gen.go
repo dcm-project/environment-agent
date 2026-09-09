@@ -4,8 +4,6 @@
 package v1alpha1
 
 import (
-	"encoding/json"
-	"fmt"
 	"time"
 )
 
@@ -87,45 +85,6 @@ func (e StorageStatus) Valid() bool {
 	}
 }
 
-// Defines values for VolumeAccessMode.
-const (
-	ReadOnlyMany  VolumeAccessMode = "ReadOnlyMany"
-	ReadWriteMany VolumeAccessMode = "ReadWriteMany"
-	ReadWriteOnce VolumeAccessMode = "ReadWriteOnce"
-)
-
-// Valid indicates whether the value is a known member of the VolumeAccessMode enum.
-func (e VolumeAccessMode) Valid() bool {
-	switch e {
-	case ReadOnlyMany:
-		return true
-	case ReadWriteMany:
-		return true
-	case ReadWriteOnce:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for VolumeMode.
-const (
-	Block      VolumeMode = "Block"
-	Filesystem VolumeMode = "Filesystem"
-)
-
-// Valid indicates whether the value is a known member of the VolumeMode enum.
-func (e VolumeMode) Valid() bool {
-	switch e {
-	case Block:
-		return true
-	case Filesystem:
-		return true
-	default:
-		return false
-	}
-}
-
 // Error RFC 9457 compliant error response
 type Error struct {
 	// Detail Human-readable explanation specific to this occurrence
@@ -161,7 +120,7 @@ type Health struct {
 
 	// Type Resource type identifier
 	//
-	// Example: k8s-storage-service-provider.dcm.io/health
+	// Example: storage-service-provider.dcm.io/health
 	Type *string `json:"type,omitempty"`
 
 	// Uptime Seconds since the service provider started
@@ -175,30 +134,10 @@ type Health struct {
 	Version *string `json:"version,omitempty"`
 }
 
-// KubernetesProviderHints Kubernetes-specific PVC settings
-type KubernetesProviderHints struct {
-	// AccessMode PVC access mode. Controls attachment scope and permissions at creation
-	// time (Kubernetes-specific; see service type definitions).
-	//
-	//
-	// Example: ReadWriteOnce
-	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
-
-	// StorageClass StorageClass name (overrides SP default)
-	StorageClass *string `json:"storage_class,omitempty"`
-
-	// VolumeMode PVC volume mode
-	VolumeMode *VolumeMode `json:"volume_mode,omitempty"`
-}
-
 // ProviderHints Provider-specific hints from the catalog
-type ProviderHints struct {
-	// Kubernetes Kubernetes-specific PVC settings
-	Kubernetes           *KubernetesProviderHints `json:"kubernetes,omitempty"`
-	AdditionalProperties map[string]interface{}   `json:"-"`
-}
+type ProviderHints map[string]interface{}
 
-// StorageSpec Storage specification for creating a PVC (implements the portable storage service type)
+// StorageSpec Storage specification for creating a volume (implements the portable storage service type)
 type StorageSpec struct {
 	// Capacity Requested storage capacity (e.g., "100Gi")
 	//
@@ -221,7 +160,7 @@ type StorageSpecServiceType string
 // StorageStatus Current status of the storage instance (CloudEvents payload uses this enum)
 type StorageStatus string
 
-// Volume Volume resource representing a PVC instance
+// Volume Volume resource representing a storage instance
 type Volume struct {
 	// CreateTime Timestamp when the volume was created
 	CreateTime *time.Time `json:"create_time,omitempty"`
@@ -236,19 +175,13 @@ type Volume struct {
 	// Example: volumes/app-data-volume
 	Path *string `json:"path,omitempty"`
 
-	// Spec Storage specification for creating a PVC (implements the portable storage service type)
+	// Spec Storage specification for creating a volume (implements the portable storage service type)
 	Spec   StorageSpec    `json:"spec"`
 	Status *StorageStatus `json:"status,omitempty"`
 
 	// UpdateTime Timestamp when the volume was last updated
 	UpdateTime *time.Time `json:"update_time,omitempty"`
 }
-
-// VolumeAccessMode PVC access mode. Controls attachment scope and permissions at creation
-// time (Kubernetes-specific; see service type definitions).
-//
-// Example: ReadWriteOnce
-type VolumeAccessMode string
 
 // VolumeList Paginated list of volume instances
 type VolumeList struct {
@@ -262,21 +195,18 @@ type VolumeMetadata struct {
 	// Labels Custom key-value pairs for tagging and filtering
 	Labels *map[string]string `json:"labels,omitempty"`
 
-	// Name DCM instance ID and Kubernetes PVC name (AEP-122)
+	// Name DCM instance ID (AEP-122)
 	Name string `json:"name"`
 
-	// Namespace Kubernetes namespace where the PVC was created
+	// Namespace Platform namespace where the volume was created
 	Namespace *string `json:"namespace,omitempty"`
 
-	// StorageClass StorageClass name bound to the PVC
+	// StorageClass Storage class name bound to the volume
 	StorageClass *string `json:"storage_class,omitempty"`
 
-	// VolumeName Bound PersistentVolume name when available
+	// VolumeName Bound backend volume name when available
 	VolumeName *string `json:"volume_name,omitempty"`
 }
-
-// VolumeMode PVC volume mode
-type VolumeMode string
 
 // VolumeIdPath defines model for VolumeIdPath.
 type VolumeIdPath = string
@@ -300,71 +230,3 @@ type CreateVolumeParams struct {
 
 // CreateVolumeJSONRequestBody defines body for CreateVolume for application/json ContentType.
 type CreateVolumeJSONRequestBody = Volume
-
-// Getter for additional properties for ProviderHints. Returns the specified
-// element and whether it was found
-func (a ProviderHints) Get(fieldName string) (value interface{}, found bool) {
-	if a.AdditionalProperties != nil {
-		value, found = a.AdditionalProperties[fieldName]
-	}
-	return
-}
-
-// Setter for additional properties for ProviderHints
-func (a *ProviderHints) Set(fieldName string, value interface{}) {
-	if a.AdditionalProperties == nil {
-		a.AdditionalProperties = make(map[string]interface{})
-	}
-	a.AdditionalProperties[fieldName] = value
-}
-
-// Override default JSON handling for ProviderHints to handle AdditionalProperties
-func (a *ProviderHints) UnmarshalJSON(b []byte) error {
-	object := make(map[string]json.RawMessage)
-	err := json.Unmarshal(b, &object)
-	if err != nil {
-		return err
-	}
-
-	if raw, found := object["kubernetes"]; found {
-		err = json.Unmarshal(raw, &a.Kubernetes)
-		if err != nil {
-			return fmt.Errorf("error reading 'kubernetes': %w", err)
-		}
-		delete(object, "kubernetes")
-	}
-
-	if len(object) != 0 {
-		a.AdditionalProperties = make(map[string]interface{})
-		for fieldName, fieldBuf := range object {
-			var fieldVal interface{}
-			err := json.Unmarshal(fieldBuf, &fieldVal)
-			if err != nil {
-				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
-			}
-			a.AdditionalProperties[fieldName] = fieldVal
-		}
-	}
-	return nil
-}
-
-// Override default JSON handling for ProviderHints to handle AdditionalProperties
-func (a ProviderHints) MarshalJSON() ([]byte, error) {
-	var err error
-	object := make(map[string]json.RawMessage)
-
-	if a.Kubernetes != nil {
-		object["kubernetes"], err = json.Marshal(a.Kubernetes)
-		if err != nil {
-			return nil, fmt.Errorf("error marshaling 'kubernetes': %w", err)
-		}
-	}
-
-	for fieldName, field := range a.AdditionalProperties {
-		object[fieldName], err = json.Marshal(field)
-		if err != nil {
-			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
-		}
-	}
-	return json.Marshal(object)
-}
