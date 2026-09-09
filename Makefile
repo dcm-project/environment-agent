@@ -78,6 +78,9 @@ install-kubevirt:
 k8s-deploy:
 	bash deploy/scripts/k8s-deploy.sh
 
+k8s-deploy-with-nats:
+	K8S_DEPLOY_NATS=1 bash deploy/scripts/k8s-deploy.sh
+
 # NodePorts from deploy/k8s/ (agent 30081, NATS 30422; reach via Kind node IP on Linux).
 K8S_AGENT_NODE_PORT ?= 30081
 K8S_NATS_NODE_PORT ?= 30422
@@ -255,7 +258,7 @@ image-build: check-container-engine
 	$(CONTAINER_ENGINE) build -f Containerfile -t $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG) .
 
 .PHONY: build run compose-up compose-up-with-nats compose-down kubeconfig-for-compose kind-connect kind-disconnect \
-	disconnect-compose-networks remove-compose-networks install-kubevirt k8s-deploy k8s-verify k8s-publish-creates deploy-verify publish-creates \
+	disconnect-compose-networks remove-compose-networks install-kubevirt k8s-deploy k8s-deploy-with-nats k8s-verify k8s-publish-creates deploy-verify publish-creates \
 	clean fmt vet lint test test-unit test-integration test-race test-e2e test-all coverage ci tidy check-tidy \
 	generate-types generate-spec generate-server generate-client \
 	generate-cluster-types generate-cluster-spec generate-cluster-api \

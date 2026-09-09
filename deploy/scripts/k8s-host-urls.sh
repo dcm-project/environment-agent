@@ -36,6 +36,12 @@ resolve_nats_url() {
 	local agent_url="$1"
 	local host
 
+	# Platform NATS (control-plane compose on host) when bundled NATS is not deployed.
+	if ! kubectl -n dcm get svc nats >/dev/null 2>&1; then
+		echo "nats://127.0.0.1:4222"
+		return 0
+	fi
+
 	case "${agent_url}" in
 		*127.0.0.1*) echo "nats://127.0.0.1:${NATS_NODE_PORT}"; return 0 ;;
 	esac
