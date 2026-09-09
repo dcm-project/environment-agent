@@ -84,7 +84,7 @@ services:
     build:
       context: ..
       dockerfile: Containerfile
-    image: quay.io/dcm-project/environment-agent:${ENVIRONMENT_AGENT_VERSION:-dev}
+    image: quay.io/dcm-project/environment-agent:${ENVIRONMENT_AGENT_VERSION:-main}
     pull_policy: missing
     environment:
       <<: *agent-common

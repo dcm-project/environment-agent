@@ -16,8 +16,8 @@ KIND_SCRIPTS_DIR ?= $(UTILITIES_DIR)/scripts/kind
 COMPOSE_SCRIPTS_DIR ?= $(UTILITIES_DIR)/scripts/compose
 KUBEVIRT_SCRIPTS_DIR ?= $(UTILITIES_DIR)/scripts/kubevirt
 COMPOSE_NETWORKS ?= deploy_default $(COMPOSE_NETWORK)
-# Local dev image tag shared by compose-up and k8s-deploy (override for release builds).
-ENVIRONMENT_AGENT_VERSION ?= dev
+# Image tag shared by compose-up and k8s-deploy (override for other versions).
+ENVIRONMENT_AGENT_VERSION ?= main
 
 COMPOSE ?= $(shell command -v podman-compose >/dev/null 2>&1 && echo podman-compose || \
 	(command -v docker-compose >/dev/null 2>&1 && echo docker-compose || \

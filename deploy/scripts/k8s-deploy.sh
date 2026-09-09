@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K8S_DIR="${ROOT}/deploy/k8s"
 
-TAG="${ENVIRONMENT_AGENT_VERSION:-dev}"
+TAG="${ENVIRONMENT_AGENT_VERSION:-main}"
 IMAGE="${CONTAINER_IMAGE_NAME:-quay.io/dcm-project/environment-agent}:${TAG}"
 BUILD_IMAGE="${BUILD_IMAGE:-1}"
 
@@ -41,9 +41,9 @@ fi
 if [[ "${LOAD_INTO_KIND}" == "1" ]] && [[ -n "${KIND_CLUSTER}" ]] && command -v kind >/dev/null 2>&1; then
 	echo "==> Loading ${IMAGE} into kind cluster ${KIND_CLUSTER}"
 	kind load docker-image "${IMAGE}" --name "${KIND_CLUSTER}"
-elif [[ "${CLUSTER_TYPE}" == "openshift" ]] && [[ "${BUILD_IMAGE}" == "1" ]] && [[ "${TAG}" == "dev" ]]; then
-	echo "==> OpenShift: push ${IMAGE} to a registry this cluster can pull, or set ENVIRONMENT_AGENT_VERSION to a published tag"
-	echo "    Example: BUILD_IMAGE=0 ENVIRONMENT_AGENT_VERSION=main make k8s-deploy"
+elif [[ "${CLUSTER_TYPE}" == "openshift" ]] && [[ "${BUILD_IMAGE}" == "1" ]]; then
+	echo "==> OpenShift: push ${IMAGE} to a registry this cluster can pull, or skip the local build"
+	echo "    Example: BUILD_IMAGE=0 make k8s-deploy"
 	echo "    Continuing with manifest apply — image must be pullable or the Deployment will fail."
 fi
 
