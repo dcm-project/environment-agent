@@ -1016,3 +1016,147 @@ the full chain (or an inline reconstruction of it), never from `auth.Middleware`
 
 **Related requirements:** REQ-HTTP-060, REQ-AUTH-070, REQ-AUTH-080, REQ-AUTH-120, REQ-HTTP-071,
 REQ-HTTP-110
+
+---
+
+### DD-550: Outbound CP authentication — client credentials + static token fallback
+
+**Decision:** Two authentication modes for outbound HTTP requests (registration +
+heartbeat) to the DCM control plane, resolved at startup by config precedence:
+
+1. **Client credentials (production):** `DCM_AUTH_TOKEN_ENDPOINT` +
+   `DCM_AUTH_CLIENT_ID` + `DCM_AUTH_CLIENT_SECRET` → agent fetches short-lived
+   JWTs from an OIDC token endpoint, caches and auto-refreshes before expiry
+   (default 10s safety buffer).
+2. **Static token (dev/simple deployments):** `DCM_AUTH_TOKEN` → agent sends a
+   pre-obtained JWT as-is, no refresh.
+3. **No auth (backward-compatible default):** Neither configured → no
+   `Authorization` header.
+
+Client credentials takes precedence over static token if both are configured.
+Partial client-credentials config (e.g. endpoint set but client ID missing)
+fails fast at startup.
+
+**`golang.org/x/oauth2/clientcredentials`, not hand-rolled:** [PR #38 review
+comment](https://github.com/dcm-project/environment-agent/pull/38#discussion_r4072664229) from
+`jordigilh` flagged the original hand-rolled POST-and-decode as duplicating logic the standard
+library already provides. `ClientCredentialsTokenSource.fetchToken` now wraps
+`clientcredentials.Config.Token(ctx)`, injecting the redirect-refusing `http.Client` via
+`context.WithValue(ctx, oauth2.HTTPClient, ...)` (DD-580) and translating `*oauth2.RetrieveError`
+into the same `"token endpoint returned HTTP %d: ..."` message shape as before (REQ-DCM-225).
+
+**`Config.Token(ctx)` per fetch, not `Config.TokenSource(ctx)`:** `TokenSource(ctx)` fixes the
+context at construction time (internally wrapped in `oauth2.ReuseTokenSource`), which would break
+the per-attempt `context.WithTimeout`/cancellation that `attemptRegister` and `sendHeartbeat` each
+establish fresh on every call. Calling `Config.Token(ctx)` directly on every cache miss instead
+builds a throwaway internal `ReuseTokenSource` per call, but passes that call's own `ctx` all the
+way through to the HTTP round trip, so per-call cancellation/timeout is preserved exactly as
+before. The DCM-side mutex + cached-token + `expiry`/`expiryDelta` wrapper
+(`ClientCredentialsTokenSource`) is kept as-is around this call — the library only replaces the
+innards of a single fetch, not the caching/refresh semantics.
+
+**Accepted behavior change — oversized `expires_in` is clamped, not rejected:** the library's
+wire-format decoder stores `expires_in` as an `int32` and clamps any larger value down to
+`math.MaxInt32` (~68 years) rather than erroring (REQ-DCM-221, AC-DCM-226). This replaces the
+previous hand-rolled overflow-rejection branch; an oversized `expires_in` can no longer overflow
+`time.Duration` at that scale, so it is now accepted with a (very distant) clamped expiry instead
+of failing the fetch.
+
+**`TokenSource` interface:** Decouples token acquisition from HTTP transport.
+`dcmClient` consumes a `TokenSource` (can be nil for no-auth mode), calling
+`Token(ctx)` before each outbound request.
+
+**Token refresh strategy:** Proactive, before expiry (using `expires_in` from
+the token response minus a safety buffer), not reactive on 401. Token fetch
+failures are surfaced to the caller (register/heartbeat), which retries via
+existing backoff logic — fetch errors do not crash the agent.
+
+**Static token limitations:** No refresh. A 401 from an expired token halts
+registration permanently via existing `ErrNonRetryable` behavior; the agent
+must be restarted with a fresh token.
+
+**Secrets via env vars only:** No `_FILE` indirection. K8s secret mounts can
+populate env vars via `envFrom` in the pod spec.
+
+**Related requirements:** REQ-DCM-190, REQ-DCM-200, REQ-DCM-210, REQ-DCM-220,
+REQ-DCM-230, REQ-DCM-240, REQ-DCM-250
+
+### DD-560: Re-registration shares the initial-registration retry loop
+
+**Decision:** `Registrar.reRegister` (invoked on a service-type-change notification) no longer
+makes a single attempt and drops the notification on failure. Both `doRegistration` (initial
+registration) and `reRegister` now call a single extracted `registerWithRetry(ctx, successLogMsg)`
+helper, so a re-registration failure retries with the exact same backoff policy (REQ-DCM-050),
+`Retry-After`/429 handling, and `ErrNonRetryable` short-circuit (REQ-DCM-060) as initial
+registration — see REQ-DCM-121. The agent ID is only updated in the success branch, after the
+retry succeeds.
+
+**Rationale:** Before this fix, a transient failure while re-sending the registration payload
+(e.g. `DCM_AUTH_CLIENT_*`'s token endpoint being briefly unreachable — DD-550) was logged once at
+WARN and the triggering notification was gone forever: `notifyCh` had already been drained by the
+outer `select` before `reRegister` was called, and `reRegister` itself made no further attempt.
+DCM was then left with stale `service_types` indefinitely, since nothing re-arms without a new
+notification, and the SP-side state that produced this one may never change again.
+
+**Coalescing signals during retry, not a separate re-entrant call:** While `registerWithRetry` is
+backing off, a *new* signal on `notifyCh` (e.g. another service-type change arriving mid-retry)
+resets the attempt counter and immediately retries — it does not need special-casing beyond what
+`doRegistration` already did, because `buildPayload()` re-reads `ServiceTypeLister` on every
+attempt, so the retried call already carries the latest state.
+
+**Trade-off accepted — heartbeats pause during a re-registration retry:** `reRegister` runs
+synchronously inside `run()`'s single event-loop `select`, so while it is retrying (potentially for
+up to `MaxBackoff` per attempt), the heartbeat ticker is not serviced. `time.Ticker` only buffers
+one pending tick, so ticks during a long retry are coalesced/dropped rather than queued — heartbeat
+delivery resumes as soon as `reRegister` returns, it does not queue up a backlog. This mirrors the
+pre-existing initial-registration behavior (the heartbeat loop does not start until
+`doRegistration` returns) and is considered acceptable because the failure modes that make
+re-registration retry (e.g. an auth token outage) also break heartbeat auth on the exact same
+`TokenSource` — heartbeats would be failing anyway during that window. Running re-registration
+retries on a separate goroutine to keep heartbeats flowing during a long outage was considered and
+rejected as unnecessary complexity for v1alpha1; revisit if heartbeat continuity during
+re-registration retries becomes a real operational requirement.
+
+**Related requirements:** REQ-DCM-050, REQ-DCM-060, REQ-DCM-120, REQ-DCM-121
+
+### DD-570: Per-attempt registration timeout is symmetric, not re-registration-only
+
+**Decision:** `registerWithRetry` (shared by `doRegistration` and `reRegister` since DD-560)
+wraps each individual HTTP attempt in a fresh `context.WithTimeout(ctx, RequestTimeout)`,
+mirroring the pattern `sendHeartbeat` already used. `RequestTimeout` is a `RegistrarConfig`
+field sourced from `DCM_REQUEST_TIMEOUT` (default `10s`), validated like the other DCM
+durations (REQ-DCM-122). Bounding only the shared helper -- not either call site
+individually -- keeps `doRegistration` and `reRegister` symmetric per REQ-DCM-121.
+
+**Related requirements:** REQ-DCM-121, REQ-DCM-122
+
+### DD-580: Client-credentials token fetch refuses to follow redirects
+
+**Decision:** `ClientCredentialsTokenSource`'s internally-constructed default `http.Client` (used
+whenever `NewClientCredentialsTokenSource` is called with a `nil` `httpClient` — the only call
+site today, via `main.buildTokenSource`) sets `CheckRedirect` to unconditionally reject every
+redirect with an explicit error, rather than following it. Since the migration to
+`golang.org/x/oauth2/clientcredentials`, `fetchToken` injects this client into the library call by
+setting it on the context passed to `clientcredentials.Config.Token(ctx)` — via
+`context.WithValue(ctx, oauth2.HTTPClient, c.httpClient)` — rather than passing it directly to a
+hand-rolled `http.NewRequestWithContext`/`httpClient.Do`. The library reads the client back out of
+that context key internally (`oauth2.HTTPClient`, documented as the context key for this purpose)
+before making the request, so the blocked-redirect error still flows through `fetchToken`'s
+existing `if err != nil` branch (wrapped with `%w` per the repo's error-handling convention),
+unchanged from the caller's perspective.
+
+**Rationale:** `fetchToken`'s POST body carries `client_id`/`client_secret`. Go's default
+`http.Client` resends the exact method and body on a `307`/`308` `Location`, including
+cross-origin, which would resend the client secret to an unintended destination. Blocking all
+redirects (rather than allow-listing same-origin ones) is deliberately the simpler of the two
+options raised in review: `DCM_AUTH_TOKEN_ENDPOINT` is a single fixed, operator-supplied URL with
+no legitimate reason to redirect, so a redirect at all is itself a config/deployment smell worth
+failing fast on — same-origin allow-listing would add branching logic to guard against a case that
+shouldn't occur in a correctly configured deployment.
+
+**Scoped to the default client only:** A caller-supplied `httpClient` is not mutated or wrapped;
+it remains the caller's own responsibility. No such call site exists today (`main.go` and all
+tests pass `nil`), so this is not a functional gap in practice, only a documented limitation of
+the public constructor.
+
+**Related requirements:** REQ-DCM-261
