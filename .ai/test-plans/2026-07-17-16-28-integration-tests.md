@@ -1269,6 +1269,42 @@ Unless overridden, tests use:
 
 ---
 
+### IT-DCM-175: Re-registration retries through a transient token outage until it succeeds
+
+- **Validates AC:** AC-DCM-071
+- **Test Infrastructure:** Mock DCM; `flakyTokenSource` fake whose `Token` fails while `failing` is
+  set, then succeeds once cleared
+- **Given** the agent is registered to DCM
+- **When** the configured `TokenSource` starts failing and a single service-type-change
+  notification triggers re-registration while it's still failing
+- **Then** no new registration request MUST reach DCM while the token source is failing, and the
+  previously-assigned agent ID MUST be preserved
+- **And** once the token source recovers, the same re-registration attempt (not a new
+  notification) MUST eventually reach DCM and succeed, retried via the shared registration backoff
+  policy
+- **And** the payload of that retried request MUST reflect the updated service types
+
+---
+
+### IT-DCM-176: Per-attempt request timeout bounds a hung re-registration attempt
+
+- **Validates AC:** AC-DCM-072
+- **Test Infrastructure:** Mock DCM configured to accept the connection but never respond
+  (`hangReg`, reused from IT-DCM-020); `RegistrarConfig.RequestTimeout` set to a small test value
+- **Given** the agent is already registered to DCM
+- **When** DCM starts hanging on every registration request and a service-type change triggers
+  re-registration
+- **Then** multiple re-registration attempts MUST be observed by the mock within a window far
+  shorter than the underlying HTTP client's own timeout — proving each attempt fails fast at the
+  configured `RequestTimeout` and is retried via the backoff policy (REQ-DCM-050), rather than a
+  single attempt blocking the registrar's event loop for the client's full timeout
+- **Regression note:** this is the fix for qodo PR #38 round-2 finding #7 ("Service updates can
+  stall for a minute"). The fix is deliberately symmetric — the same timeout applies to initial
+  registration too (REQ-DCM-122) — because REQ-DCM-121/DD-510 require initial and re-registration
+  attempts to behave identically; see `.ai/plans/2026-09-10_pr38-qodo-remediation_claude.md`
+
+---
+
 ### IT-DCM-180: Registrar goroutine recovers from repeated panics and keeps retrying afterward
 
 - **Validates AC:** AC-DCM-055
@@ -1318,6 +1354,49 @@ Unless overridden, tests use:
 - **And** the restart's log MUST carry `restart_attempt >= 1`
 - **And** the "panic in DCM registrar goroutine, restarting" log MUST carry the same
   `restart_attempt` value, so the two log lines can be cross-referenced
+
+---
+
+### IT-DCM-AUTH-010: Registration includes Authorization header (static mode)
+
+- **Validates AC:** AC-DCM-190, AC-DCM-200
+- **Test Infrastructure:** mock DCM server capturing `Authorization` header
+- **Given** `DCM_AUTH_TOKEN` is set to `"static-jwt"`
+- **When** the agent registers with DCM
+- **Then** the registration request MUST include `Authorization: Bearer static-jwt`
+
+### IT-DCM-AUTH-020: Heartbeat includes Authorization header (static mode)
+
+- **Validates AC:** AC-DCM-195, AC-DCM-200
+- **Test Infrastructure:** mock DCM server capturing `Authorization` header
+- **Given** `DCM_AUTH_TOKEN` is set to `"static-jwt"`
+- **When** the agent sends a heartbeat
+- **Then** the heartbeat request MUST include `Authorization: Bearer static-jwt`
+
+### IT-DCM-AUTH-030: Registration includes Authorization header (client-credentials mode)
+
+- **Validates AC:** AC-DCM-190, AC-DCM-210
+- **Test Infrastructure:** mock DCM server + mock OIDC token endpoint
+- **Given** client-credentials config points at a mock token endpoint returning `{"access_token":"cc-jwt","expires_in":3600}`
+- **When** the agent registers with DCM
+- **Then** the registration request MUST include `Authorization: Bearer cc-jwt`
+
+### IT-DCM-AUTH-040: Token auto-refreshed during heartbeat loop (client-credentials, short expiry)
+
+- **Validates AC:** AC-DCM-220
+- **Test Infrastructure:** mock DCM server + mock OIDC token endpoint returning short-lived tokens (1s expiry)
+- **Given** client-credentials mode with `expires_in=1`
+- **When** the agent sends heartbeats over a period longer than the token lifetime
+- **Then** the mock token endpoint MUST receive at least 2 token requests (initial + refresh)
+- **And** the later heartbeat requests MUST carry a refreshed token
+
+### IT-DCM-AUTH-050: No auth configured: no Authorization header on any request
+
+- **Validates AC:** AC-DCM-235
+- **Test Infrastructure:** mock DCM server capturing all headers
+- **Given** neither `DCM_AUTH_TOKEN` nor client-credentials env vars are set
+- **When** the agent registers and sends heartbeats
+- **Then** no request MUST include an `Authorization` header
 
 ---
 
@@ -2482,6 +2561,8 @@ Unless overridden, tests use:
 | AC-DCM-060 | IT-DCM-090 |
 | AC-DCM-061 | IT-DCM-100, IT-DCM-105, IT-DCM-106, IT-DCM-107 |
 | AC-DCM-070 | IT-DCM-110 |
+| AC-DCM-071 | IT-DCM-175 |
+| AC-DCM-072 | IT-DCM-176 |
 | AC-DCM-080 | IT-DCM-120 |
 | AC-DCM-085 | IT-DCM-130 |
 | AC-DCM-090 | IT-DCM-140 |
@@ -2490,6 +2571,12 @@ Unless overridden, tests use:
 | AC-DCM-100 | IT-DCM-160 |
 | AC-DCM-105 | IT-DCM-170 |
 | AC-DCM-180 | IT-DCM-190 |
+| AC-DCM-190 | IT-DCM-AUTH-010, IT-DCM-AUTH-030 |
+| AC-DCM-195 | IT-DCM-AUTH-020 |
+| AC-DCM-200 | IT-DCM-AUTH-010, IT-DCM-AUTH-020 |
+| AC-DCM-210 | IT-DCM-AUTH-030 |
+| AC-DCM-220 | IT-DCM-AUTH-040 |
+| AC-DCM-235 | IT-DCM-AUTH-050 |
 | AC-MSG-010 | IT-MSG-010 |
 | AC-MSG-011 | IT-MSG-011, IT-MSG-012 |
 | AC-MSG-015 | IT-MSG-020 |

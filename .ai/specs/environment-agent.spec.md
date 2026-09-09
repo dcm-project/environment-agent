@@ -1093,6 +1093,8 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
 | REQ-DCM-120 | When the list of supported service types changes (SP registration or health-driven removal) and the agent is already registered to DCM, the agent MUST send `POST /api/v1alpha1/agents` with the full updated registration payload | MUST | |
+| REQ-DCM-121 | Re-registration triggered by a service-type change (REQ-DCM-120) MUST be retried on failure using the same backoff policy and non-retryable error handling as initial registration (REQ-DCM-050, REQ-DCM-060). The agent ID MUST only be updated once the retry succeeds, and no additional service-type-change notification is required for the retry to eventually succeed | MUST | Closes a gap where a transient failure (e.g. an auth token endpoint outage) during re-registration was logged once and the notification silently dropped, leaving DCM with stale advertised capabilities indefinitely |
+| REQ-DCM-122 | Each individual registration attempt (initial or re-registration, per REQ-DCM-121's shared retry loop) MUST be bounded by a configurable per-attempt request timeout, applied identically regardless of which triggered the attempt | MUST | A DCM connection that is accepted but never answered would otherwise block the single registrar event loop for the underlying HTTP client's full timeout on every attempt before backoff even starts. The timeout MUST be identical for both call sites — REQ-DCM-121 requires initial and re-registration attempts to behave the same way, so this cannot be a re-registration-only fix |
 | REQ-DCM-130 | If the agent is not yet registered to DCM when the service type list changes, the agent MUST defer — the SP registration satisfies the prerequisite for initial DCM registration | MUST | |
 
 #### Requirements — Heartbeat
@@ -1105,6 +1107,20 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 | REQ-DCM-170 | Heartbeat failures MUST be logged and retried on the next interval without causing the agent to exit | MUST | |
 | REQ-DCM-180 | DCM registrar startup MUST be logged at INFO. Successful heartbeats MUST be logged at DEBUG with `agent_id`, `consumer_lag`. Successful re-registration MUST be logged at INFO with `agent_id` | MUST | Today only failures/retries are logged on these three paths; success was silent |
 
+##### Requirements — Outbound Authentication
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-DCM-190 | The agent MAY be configured with authentication for outbound HTTP requests to the control plane. When configured, all registration and heartbeat requests MUST include an `Authorization: Bearer <token>` header | MAY/MUST | |
+| REQ-DCM-200 | The agent MUST support a static token mode. When `DCM_AUTH_TOKEN` is set, the agent MUST use its value as the bearer token for all outbound CP requests | MUST | |
+| REQ-DCM-210 | The agent MUST support an OAuth2 client-credentials mode. When `DCM_AUTH_TOKEN_ENDPOINT`, `DCM_AUTH_CLIENT_ID`, and `DCM_AUTH_CLIENT_SECRET` are all configured, the agent MUST use `grant_type=client_credentials` to obtain access tokens from the token endpoint | MUST | |
+| REQ-DCM-220 | In client-credentials mode, the agent MUST cache the access token and refresh it proactively before expiry (using the `expires_in` field from the token response, with a safety buffer). Token fetch failures MUST NOT crash the agent; the failed request is retried by existing backoff logic | MUST | |
+| REQ-DCM-221 | The agent MUST reject a token response whose `expires_in` is missing, zero, negative, or too large to convert to a duration without overflow, treating it as a fetch failure (REQ-DCM-220) rather than caching a token with an unpredictable expiry | MUST | A zero/negative `expires_in` would defeat caching entirely (every call re-fetches); an overflowing value wraps `time.Duration`'s underlying `int64` nanoseconds into an unpredictable (possibly already-past) expiry instead of erroring |
+| REQ-DCM-230 | Client-credentials mode MUST take precedence over static-token mode if both are configured | MUST | |
+| REQ-DCM-240 | If neither `DCM_AUTH_TOKEN` nor client-credentials config is present, the agent MUST send requests without an `Authorization` header (backward-compatible default) | MUST | |
+| REQ-DCM-250 | When client-credentials mode is partially configured (e.g., token endpoint set but client ID missing), the agent MUST fail fast at startup with an error identifying the missing fields | MUST | |
+| REQ-DCM-251 | When client-credentials mode is fully configured, the agent MUST also validate that `DCM_AUTH_TOKEN_ENDPOINT` is an absolute URL with a nonempty host and an `http`/`https` scheme, failing fast at startup otherwise | MUST | A fully-populated but malformed/relative/hostless/unsupported-scheme endpoint would otherwise pass startup validation and fail only at request time, on every registration attempt, indistinguishable from a transient outage |
+
 #### Configuration Introduced
 
 | Config Key | Env Var | Default | Min | Max | Unit | Description |
@@ -1115,7 +1131,12 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 | dcm.registrationUrl | DCM_REGISTRATION_URL | (required) | - | - | - | Base URL of DCM Control Plane API |
 | dcm.initialBackoff | DCM_REGISTRATION_INITIAL_BACKOFF | 1s | 100ms | dcm.maxBackoff | duration | Initial retry backoff |
 | dcm.maxBackoff | DCM_REGISTRATION_MAX_BACKOFF | 5m | dcm.initialBackoff | 1h | duration | Maximum backoff interval |
+| dcm.requestTimeout | DCM_REQUEST_TIMEOUT | 10s | 1s | 5m | duration | Per-attempt HTTP timeout for a single registration/re-registration request (REQ-DCM-122); applied identically to initial registration and re-registration |
 | heartbeat.interval | AGENT_HEARTBEAT_INTERVAL | 30s | 5s | 10m | duration | Heartbeat interval |
+| dcm.authToken | DCM_AUTH_TOKEN | (unset) | - | - | - | Static bearer token for outbound CP requests |
+| dcm.authTokenEndpoint | DCM_AUTH_TOKEN_ENDPOINT | (unset) | - | - | - | OIDC token endpoint URL for client-credentials mode |
+| dcm.authClientID | DCM_AUTH_CLIENT_ID | (unset) | - | - | - | OAuth2 client ID for client-credentials mode |
+| dcm.authClientSecret | DCM_AUTH_CLIENT_SECRET | (unset) | - | - | - | OAuth2 client secret for client-credentials mode |
 
 #### Acceptance Criteria
 
@@ -1198,6 +1219,29 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 - **And** an external SP registers for service type "database"
 - **When** the service type list changes to ["container", "database"]
 - **Then** the agent MUST send `POST /api/v1alpha1/agents` with the updated list
+
+##### AC-DCM-071: Re-registration retries transient failures until success
+
+- **Validates:** REQ-DCM-121
+- **Given** the agent is registered to DCM and a service-type change triggers re-registration
+- **And** the re-registration request fails with a retryable error (e.g. a transient auth token
+  acquisition failure)
+- **When** the underlying failure clears
+- **Then** the agent MUST retry the same re-registration using the registration backoff policy
+  (REQ-DCM-050), without requiring another service-type-change notification
+- **And** the agent ID MUST only be updated once the retried re-registration succeeds
+
+##### AC-DCM-072: Per-attempt request timeout applies identically to initial and re-registration
+
+- **Validates:** REQ-DCM-122
+- **Given** DCM accepts a registration or re-registration connection but never responds
+- **When** the configured per-attempt request timeout (`DCM_REQUEST_TIMEOUT`) elapses
+- **Then** the in-flight attempt MUST fail and be retried through the existing backoff policy
+  (REQ-DCM-050), rather than blocking the registrar's single event loop for the underlying HTTP
+  client's full timeout
+- **And** this bound MUST apply the same way whether the attempt is the initial registration or a
+  re-registration retry (REQ-DCM-121) — never a tighter bound on one and a looser bound on the
+  other
 
 ##### AC-DCM-080: Periodic heartbeat
 
@@ -1286,6 +1330,95 @@ Out of scope: Agent de-registration on shutdown, HA coordination.
 - **Given** re-registration succeeds
 - **When** it completes
 - **Then** an INFO log MUST be emitted with `agent_id`
+
+##### AC-DCM-190: Token attached to registration request
+
+- **Validates:** REQ-DCM-190
+- **Given** auth is configured (static token or client credentials)
+- **When** the agent sends a registration request to DCM
+- **Then** the request MUST include an `Authorization: Bearer <token>` header
+
+##### AC-DCM-195: Token attached to heartbeat request
+
+- **Validates:** REQ-DCM-190
+- **Given** auth is configured (static token or client credentials)
+- **When** the agent sends a heartbeat request to DCM
+- **Then** the request MUST include an `Authorization: Bearer <token>` header
+
+##### AC-DCM-200: Static token used when no client-credentials config
+
+- **Validates:** REQ-DCM-200
+- **Given** `DCM_AUTH_TOKEN` is set and no client-credentials env vars are configured
+- **When** the agent sends any outbound CP request
+- **Then** the `Authorization` header value MUST be `Bearer <DCM_AUTH_TOKEN>`
+
+##### AC-DCM-210: Client-credentials mode fetches token from endpoint
+
+- **Validates:** REQ-DCM-210
+- **Given** `DCM_AUTH_TOKEN_ENDPOINT`, `DCM_AUTH_CLIENT_ID`, and `DCM_AUTH_CLIENT_SECRET` are all set
+- **When** the agent needs a token for an outbound CP request
+- **Then** it MUST POST `grant_type=client_credentials` to the token endpoint and use the returned `access_token`
+
+##### AC-DCM-215: Client-credentials cached token reused until near expiry
+
+- **Validates:** REQ-DCM-220
+- **Given** a token was previously fetched via client credentials
+- **When** the token is still valid (not near expiry)
+- **Then** subsequent `Token()` calls MUST return the cached token without hitting the endpoint
+
+##### AC-DCM-220: Client-credentials token refreshed before expiry
+
+- **Validates:** REQ-DCM-220
+- **Given** a cached token is near expiry (within safety buffer)
+- **When** `Token()` is called
+- **Then** a new token MUST be fetched from the endpoint
+
+##### AC-DCM-225: Client-credentials token fetch failure does not crash agent
+
+- **Validates:** REQ-DCM-220
+- **Given** client-credentials mode is configured
+- **When** the token endpoint is unreachable or returns an error
+- **Then** the error MUST be propagated to the caller (register/heartbeat), not crash the agent
+
+##### AC-DCM-226: Malformed `expires_in` is rejected, not cached
+
+- **Validates:** REQ-DCM-221
+- **Given** client-credentials mode is configured
+- **When** the token endpoint returns a response with `expires_in` missing, zero, negative, or
+  larger than can be converted to a `time.Duration` without overflow
+- **Then** `Token()` MUST return an error (propagated like any other fetch failure, per
+  REQ-DCM-220) instead of caching a token with an unpredictable expiry
+
+##### AC-DCM-230: Client-credentials takes precedence over static token
+
+- **Validates:** REQ-DCM-230
+- **Given** both `DCM_AUTH_TOKEN` and client-credentials env vars are configured
+- **When** the agent resolves its auth mode at startup
+- **Then** client-credentials mode MUST be used (static token is ignored)
+
+##### AC-DCM-235: No auth configured sends no Authorization header
+
+- **Validates:** REQ-DCM-240
+- **Given** neither `DCM_AUTH_TOKEN` nor client-credentials env vars are set
+- **When** the agent sends registration/heartbeat requests
+- **Then** no `Authorization` header MUST be present on the requests
+
+##### AC-DCM-240: Partial client-credentials config fails fast
+
+- **Validates:** REQ-DCM-250
+- **Given** only some of `DCM_AUTH_TOKEN_ENDPOINT`, `DCM_AUTH_CLIENT_ID`, `DCM_AUTH_CLIENT_SECRET` are set
+- **When** the agent validates configuration at startup
+- **Then** it MUST fail with an error identifying the missing fields
+
+##### AC-DCM-241: Malformed token endpoint fails fast at startup
+
+- **Validates:** REQ-DCM-251
+- **Given** `DCM_AUTH_CLIENT_ID` and `DCM_AUTH_CLIENT_SECRET` are set
+- **And** `DCM_AUTH_TOKEN_ENDPOINT` is malformed, relative, hostless, or uses a scheme other than
+  `http`/`https`
+- **When** the agent validates configuration at startup
+- **Then** it MUST fail with an error naming `DCM_AUTH_TOKEN_ENDPOINT`
+- **And** a valid absolute `http`/`https` endpoint MUST pass validation
 
 #### Dependencies
 
@@ -2343,6 +2476,10 @@ All configuration is loadable from environment variables. Configuration files ar
 | dcm.initialBackoff | DCM_REGISTRATION_INITIAL_BACKOFF | 1s | No | 100ms | dcm.maxBackoff | duration | 6 |
 | dcm.maxBackoff | DCM_REGISTRATION_MAX_BACKOFF | 5m | No | dcm.initialBackoff | 1h | duration | 6 |
 | heartbeat.interval | AGENT_HEARTBEAT_INTERVAL | 30s | No | 5s | 10m | duration | 6 |
+| dcm.authToken | DCM_AUTH_TOKEN | (unset) | No | - | - | - | 6 |
+| dcm.authTokenEndpoint | DCM_AUTH_TOKEN_ENDPOINT | (unset) | No | - | - | - | 6 |
+| dcm.authClientID | DCM_AUTH_CLIENT_ID | (unset) | No | - | - | - | 6 |
+| dcm.authClientSecret | DCM_AUTH_CLIENT_SECRET | (unset) | No | - | - | - | 6 |
 | messaging.url | AGENT_MESSAGING_URL | - | Yes | - | - | - | 7 |
 | messaging.topicName | AGENT_TOPIC_NAME | (derived from AGENT_NAME) | No | - | - | Unprefixed base name; CP-facing main subject is `dcm.agent.{base}` | 7 |
 | routing.retryMaxAttempts | AGENT_ROUTING_RETRY_MAX | 3 | No | 0 | 20 | integer | 8 |
@@ -2398,7 +2535,7 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
 | REQ-SPR-NNN | 4.3: SP Registration & Management | 35 |
 | REQ-STS-NNN | 4.4: Provider Query Endpoints | 7 |
 | REQ-HMN-NNN | 4.5: SP Health Monitoring | 33 |
-| REQ-DCM-NNN | 4.6: DCM Registration & Heartbeat | 19 |
+| REQ-DCM-NNN | 4.6: DCM Registration & Heartbeat | 26 |
 | REQ-MSG-NNN | 4.7: Messaging System Integration | 28 |
 | REQ-RTE-NNN | 4.8: Resource Operation Routing | 28 |
 | REQ-RCM-NNN | 4.9: Retry & Cancel Mechanisms | 26 |
@@ -2406,4 +2543,4 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
 | REQ-XC-CE-NNN | 5.2: CloudEvent Definitions | 5 |
 | REQ-XC-LOG-NNN | 5.3: Logging | 3 |
 | REQ-XC-CFG-NNN | 5.4: Configuration Management | 6 |
-| **Total** | | **213** |
+| **Total** | | **220** |
