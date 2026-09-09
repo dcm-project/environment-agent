@@ -7,7 +7,7 @@ Standalone compose stack: NATS + environment-agent. For control-plane + agent to
 
 | Model | When                                                | Guide |
 |-------|-----------------------------------------------------|--------|
-| **Compose outside the cluster** | Local dev with Kind; agent in Docker/Podman compose | Quick start below + [Compose + Kind](docs/compose-kind.md) |
+| **Compose outside the cluster** | Local dev with Kind or OpenShift; agent in compose | [Compose + Kubernetes](docs/compose-kind.md) + [control-plane agent guide](https://github.com/dcm-project/control-plane/blob/main/deploy/docs/environment-agent-kind.md) |
 | **In-cluster** | Agent Pod on the same cluster as SP workloads       | [In-cluster agent](docs/in-cluster.md) |
 
 ## Prerequisites
@@ -36,6 +36,7 @@ cp deploy/.env.example deploy/.env
 make install-kubevirt          # when vm is in AGENT_EMBEDDED_SPS (before compose-up registers the SP)
 make kubeconfig-for-compose    # deploy/.kube/config ready before compose bind-mounts it
 make compose-up
+# make compose-up-with-nats    # agent + bundled NATS (--profile nats)
 make kind-connect              # join Kind to compose network (after compose-up)
 make deploy-verify
 ```
@@ -55,12 +56,17 @@ See [in-cluster.md](docs/in-cluster.md) for full detail.
 kubectl config use-context kind-dcm-local
 make install-kubevirt          # when vm is in AGENT_EMBEDDED_SPS
 make k8s-deploy
+# make k8s-deploy-with-nats    # bundled in-cluster NATS + nats-init
 make k8s-verify
 ```
 
 ```bash
-kubectl delete namespace dcm
+kubectl -n dcm delete deployment,service environment-agent --ignore-not-found
+kubectl -n dcm delete serviceaccount environment-agent --ignore-not-found
+kubectl -n default delete role,rolebinding environment-agent-workloads --ignore-not-found
 ```
+
+Full teardown when nothing else uses the namespace: `kubectl delete namespace dcm`
 
 ## Test with sample create requests
 
@@ -91,15 +97,13 @@ kubectl get virtualmachines -A -l dcm.project/managed-by=dcm
 Copy `deploy/.env.example` to `deploy/.env`. With `-f deploy/compose.yaml`, Compose uses `deploy/` as the
 project directory, so `.env` and paths like `.kube/config` resolve there automatically.
 
-Compose + Kind and in-cluster Kind are both local workflows. They share
-the default image tag `dev` (`ENVIRONMENT_AGENT_VERSION`) and `make image-build` output, so you can
-switch between compose and in-cluster without rebuilding under a different tag. For production
-deployments, pin `ENVIRONMENT_AGENT_VERSION`  to a release image.
+Compose and in-cluster deploy share the default image tag `main` (`ENVIRONMENT_AGENT_VERSION`).
+Override to pin another release or a local tag (e.g. when building with `make image-build`).
 
 | Variable | Default | Notes |
 |----------|-------|------------------------|
 | `AGENT_EMBEDDED_SPS` | _empty_ (set in .env) | e.g. `container`, `vm`, `cluster`|
-| `ENVIRONMENT_AGENT_VERSION` | `dev` | Local image tag for compose and `k8s-deploy`. Pin a release tag for production |
+| `ENVIRONMENT_AGENT_VERSION` | `main` | Image tag for compose and `k8s-deploy` |
 | `AGENT_KUBECONFIG_HOST` | `.kube/config` | Host kubeconfig; written by `make kubeconfig-for-compose` |
 | `SP_DEFAULT_KUBECONFIG` | `/kubeconfig` | In-container path (set in `compose.yaml`; do not set in `.env`) |
 | `SP_CONTAINER_NAMESPACE` | `default` | Container SP workloads — create on the cluster if changed |

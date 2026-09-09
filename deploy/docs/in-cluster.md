@@ -21,7 +21,9 @@ For Kind with the agent **outside** the cluster on compose, see [compose-kind.md
 
 ## Try it on Kind (step by step)
 
-This deploys NATS and the environment-agent **inside** the Kind cluster (`deploy/k8s/`).
+This deploys the environment-agent **inside** the Kind cluster (`deploy/k8s/`). The agent Pod
+reaches control-plane and NATS over **in-cluster Service DNS** (not host compose URLs — see
+[compose-kind.md](compose-kind.md) when the agent runs in compose on the host).
 
 ### 1. Create a Kind cluster
 
@@ -38,21 +40,35 @@ so `make k8s-verify` works on Docker Desktop and similar hosts.
 If the manifest (`deploy/k8s/environment-agent.yaml`) enables `vm` SP, install KubeVirt **before** the agent Pod starts:
 
 ```bash
-make install-kubevirt
-kubectl get kv -n kubevirt
+make install-kubevirt    # skips when a KubeVirt CR already exists (e.g. OpenShift CNV)
 ```
 
 ### 3. Build the agent image and deploy it on Kind
+
+Deploy control-plane on the cluster first (for example the
+[control-plane Helm chart](https://github.com/dcm-project/control-plane/blob/main/deploy/helm/dcm/README.md)),
+then edit `deploy/k8s/environment-agent.yaml` (defaults assume Helm release name `dcm` in namespace `dcm`):
+
+| Variable | Example |
+|----------|---------|
+| `DCM_REGISTRATION_URL` | `http://dcm-control-plane.dcm.svc.cluster.local:8080` |
+| `AGENT_MESSAGING_URL` | `nats://dcm-nats.dcm.svc.cluster.local:4222` |
+| `AGENT_EMBEDDED_SPS` | `container,vm` (install KubeVirt before deploy when `vm` is included) |
+| `SP_K8S_EXTERNAL_SVC_TYPE` | `NodePort` on Kind; `LoadBalancer` on OpenShift / cloud |
 
 From the environment-agent repo root:
 
 ```bash
 make k8s-deploy
 ```
-This builds `quay.io/dcm-project/environment-agent:dev`, loads it into the current Kind
-cluster, applies `deploy/k8s/`, runs `nats-init`, and waits for the agent Deployment.
-Compose and in-cluster share the same default tag (`dev`). 
-To pin a release image, set `ENVIRONMENT_AGENT_VERSION`.
+
+This builds `quay.io/dcm-project/environment-agent:main`, loads it into the current Kind
+cluster, applies `deploy/k8s/`, and waits for the agent Deployment.
+
+Set `ENVIRONMENT_AGENT_VERSION` to use another tag; set `BUILD_IMAGE=0` to pull from Quay instead
+of building locally. For bundled in-cluster NATS (no Helm platform stack), use
+`make k8s-deploy-with-nats` (`K8S_DEPLOY_NATS=1`) and set `AGENT_MESSAGING_URL` to
+`nats://nats.dcm.svc.cluster.local:4222`.
 
 ### 4. Verify
 
@@ -71,9 +87,69 @@ make k8s-publish-creates
 
 ### 6. Teardown
 
+Remove the agent only (Helm control-plane stays up; does not delete the `dcm` namespace):
+
+```bash
+kubectl -n dcm delete deployment,service environment-agent --ignore-not-found
+kubectl -n dcm delete serviceaccount environment-agent --ignore-not-found
+kubectl -n default delete role,rolebinding environment-agent-workloads --ignore-not-found
+```
+
+If you deployed bundled NATS (`make k8s-deploy-with-nats`), also:
+
+```bash
+kubectl -n dcm delete deployment,service nats --ignore-not-found
+kubectl -n dcm delete job nats-init --ignore-not-found
+```
+
+Full Kind teardown when the `dcm` namespace has no other workloads:
+
 ```bash
 kubectl delete namespace dcm
 kind delete cluster --name dcm-local
+```
+
+## OpenShift (in-cluster)
+
+Use your `oc login` context.
+
+### 1. Verify CNV / KubeVirt
+
+```bash
+oc get kv -A
+# openshift-cnv   kubevirt-kubevirt-hyperconverged   Deployed
+```
+
+Do not run `make install-kubevirt` when CNV is already deployed.
+
+### 2. Configure and deploy
+
+Find platform services (Helm release namespace; release name is often `dcm`):
+
+```bash
+oc get svc -n <namespace> -l app.kubernetes.io/part-of=dcm
+oc get svc -n <namespace> dcm-nats dcm-control-plane
+```
+
+Edit `deploy/k8s/environment-agent.yaml` before deploy:
+
+| Variable | Example (platform) |
+|----------|-------------------|
+| `DCM_REGISTRATION_URL` | `http://dcm-control-plane.<namespace>.svc.cluster.local:8080` |
+| `AGENT_MESSAGING_URL` | `nats://dcm-nats.<namespace>.svc.cluster.local:4222` |
+| `AGENT_EMBEDDED_SPS` | `container,vm` (install KubeVirt before deploy when `vm` is included) |
+| `SP_K8S_EXTERNAL_SVC_TYPE` | `LoadBalancer` |
+
+```bash
+make k8s-deploy
+```
+
+### 3. Teardown
+
+```bash
+kubectl -n <namespace> delete deployment,service environment-agent --ignore-not-found
+kubectl -n <namespace> delete serviceaccount environment-agent --ignore-not-found
+kubectl -n default delete role,rolebinding environment-agent-workloads --ignore-not-found
 ```
 
 ## Configuration

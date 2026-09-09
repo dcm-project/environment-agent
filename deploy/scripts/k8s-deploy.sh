@@ -13,8 +13,17 @@ BUILD_IMAGE="${BUILD_IMAGE:-1}"
 K8S_DEPLOY_NATS="${K8S_DEPLOY_NATS:-0}"
 
 UTILITIES_DIR="${UTILITIES_DIR:-${ROOT}/../utilities}"
+KIND_ENV="${UTILITIES_DIR}/scripts/kind/kind-env.sh"
+if [[ ! -f "${KIND_ENV}" ]]; then
+	echo "error: ${KIND_ENV} not found — clone utilities beside this repo or set UTILITIES_DIR" >&2
+	exit 1
+fi
 # shellcheck disable=SC1091
-source "${UTILITIES_DIR}/scripts/kind/kind-env.sh"
+source "${KIND_ENV}"
+if ! declare -F kind_try_resolve_from_context >/dev/null; then
+	echo "error: ${KIND_ENV} is missing kind_try_resolve_from_context — update utilities" >&2
+	exit 1
+fi
 
 CLUSTER_TYPE="kubernetes"
 KIND_CLUSTER=""
