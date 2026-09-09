@@ -258,6 +258,27 @@ components:
         - DELETED
       description: Current status of the storage instance (CloudEvents payload uses this enum)
 
+    VolumeAccessMode:
+      type: string
+      enum:
+        - ReadWriteOnce
+        - ReadOnlyMany
+        - ReadWriteMany
+      description: |
+        PVC access mode supplied under provider_hints.kubernetes.
+
+        ReadWriteOnce is typical for block storage; ReadWriteMany for
+        shared filesystem StorageClasses (e.g. CephFS, NFS).
+      example: ReadWriteOnce
+
+    VolumeMode:
+      type: string
+      enum:
+        - Filesystem
+        - Block
+      description: PVC volume mode supplied under provider_hints.kubernetes
+      example: Filesystem
+
     VolumeMetadata:
       type: object
       description: Resource metadata for identification
@@ -288,10 +309,31 @@ components:
           readOnly: true
           description: Bound backend volume name when available
 
+    KubernetesProviderHints:
+      type: object
+      description: |
+        Kubernetes-specific PVC settings supplied under
+        provider_hints.kubernetes.
+
+        Catalog administrators typically set these as non-editable defaults.
+      additionalProperties: false
+      properties:
+        storage_class:
+          type: string
+          description: StorageClass name (overrides SP default)
+          example: gp3-csi
+        volume_mode:
+          $ref: '#/components/schemas/VolumeMode'
+        access_mode:
+          $ref: '#/components/schemas/VolumeAccessMode'
+
     ProviderHints:
       type: object
       description: Provider-specific hints from the catalog
       additionalProperties: true
+      properties:
+        kubernetes:
+          $ref: '#/components/schemas/KubernetesProviderHints'
 
     StorageSpec:
       type: object

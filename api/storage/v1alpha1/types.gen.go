@@ -4,6 +4,8 @@
 package v1alpha1
 
 import (
+	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -85,6 +87,45 @@ func (e StorageStatus) Valid() bool {
 	}
 }
 
+// Defines values for VolumeAccessMode.
+const (
+	ReadOnlyMany  VolumeAccessMode = "ReadOnlyMany"
+	ReadWriteMany VolumeAccessMode = "ReadWriteMany"
+	ReadWriteOnce VolumeAccessMode = "ReadWriteOnce"
+)
+
+// Valid indicates whether the value is a known member of the VolumeAccessMode enum.
+func (e VolumeAccessMode) Valid() bool {
+	switch e {
+	case ReadOnlyMany:
+		return true
+	case ReadWriteMany:
+		return true
+	case ReadWriteOnce:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for VolumeMode.
+const (
+	Block      VolumeMode = "Block"
+	Filesystem VolumeMode = "Filesystem"
+)
+
+// Valid indicates whether the value is a known member of the VolumeMode enum.
+func (e VolumeMode) Valid() bool {
+	switch e {
+	case Block:
+		return true
+	case Filesystem:
+		return true
+	default:
+		return false
+	}
+}
+
 // Error RFC 9457 compliant error response
 type Error struct {
 	// Detail Human-readable explanation specific to this occurrence
@@ -134,8 +175,40 @@ type Health struct {
 	Version *string `json:"version,omitempty"`
 }
 
+// KubernetesProviderHints Kubernetes-specific PVC settings supplied under
+// provider_hints.kubernetes.
+//
+// Catalog administrators typically set these as non-editable defaults.
+type KubernetesProviderHints struct {
+	// AccessMode PVC access mode supplied under provider_hints.kubernetes.
+	//
+	// ReadWriteOnce is typical for block storage; ReadWriteMany for
+	// shared filesystem StorageClasses (e.g. CephFS, NFS).
+	//
+	//
+	// Example: ReadWriteOnce
+	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
+
+	// StorageClass StorageClass name (overrides SP default)
+	//
+	// Example: gp3-csi
+	StorageClass *string `json:"storage_class,omitempty"`
+
+	// VolumeMode PVC volume mode supplied under provider_hints.kubernetes
+	//
+	// Example: Filesystem
+	VolumeMode *VolumeMode `json:"volume_mode,omitempty"`
+}
+
 // ProviderHints Provider-specific hints from the catalog
-type ProviderHints map[string]interface{}
+type ProviderHints struct {
+	// Kubernetes Kubernetes-specific PVC settings supplied under
+	// provider_hints.kubernetes.
+	//
+	// Catalog administrators typically set these as non-editable defaults.
+	Kubernetes           *KubernetesProviderHints `json:"kubernetes,omitempty"`
+	AdditionalProperties map[string]interface{}   `json:"-"`
+}
 
 // StorageSpec Storage specification for creating a volume (implements the portable storage service type)
 type StorageSpec struct {
@@ -183,6 +256,14 @@ type Volume struct {
 	UpdateTime *time.Time `json:"update_time,omitempty"`
 }
 
+// VolumeAccessMode PVC access mode supplied under provider_hints.kubernetes.
+//
+// ReadWriteOnce is typical for block storage; ReadWriteMany for
+// shared filesystem StorageClasses (e.g. CephFS, NFS).
+//
+// Example: ReadWriteOnce
+type VolumeAccessMode string
+
 // VolumeList Paginated list of volume instances
 type VolumeList struct {
 	// NextPageToken Token for retrieving the next page of results
@@ -208,6 +289,11 @@ type VolumeMetadata struct {
 	VolumeName *string `json:"volume_name,omitempty"`
 }
 
+// VolumeMode PVC volume mode supplied under provider_hints.kubernetes
+//
+// Example: Filesystem
+type VolumeMode string
+
 // VolumeIdPath defines model for VolumeIdPath.
 type VolumeIdPath = string
 
@@ -230,3 +316,71 @@ type CreateVolumeParams struct {
 
 // CreateVolumeJSONRequestBody defines body for CreateVolume for application/json ContentType.
 type CreateVolumeJSONRequestBody = Volume
+
+// Getter for additional properties for ProviderHints. Returns the specified
+// element and whether it was found
+func (a ProviderHints) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for ProviderHints
+func (a *ProviderHints) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for ProviderHints to handle AdditionalProperties
+func (a *ProviderHints) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["kubernetes"]; found {
+		err = json.Unmarshal(raw, &a.Kubernetes)
+		if err != nil {
+			return fmt.Errorf("error reading 'kubernetes': %w", err)
+		}
+		delete(object, "kubernetes")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for ProviderHints to handle AdditionalProperties
+func (a ProviderHints) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.Kubernetes != nil {
+		object["kubernetes"], err = json.Marshal(a.Kubernetes)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'kubernetes': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
