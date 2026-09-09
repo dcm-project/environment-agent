@@ -42,6 +42,22 @@ func defaultConfig() *config.Config {
 	if os.Getenv("AGENT_SP_PERSISTENCE_PATH") == "" {
 		cfg.Provider.PersistencePath = filepath.Join(GinkgoT().TempDir(), "registrations.json")
 	}
+	// Registering an external provider triggers a synchronous initial health
+	// check (ProviderService.trackExternalProvider -> Monitor.RegisterProvider
+	// with initialCheck=true) against the provider's endpoint before the HTTP
+	// response is sent. Test bodies use fake endpoints like
+	// "https://sp.example.com" that are never intended to be reached, but a
+	// real DNS lookup/connection attempt is still made and is only bounded by
+	// HealthConfig.CheckTimeout (production default 5s). Under CI network
+	// conditions that attempt can occasionally stall for the full default
+	// timeout, which exceeds the short (e.g. 2s) client timeouts used by
+	// these tests and manifests as a spurious "context deadline exceeded"
+	// on the registration request itself. Use a tiny bound here so a slow/
+	// stalled connection attempt fails fast and deterministically instead of
+	// racing the test's own client timeout.
+	if os.Getenv("AGENT_HEALTH_CHECK_TIMEOUT") == "" {
+		cfg.Health.CheckTimeout = 200 * time.Millisecond
+	}
 	return cfg
 }
 

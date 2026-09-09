@@ -84,6 +84,11 @@ the DCM control plane when the control plane has authentication enabled. Two
 modes are available; when neither is configured, requests are sent without an
 `Authorization` header (backward-compatible default).
 
+See the DCM [authentication user guide](https://dcm-project.github.io/docs/getting-started/authentication/)
+([dcm-project.github.io#22](https://github.com/dcm-project/dcm-project.github.io/pull/22))
+for the control plane's OIDC/JWT behavior, issuer/audience configuration, and
+the reference Keycloak stack used by `make compose-up`.
+
 ### Mode 1: OAuth2 Client Credentials (recommended for production)
 
 The agent obtains short-lived JWTs from an OIDC token endpoint using the
@@ -113,7 +118,19 @@ existing backoff logic.
 1. Create a service-account client in the DCM realm (e.g. `environment-agent`).
 2. Enable **Client authentication** and **Service accounts roles**.
 3. Assign the role(s) the control plane expects for agent registration.
-4. Set the three `DCM_AUTH_*` variables to the client's credentials.
+4. Attach an audience mapper for `aud=dcm-api` to the client (see caveat below).
+5. Set the three `DCM_AUTH_*` variables to the client's credentials.
+
+> **Known gap — audience mapper missing for the agent client:** The control
+> plane requires `aud=dcm-api` on inbound tokens, but in the reference
+> Keycloak realm the `dcm-api` audience mapper is shipped attached only to the
+> `dcm-proxy` and `dcm-cli` clients, not to the agent's service-account client.
+> Validating the full registration flow against that stock realm produces a
+> token without the `dcm-api` audience, and the control plane rejects it with
+> `401`. Until an equivalent mapper is added for the agent's client (or the
+> realm's reference config is updated upstream), explicitly attach a
+> `dcm-api` audience mapper to the client created above before relying on
+> Mode 1 against the reference stack.
 
 #### Kubernetes Secrets
 
