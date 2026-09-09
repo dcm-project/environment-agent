@@ -23,6 +23,12 @@ var ErrNonRetryable = errors.New("non-retryable DCM error")
 // cadence rather than this "should never happen" path.
 const registrarPanicRestartDelay = 1 * time.Second
 
+// defaultRequestTimeout is used when RegistrarConfig.RequestTimeout is unset
+// (zero value) — e.g. a RegistrarConfig literal built directly rather than
+// via config.Load(), which applies DCM_REQUEST_TIMEOUT's own envDefault.
+// Mirrors the PrerequisiteRetryInterval <= 0 fallback in run().
+const defaultRequestTimeout = 10 * time.Second
+
 // ServiceTypeLister returns the set of currently advertisable service types
 // (backed by SPs in Ready or Unhealthy state — NOT Unavailable).
 type ServiceTypeLister interface {
@@ -42,15 +48,22 @@ type ResourceCapacityProvider interface {
 
 // RegistrarConfig holds the configuration for DCM registration.
 type RegistrarConfig struct {
-	AgentName                 string
-	Environment               string
-	Cost                      string
-	TopicName                 string
-	RegistrationURL           string
-	InitialBackoff            time.Duration
-	MaxBackoff                time.Duration
+	AgentName       string
+	Environment     string
+	Cost            string
+	TopicName       string
+	RegistrationURL string
+	InitialBackoff  time.Duration
+	MaxBackoff      time.Duration
+	// RequestTimeout bounds a single registration/re-registration HTTP
+	// attempt (REQ-DCM-122). Applied identically to doRegistration and
+	// reRegister via the shared registerWithRetry — see DD-520 for why this
+	// must not differ between the two. Zero falls back to
+	// defaultRequestTimeout.
+	RequestTimeout            time.Duration
 	HeartbeatInterval         time.Duration
 	PrerequisiteRetryInterval time.Duration
+	TokenSource               TokenSource
 }
 
 // Registrar handles DCM registration and heartbeat lifecycle.
@@ -79,7 +92,7 @@ func NewRegistrar(
 	resourceProvider ResourceCapacityProvider,
 	logger *slog.Logger,
 ) (*Registrar, error) {
-	client, err := newDCMClient(cfg.RegistrationURL)
+	client, err := newDCMClient(cfg.RegistrationURL, cfg.TokenSource)
 	if err != nil {
 		return nil, err
 	}
@@ -224,19 +237,39 @@ func (r *Registrar) run(ctx context.Context, restartAttempt int) {
 
 // doRegistration attempts registration with backoff. Returns true on success, false on permanent failure or cancellation.
 func (r *Registrar) doRegistration(ctx context.Context) bool {
+	return r.registerWithRetry(ctx, "registered with DCM")
+}
+
+// registerWithRetry sends the current registration payload, retrying
+// retryable failures with the shared backoff policy (REQ-DCM-050) until
+// success, a non-retryable error, or context cancellation. On success, the
+// agent ID is updated and successLogMsg is logged at INFO with agent_id.
+// A signal on notifyCh while waiting out the backoff resets the attempt
+// counter and immediately retries — the next register() call already picks
+// up the latest advertisable state via buildPayload(), so the coalesced
+// notification needs no separate handling. Shared by both initial
+// registration and re-registration so a transient failure (e.g. a token
+// endpoint outage) during re-registration doesn't silently drop the
+// service-type-change notification and leave DCM with stale capabilities.
+func (r *Registrar) registerWithRetry(ctx context.Context, successLogMsg string) bool {
+	timeout := r.config.RequestTimeout
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
+
 	attempt := 0
 	for {
 		if ctx.Err() != nil {
 			return false
 		}
 
-		agentID, err := r.client.register(ctx, r.buildPayload())
+		agentID, err := r.attemptRegister(ctx, timeout)
 		if err == nil {
 			r.mu.Lock()
 			r.agentID = agentID
 			r.registered = true
 			r.mu.Unlock()
-			r.logger.Info("registered with DCM", "agent_id", agentID)
+			r.logger.Info(successLogMsg, "agent_id", agentID)
 			return true
 		}
 
@@ -265,6 +298,19 @@ func (r *Registrar) doRegistration(ctx context.Context) bool {
 		case <-timer.C:
 		}
 	}
+}
+
+// attemptRegister performs a single registration/re-registration HTTP call
+// bounded by timeout (REQ-DCM-122), so a DCM connection that is accepted but
+// never answered fails this one attempt instead of blocking the registrar's
+// event loop for the underlying HTTP client's full timeout. A fresh child
+// context is created per attempt (not once for the whole retry loop) so the
+// backoff-and-retry cadence itself is unaffected — only each individual
+// attempt is bounded.
+func (r *Registrar) attemptRegister(ctx context.Context, timeout time.Duration) (string, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return r.client.register(reqCtx, r.buildPayload())
 }
 
 func (r *Registrar) computeBackoff(err error, attempt int) time.Duration {
@@ -302,20 +348,17 @@ func (r *Registrar) sendHeartbeat(ctx context.Context) {
 	r.logger.Debug("heartbeat succeeded", "agent_id", id, "consumer_lag", payload.ConsumerLag)
 }
 
+// reRegister re-sends the full registration payload in response to a
+// service-type-change notification (REQ-DCM-120), retrying transient
+// failures via registerWithRetry rather than dropping the change after a
+// single attempt — a transient outage (e.g. the token endpoint) must not
+// leave DCM with stale advertised capabilities indefinitely. The retry loop
+// blocks the caller (run()'s event loop) until it succeeds, hits a
+// non-retryable error, or ctx is cancelled; a non-retryable error or
+// cancellation is only reachable here via the same paths registerWithRetry
+// already logs, so nothing further needs handling at this call site.
 func (r *Registrar) reRegister(ctx context.Context) {
-	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	agentID, err := r.client.register(reqCtx, r.buildPayload())
-	if err != nil {
-		r.logger.Warn("re-registration failed", "error", err)
-		return
-	}
-	r.mu.Lock()
-	r.agentID = agentID
-	r.registered = true
-	r.mu.Unlock()
-	r.logger.Info("re-registered with DCM", "agent_id", agentID)
+	r.registerWithRetry(ctx, "re-registered with DCM")
 }
 
 func (r *Registrar) buildPayload() registrationPayload {
