@@ -257,7 +257,7 @@ components:
 
     Error:
       type: object
-      description: RFC 7807 compliant error response
+      description: Problem details error response (RFC 9457)
       required:
         - type
         - title
