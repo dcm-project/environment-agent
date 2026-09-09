@@ -57,6 +57,26 @@ Never edit generated files (`*.gen.go`) directly.
 make image-build   # Build container image using podman/docker
 ```
 
+### Local deployment (Kind + Compose)
+
+See [deploy/DEPLOY.md](deploy/DEPLOY.md) for full setup. This requires Kind with a running cluster and the
+[utilities](https://github.com/dcm-project/utilities) repo as a sibling directory (`../utilities`):
+
+```bash
+cp deploy/.env.example deploy/.env
+make install-kubevirt          # when vm is in AGENT_EMBEDDED_SPS
+make kubeconfig-for-compose
+make compose-up
+make kind-connect
+make deploy-verify
+```
+
+For integration with the control-plane stack, see
+[control-plane deploy/docs/environment-agent-kind.md](https://github.com/dcm-project/control-plane/blob/main/deploy/docs/environment-agent-kind.md).
+
+To run the agent on the same cluster as embedded SP workloads, see
+[deploy/docs/in-cluster.md](deploy/docs/in-cluster.md) (`make k8s-deploy` on Kind).
+
 ## API Endpoints
 
 | Method | Endpoint                              | Description                         |

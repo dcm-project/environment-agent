@@ -1,0 +1,304 @@
+# Agent in the Same Cluster as Workloads
+
+Run the environment-agent as a Pod on the Kubernetes cluster where embedded Service Providers 
+create workloads. The agent talks to the API server via the pod `ServiceAccount` (in-cluster auth).
+
+Use this model when:
+
+- DCM control-plane and NATS also run on the cluster (for example via the
+  [control-plane Helm chart](https://github.com/dcm-project/control-plane/blob/main/deploy/helm/dcm/README.md))
+- The agent runs as a Pod on the cluster (not in a compose stack on the host)
+
+For Kind with the agent **outside** the cluster on compose, see [compose-kind.md](compose-kind.md).
+
+## Prerequisites
+
+- Kubernetes 1.24+ or OpenShift 4.12+
+- **KubeVirt** installed on the cluster when `vm` is in `AGENT_EMBEDDED_SPS` (install before the
+  agent Pod starts so vm SP registration succeeds)
+- Workload namespaces exist if you change defaults (`SP_CONTAINER_NAMESPACE`, `SP_VM_NAMESPACE`, `SP_STORAGE_NAMESPACE`)
+- Outbound reachability from the agent Pod to control-plane HTTP and NATS
+
+## Try it on Kind (step by step)
+
+This deploys the environment-agent **inside** the Kind cluster (`deploy/k8s/`). The agent Pod
+reaches control-plane and NATS over **in-cluster Service DNS** (not host compose URLs — see
+[compose-kind.md](compose-kind.md) when the agent runs in compose on the host).
+
+### 1. Create a Kind cluster
+
+```bash
+kind create cluster --name dcm-local --config deploy/k8s/kind-local.yaml
+kubectl config use-context kind-dcm-local
+```
+
+The `deploy/k8s/kind-local.yaml` maps NodePorts `30081` and `30422` to localhost
+so `make k8s-verify` works on Docker Desktop and similar hosts.
+
+### 2. Install KubeVirt (when `vm` is in `AGENT_EMBEDDED_SPS`)
+
+If the manifest (`deploy/k8s/environment-agent.yaml`) enables `vm` SP, install KubeVirt **before** the agent Pod starts:
+
+```bash
+make install-kubevirt    # skips when a KubeVirt CR already exists (e.g. OpenShift CNV)
+```
+
+### 3. Build the agent image and deploy it on Kind
+
+Deploy control-plane on the cluster first (for example the
+[control-plane Helm chart](https://github.com/dcm-project/control-plane/blob/main/deploy/helm/dcm/README.md)),
+then edit `deploy/k8s/environment-agent.yaml` (defaults assume Helm release name `dcm` in namespace `dcm`):
+
+| Variable | Example |
+|----------|---------|
+| `DCM_REGISTRATION_URL` | `http://dcm-control-plane.dcm.svc.cluster.local:8080` |
+| `AGENT_MESSAGING_URL` | `nats://dcm-nats.dcm.svc.cluster.local:4222` |
+| `AGENT_EMBEDDED_SPS` | `container,vm` (install KubeVirt before deploy when `vm` is included) |
+| `SP_K8S_EXTERNAL_SVC_TYPE` | `NodePort` on Kind; `LoadBalancer` on OpenShift / cloud |
+
+From the environment-agent repo root:
+
+```bash
+make k8s-deploy
+```
+
+This builds `quay.io/dcm-project/environment-agent:main`, loads it into the current Kind
+cluster, applies `deploy/k8s/`, and waits for the agent Deployment.
+
+Set `ENVIRONMENT_AGENT_VERSION` to use another tag; set `BUILD_IMAGE=0` to pull from Quay instead
+of building locally. For bundled in-cluster NATS (no Helm platform stack), use
+`make k8s-deploy-with-nats` (`K8S_DEPLOY_NATS=1`) and set `AGENT_MESSAGING_URL` to
+`nats://nats.dcm.svc.cluster.local:4222`.
+
+### 4. Verify
+
+```bash
+make k8s-verify
+```
+
+You should see agent health and embedded providers (if enabled). DCM registration retries
+until a control-plane is reachable.
+
+### 5. Publish sample create requests
+
+```bash
+make k8s-publish-creates
+```
+
+### 6. Teardown
+
+Remove the agent only (Helm control-plane stays up; does not delete the `dcm` namespace):
+
+```bash
+kubectl -n dcm delete deployment,service environment-agent --ignore-not-found
+kubectl -n dcm delete serviceaccount environment-agent --ignore-not-found
+kubectl -n default delete role,rolebinding environment-agent-workloads --ignore-not-found
+```
+
+If you deployed bundled NATS (`make k8s-deploy-with-nats`), also:
+
+```bash
+kubectl -n dcm delete deployment,service nats --ignore-not-found
+kubectl -n dcm delete job nats-init --ignore-not-found
+```
+
+Full Kind teardown when the `dcm` namespace has no other workloads:
+
+```bash
+kubectl delete namespace dcm
+kind delete cluster --name dcm-local
+```
+
+## OpenShift (in-cluster)
+
+Use your `oc login` context.
+
+### 1. Verify CNV / KubeVirt
+
+```bash
+oc get kv -A
+# openshift-cnv   kubevirt-kubevirt-hyperconverged   Deployed
+```
+
+Do not run `make install-kubevirt` when CNV is already deployed.
+
+### 2. Configure and deploy
+
+Find platform services (Helm release namespace; release name is often `dcm`):
+
+```bash
+oc get svc -n <namespace> -l app.kubernetes.io/part-of=dcm
+oc get svc -n <namespace> dcm-nats dcm-control-plane
+```
+
+Edit `deploy/k8s/environment-agent.yaml` before deploy:
+
+| Variable | Example (platform) |
+|----------|-------------------|
+| `DCM_REGISTRATION_URL` | `http://dcm-control-plane.<namespace>.svc.cluster.local:8080` |
+| `AGENT_MESSAGING_URL` | `nats://dcm-nats.<namespace>.svc.cluster.local:4222` |
+| `AGENT_EMBEDDED_SPS` | `container,vm` (install KubeVirt before deploy when `vm` is included) |
+| `SP_K8S_EXTERNAL_SVC_TYPE` | `LoadBalancer` |
+
+```bash
+make k8s-deploy
+```
+
+### 3. Teardown
+
+```bash
+kubectl -n <namespace> delete deployment,service environment-agent --ignore-not-found
+kubectl -n <namespace> delete serviceaccount environment-agent --ignore-not-found
+kubectl -n default delete role,rolebinding environment-agent-workloads --ignore-not-found
+```
+
+## Configuration
+
+Do **not** set `SP_DEFAULT_KUBECONFIG` and do **not** mount a kubeconfig file. When unset, embedded SPs
+use in-cluster configuration (see `internal/config/config.go` and `internal/openshift/kubeconfig/rest.go`).
+
+Typical environment variables for a Pod in namespace `dcm`:
+
+```yaml
+env:
+  - name: AGENT_EMBEDDED_SPS
+    value: "container,vm"
+  - name: AGENT_NAME
+    value: "cluster-agent"
+  - name: DCM_REGISTRATION_URL
+    value: "http://dcm-control-plane:8080"
+  - name: AGENT_MESSAGING_URL
+    value: "nats://dcm-nats:4222"
+  - name: SP_CONTAINER_NAMESPACE
+    value: default
+  - name: SP_K8S_EXTERNAL_SVC_TYPE
+    value: LoadBalancer
+  - name: SP_VM_NAMESPACE
+    value: default
+  - name: AGENT_SP_PERSISTENCE_PATH
+    value: /var/lib/environment-agent/data/registrations.json
+```
+
+## ServiceAccount and RBAC
+
+Bind the agent Pod to a `ServiceAccount` with permissions in each namespace where SPs create
+workloads (not only the agent's own namespace).
+
+**Container SP** (namespace = `SP_CONTAINER_NAMESPACE`):
+
+```yaml
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "secrets", "persistentvolumeclaims", "events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+```
+
+**VM SP** (namespace = `SP_VM_NAMESPACE`):
+
+```yaml
+rules:
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines", "virtualmachineinstances"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+```
+
+Example Role + RoleBinding when the agent runs in `dcm` and workloads land in `default`:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: environment-agent
+  namespace: dcm
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: environment-agent-workloads
+  namespace: default
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "secrets", "persistentvolumeclaims", "events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines", "virtualmachineinstances"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: environment-agent-workloads
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: environment-agent-workloads
+subjects:
+  - kind: ServiceAccount
+    name: environment-agent
+    namespace: dcm
+```
+
+If container and VM namespaces differ, create a Role (or tailored rules) in each namespace and bind
+the same `ServiceAccount`.
+
+## Pod spec essentials
+
+```yaml
+spec:
+  serviceAccountName: environment-agent
+  containers:
+    - name: environment-agent
+      image: quay.io/dcm-project/environment-agent:<release-tag>
+      # No kubeconfig volume — in-cluster auth only
+      volumeMounts:
+        - name: registrations
+          mountPath: /var/lib/environment-agent/data
+  volumes:
+    - name: registrations
+      emptyDir: {}
+```
+
+`AGENT_SP_PERSISTENCE_PATH` must be a file (JSON store), not the mount path. Mount the volume on
+the parent directory (e.g. `.../data`) and point the env var at `.../data/registrations.json`.
+
+Use a PVC instead of `emptyDir` if SP registrations must survive Pod restarts.
+
+## Verify
+
+```bash
+make k8s-verify
+make k8s-publish-creates
+```
+
+## Troubleshooting
+
+**Embedded SP missing or unhealthy after start**
+
+- Confirm KubeVirt is Available before the agent Pod starts when `vm` is enabled.
+- Check agent logs for RBAC `Forbidden` errors against workload namespaces.
+
+**Agent not reachable when `make k8s-verify` fails**
+
+- Confirm the agent pod is running: `kubectl -n dcm get pods,svc`
+- Recreate the cluster with `deploy/k8s/kind-local.yaml` so NodePorts are on localhost
+- Otherwise try the node IP and NodePort `30081`:
+
+```bash
+NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+curl "http://${NODE_IP}:30081/api/v1alpha1/health"
+```
+
+- Fallback: port-forward and verify manually:
+
+```bash
+kubectl -n dcm port-forward svc/environment-agent 8081:8080
+curl http://127.0.0.1:8081/api/v1alpha1/health
+AGENT_URL=http://127.0.0.1:8081 make deploy-verify
+```

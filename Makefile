@@ -8,6 +8,24 @@ CONTAINER_ENGINE ?= $(shell \
 		echo docker; \
 	fi)
 
+COMPOSE_FILE := deploy/compose.yaml
+COMPOSE_PROJECT_NAME ?= environment-agent
+COMPOSE_NETWORK := $(COMPOSE_PROJECT_NAME)_default
+UTILITIES_DIR ?= ../utilities
+KIND_SCRIPTS_DIR ?= $(UTILITIES_DIR)/scripts/kind
+COMPOSE_SCRIPTS_DIR ?= $(UTILITIES_DIR)/scripts/compose
+KUBEVIRT_SCRIPTS_DIR ?= $(UTILITIES_DIR)/scripts/kubevirt
+COMPOSE_NETWORKS ?= deploy_default $(COMPOSE_NETWORK)
+# Image tag shared by compose-up and k8s-deploy (override for other versions).
+ENVIRONMENT_AGENT_VERSION ?= main
+
+COMPOSE ?= $(shell command -v podman-compose >/dev/null 2>&1 && echo podman-compose || \
+	(command -v docker-compose >/dev/null 2>&1 && echo docker-compose || \
+	(echo "$(CONTAINER_ENGINE) compose")))
+
+export COMPOSE_PROJECT_NAME
+export ENVIRONMENT_AGENT_VERSION
+
 # CONTAINER_IMAGE_NAME: FQDN (without tag) of the container image. Set to override.
 CONTAINER_IMAGE_NAME ?= quay.io/dcm-project/${BINARY_NAME}
 
@@ -21,6 +39,65 @@ build:
 
 run:
 	go run ./cmd/$(BINARY_NAME)
+
+# Standalone stack: environment-agent (see deploy/DEPLOY.md).
+compose-up:
+	$(COMPOSE) -f $(COMPOSE_FILE) up -d --build
+
+# Standalone stack with bundled NATS (set AGENT_MESSAGING_URL=nats://nats:4222 in deploy/.env).
+compose-up-with-nats:
+	$(COMPOSE) -f $(COMPOSE_FILE) --profile nats up -d --build
+
+# Tear down compose stacks. Disconnect Kind first so network removal succeeds.
+compose-down: kind-disconnect disconnect-compose-networks
+	$(COMPOSE) -f $(COMPOSE_FILE) down -v --remove-orphans
+	$(MAKE) remove-compose-networks
+
+kubeconfig-for-compose:
+	DEPLOY_ROOT="$(CURDIR)" bash $(KIND_SCRIPTS_DIR)/kubeconfig-for-compose.sh
+
+kind-connect:
+	COMPOSE_NETWORK=$(COMPOSE_NETWORK) CONTAINER_ENGINE=$(CONTAINER_ENGINE) \
+		bash $(KIND_SCRIPTS_DIR)/kind-connect.sh
+
+kind-disconnect:
+	@COMPOSE_NETWORK=$(COMPOSE_NETWORK) CONTAINER_ENGINE=$(CONTAINER_ENGINE) \
+		bash $(KIND_SCRIPTS_DIR)/kind-disconnect.sh || true
+
+disconnect-compose-networks:
+	@COMPOSE_NETWORKS="$(COMPOSE_NETWORKS)" CONTAINER_ENGINE=$(CONTAINER_ENGINE) \
+		bash $(COMPOSE_SCRIPTS_DIR)/network-teardown.sh disconnect || true
+
+remove-compose-networks:
+	@COMPOSE_NETWORKS="$(COMPOSE_NETWORKS)" CONTAINER_ENGINE=$(CONTAINER_ENGINE) \
+		bash $(COMPOSE_SCRIPTS_DIR)/network-teardown.sh remove || true
+
+install-kubevirt:
+	bash $(KUBEVIRT_SCRIPTS_DIR)/install-kubevirt.sh
+
+k8s-deploy:
+	bash deploy/scripts/k8s-deploy.sh
+
+k8s-deploy-with-nats:
+	K8S_DEPLOY_NATS=1 bash deploy/scripts/k8s-deploy.sh
+
+# NodePorts from deploy/k8s/ (agent 30081, NATS 30422; reach via Kind node IP on Linux).
+K8S_AGENT_NODE_PORT ?= 30081
+K8S_NATS_NODE_PORT ?= 30422
+
+k8s-verify:
+	@AGENT_URL="$$(bash deploy/scripts/k8s-host-urls.sh agent)" && \
+	AGENT_URL="$$AGENT_URL" $(MAKE) deploy-verify
+
+k8s-publish-creates:
+	@eval "$$(bash deploy/scripts/k8s-host-urls.sh export)" && \
+	AGENT_URL="$$AGENT_URL" AGENT_MESSAGING_URL="$$AGENT_MESSAGING_URL" $(MAKE) publish-creates
+
+deploy-verify:
+	bash deploy/scripts/verify.sh
+
+publish-creates:
+	bash deploy/scripts/publish-create-requests.sh
 
 clean:
 	rm -rf bin/
@@ -178,9 +255,11 @@ check-container-engine:
 	fi
 
 image-build: check-container-engine
-	$(CONTAINER_ENGINE) build -t $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG) .
+	$(CONTAINER_ENGINE) build -f Containerfile -t $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG) .
 
-.PHONY: build run clean fmt vet lint test test-unit test-integration test-race test-e2e test-all coverage ci tidy check-tidy \
+.PHONY: build run compose-up compose-up-with-nats compose-down kubeconfig-for-compose kind-connect kind-disconnect \
+	disconnect-compose-networks remove-compose-networks install-kubevirt k8s-deploy k8s-deploy-with-nats k8s-verify k8s-publish-creates deploy-verify publish-creates \
+	clean fmt vet lint test test-unit test-integration test-race test-e2e test-all coverage ci tidy check-tidy \
 	generate-types generate-spec generate-server generate-client \
 	generate-cluster-types generate-cluster-spec generate-cluster-api \
 	generate-container-types generate-container-spec generate-container-server generate-container-api \

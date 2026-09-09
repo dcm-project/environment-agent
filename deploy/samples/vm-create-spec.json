@@ -1,0 +1,23 @@
+{
+  "service_type": "vm",
+  "metadata": {
+    "name": "local-fedora-vm"
+  },
+  "guest_os": {
+    "type": "fedora"
+  },
+  "vcpu": {
+    "count": 2
+  },
+  "memory": {
+    "size": "2Gi"
+  },
+  "storage": {
+    "disks": [
+      {
+        "name": "boot",
+        "capacity": "10Gi"
+      }
+    ]
+  }
+}

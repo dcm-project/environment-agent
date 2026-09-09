@@ -19,7 +19,8 @@ WORKDIR /app
 COPY --from=builder /app/environment-agent .
 
 # OpenShift runs arbitrary UIDs in group 0; g+rwX keeps /app usable.
-RUN chown -R 1001:0 /app && chmod -R g+rwX /app
+RUN mkdir -p /app/data && \
+	chown -R 1001:0 /app && chmod -R g+rwX /app
 
 USER 1001
 
