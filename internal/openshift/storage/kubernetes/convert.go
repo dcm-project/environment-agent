@@ -103,15 +103,15 @@ func volumeFromPVC(pvc *corev1.PersistentVolumeClaim, instanceID string) v1alpha
 	}
 }
 
-func buildPVC(spec v1alpha1.StorageSpec, cfg K8sConfig, labels map[string]string) (*corev1.PersistentVolumeClaim, error) {
+func buildPVC(spec v1alpha1.StorageSpec, cfg K8sConfig, labels map[string]string, hints *k8sProviderHints) (*corev1.PersistentVolumeClaim, error) {
 	qty, err := resource.ParseQuantity(spec.Capacity)
 	if err != nil {
-		return nil, &store.InvalidArgumentError{Message: fmt.Sprintf("invalid capacity %q: %v", spec.Capacity, err)}
+		return nil, &store.InvalidArgumentError{Message: fmt.Sprintf("invalid capacity %q", spec.Capacity), Err: err}
 	}
 
-	accessMode, err := resolveAccessMode(spec, cfg.DefaultAccessMode)
+	accessMode, err := resolveAccessMode(hints, cfg.DefaultAccessMode)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolving access mode: %w", err)
 	}
 
 	pvc := &corev1.PersistentVolumeClaim{
@@ -130,19 +130,15 @@ func buildPVC(spec v1alpha1.StorageSpec, cfg K8sConfig, labels map[string]string
 		},
 	}
 
-	storageClass := resolveStorageClass(spec, cfg.DefaultStorageClass)
+	storageClass := resolveStorageClass(hints, cfg.DefaultStorageClass)
 	if storageClass != "" {
 		pvc.Spec.StorageClassName = &storageClass
 	}
 
-	hints, err := k8sHintsFromSpec(spec)
-	if err != nil {
-		return nil, err
-	}
 	if hints != nil && hints.VolumeMode != nil {
 		mode, err := resolveVolumeMode(*hints.VolumeMode)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("resolving volume mode: %w", err)
 		}
 		pvc.Spec.VolumeMode = &mode
 	}
@@ -160,11 +156,7 @@ func resolveVolumeMode(vm string) (corev1.PersistentVolumeMode, error) {
 	}
 }
 
-func resolveAccessMode(spec v1alpha1.StorageSpec, defaultMode string) (corev1.PersistentVolumeAccessMode, error) {
-	hints, err := k8sHintsFromSpec(spec)
-	if err != nil {
-		return "", err
-	}
+func resolveAccessMode(hints *k8sProviderHints, defaultMode string) (corev1.PersistentVolumeAccessMode, error) {
 	if hints != nil && hints.AccessMode != nil {
 		mode := corev1.PersistentVolumeAccessMode(*hints.AccessMode)
 		switch mode {
@@ -186,12 +178,11 @@ func resolveAccessMode(spec v1alpha1.StorageSpec, defaultMode string) (corev1.Pe
 	return corev1.ReadWriteOnce, nil
 }
 
-func resolveStorageClass(spec v1alpha1.StorageSpec, defaultClass string) string {
-	hints, err := k8sHintsFromSpec(spec)
-	if err != nil || hints == nil || hints.StorageClass == nil {
-		return defaultClass
+func resolveStorageClass(hints *k8sProviderHints, defaultClass string) string {
+	if hints != nil && hints.StorageClass != nil {
+		return *hints.StorageClass
 	}
-	return *hints.StorageClass
+	return defaultClass
 }
 
 func storageClassFromPVC(pvc *corev1.PersistentVolumeClaim) string {

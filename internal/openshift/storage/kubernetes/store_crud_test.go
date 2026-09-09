@@ -125,6 +125,12 @@ func withK8sProviderHints(spec v1alpha1.StorageSpec, hints map[string]string) v1
 	return spec
 }
 
+func withK8sProviderHintsRaw(spec v1alpha1.StorageSpec, hints map[string]interface{}) v1alpha1.StorageSpec {
+	ph := v1alpha1.ProviderHints{"kubernetes": hints}
+	spec.ProviderHints = &ph
+	return spec
+}
+
 func createStorageClass(client *fake.Clientset, name string) {
 	sc := &storagev1.StorageClass{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -273,6 +279,36 @@ var _ = Describe("K8s Volume Store CRUD", func() {
 			var invalid *store.InvalidArgumentError
 			Expect(errors.As(err, &invalid)).To(BeTrue())
 			Expect(invalid.Message).To(ContainSubstring("volume mode"))
+		})
+
+		It("returns invalid argument for misspelled kubernetes provider hint keys", func() {
+			s, _ := newTestStore(defaultConfig())
+			spec := withK8sProviderHintsRaw(minimalVolumeSpec("app-data"), map[string]interface{}{
+				"storageclass": "fast-ssd",
+			})
+
+			_, err := s.Create(context.Background(), spec, "app-data")
+			Expect(err).To(HaveOccurred())
+			var invalid *store.InvalidArgumentError
+			Expect(errors.As(err, &invalid)).To(BeTrue())
+			Expect(invalid.Message).To(ContainSubstring("unknown kubernetes provider hint"))
+		})
+
+		It("returns invalid argument for malformed hints before validating default StorageClass", func() {
+			cfg := defaultConfig()
+			cfg.DefaultStorageClass = "missing-default-sc"
+			s, _ := newTestStore(cfg)
+			spec := withK8sProviderHintsRaw(minimalVolumeSpec("app-data"), map[string]interface{}{
+				"storage_class": []string{"not-a-string"},
+			})
+
+			_, err := s.Create(context.Background(), spec, "app-data")
+			Expect(err).To(HaveOccurred())
+			var invalid *store.InvalidArgumentError
+			Expect(errors.As(err, &invalid)).To(BeTrue())
+			var failed *store.FailedPreconditionError
+			Expect(errors.As(err, &failed)).To(BeFalse(),
+				"malformed hints should not be masked by missing default StorageClass validation")
 		})
 	})
 
