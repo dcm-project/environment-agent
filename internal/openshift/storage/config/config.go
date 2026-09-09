@@ -14,7 +14,7 @@ const defaultProviderName = "storage"
 // Config is the root configuration for the embedded storage service provider.
 type Config struct {
 	shared.Config
-	Namespace           string        `env:"SP_K8S_NAMESPACE" envDefault:"default"`
+	Namespace           string        `env:"SP_STORAGE_NAMESPACE" envDefault:"default"`
 	DefaultStorageClass string        `env:"SP_K8S_DEFAULT_STORAGE_CLASS"`
 	DefaultAccessMode   string        `env:"SP_K8S_DEFAULT_ACCESS_MODE" envDefault:"ReadWriteOnce"`
 	DebounceMs          int           `env:"SP_MONITOR_DEBOUNCE_MS" envDefault:"500"`

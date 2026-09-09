@@ -23,6 +23,7 @@ type Config struct {
 	Provider  ProviderConfig  `envPrefix:"AGENT_"`
 	Health    HealthConfig    `envPrefix:"AGENT_"`
 	Agent     AgentConfig     `envPrefix:"AGENT_"`
+	SP        SPConfig        `envPrefix:""`
 	DCM       DCMConfig       `envPrefix:"DCM_"`
 	Heartbeat HeartbeatConfig `envPrefix:"AGENT_"`
 	Messaging MessagingConfig `envPrefix:"AGENT_"`
@@ -62,9 +63,13 @@ type AgentConfig struct {
 	Name        string `env:"NAME"`
 	Environment string `env:"ENVIRONMENT"`
 	Cost        string `env:"COST"`
-	// Kubeconfig is the default kubeconfig path for embedded SPs (AGENT_KUBECONFIG).
-	// When empty, SPs use in-cluster configuration unless overridden per SP.
-	Kubeconfig string `env:"KUBECONFIG"`
+}
+
+// SPConfig holds shared defaults for embedded service providers.
+type SPConfig struct {
+	// DefaultKubeconfig is the kubeconfig path shared by all embedded SPs (SP_DEFAULT_KUBECONFIG).
+	// When empty, SPs use in-cluster configuration unless overridden per SP via SP_KUBECONFIG.
+	DefaultKubeconfig string `env:"SP_DEFAULT_KUBECONFIG"`
 }
 
 // DCMConfig holds DCM registration configuration.

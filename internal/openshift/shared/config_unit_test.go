@@ -6,6 +6,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/dcm-project/environment-agent/internal/config"
 	"github.com/dcm-project/environment-agent/internal/openshift/shared"
 )
 
@@ -21,7 +22,7 @@ var _ = Describe("Config", Label("unit"), func() {
 		Expect(err).To(MatchError("messaging URL is required"))
 	})
 
-	It("uses agent kubeconfig when SP_KUBECONFIG is unset", func() {
+	It("uses kubeconfig from shared.Agent when SP_KUBECONFIG is unset", func() {
 		cfg := shared.Config{}
 		err := shared.LoadInto(&cfg, shared.Agent{
 			MessagingURL: "nats://agent:4222",
@@ -33,7 +34,7 @@ var _ = Describe("Config", Label("unit"), func() {
 		Expect(cfg.Name).To(Equal("test-sp"))
 	})
 
-	It("prefers SP_KUBECONFIG over agent kubeconfig", func() {
+	It("prefers SP_KUBECONFIG over kubeconfig from shared.Agent", func() {
 		GinkgoT().Setenv("SP_KUBECONFIG", "/sp/kubeconfig")
 
 		cfg := shared.Config{}
@@ -52,5 +53,16 @@ var _ = Describe("Config", Label("unit"), func() {
 		err := shared.LoadInto(&cfg, shared.Agent{MessagingURL: "nats://agent:4222"}, "default-sp")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.Name).To(Equal("custom-sp"))
+	})
+
+	It("maps SP_DEFAULT_KUBECONFIG from agent config via FromAgent", func() {
+		GinkgoT().Setenv("SP_DEFAULT_KUBECONFIG", "/etc/agent/kubeconfig")
+		GinkgoT().Setenv("AGENT_MESSAGING_URL", "nats://agent:4222")
+
+		cfg, err := config.Load()
+		Expect(err).NotTo(HaveOccurred())
+		agent := shared.FromAgent(cfg)
+		Expect(agent.Kubeconfig).To(Equal("/etc/agent/kubeconfig"))
+		Expect(agent.MessagingURL).To(Equal("nats://agent:4222"))
 	})
 })

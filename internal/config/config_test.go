@@ -525,6 +525,18 @@ var _ = Describe("Topic 6 Config", Label("unit"), func() {
 	})
 })
 
+var _ = Describe("SP Config", Label("unit"), func() {
+	Describe("Load", func() {
+		It("parses SP_DEFAULT_KUBECONFIG from env", func() {
+			GinkgoT().Setenv("SP_DEFAULT_KUBECONFIG", "/etc/agent/kubeconfig")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.SP.DefaultKubeconfig).To(Equal("/etc/agent/kubeconfig"))
+		})
+	})
+})
+
 // writeConfigFile writes a .env-style (KEY=VALUE per line) config file and
 // points AGENT_CONFIG_FILE at it. This is REQ-XC-CFG-010's MAY-level
 // file-based config support.

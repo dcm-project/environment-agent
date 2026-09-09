@@ -79,15 +79,4 @@ var _ = Describe("Configuration", func() {
 		Expect(cfg).To(BeNil())
 		Expect(err.Error()).To(ContainSubstring("must be LoadBalancer or NodePort"))
 	})
-
-	It("uses agent kubeconfig when SP_KUBECONFIG is unset", func() {
-		_ = os.Setenv("SP_K8S_EXTERNAL_SVC_TYPE", "NodePort")
-
-		cfg, err := config.Load(shared.Agent{
-			MessagingURL: "nats://test:4222",
-			Kubeconfig:   "/etc/agent/kubeconfig",
-		})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg.Kubeconfig).To(Equal("/etc/agent/kubeconfig"))
-	})
 })

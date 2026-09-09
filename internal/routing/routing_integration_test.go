@@ -857,9 +857,10 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		// (SP error / SP call failed, retrying) and success-path (SP
 		// dispatch completed / published CE) log sites are exercised.
 		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "Service Unavailable"}
+		fakeForwarder.FailFirst = 1
 		routingCfg.RetryMaxAttempts = 3
-		routingCfg.RetryBackoff = 20 * time.Millisecond
-		routingCfg.RetryMaxBackoff = 20 * time.Millisecond
+		routingCfg.RetryBackoff = time.Millisecond
+		routingCfg.RetryMaxBackoff = time.Millisecond
 
 		ch := &captureLogHandler{}
 		router = routing.NewRouter(routing.RouterDeps{
@@ -874,13 +875,8 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(json.Unmarshal(createCE, &envelope)).To(Succeed())
 		ceID := envelope.ID
 
-		go func() {
-			defer GinkgoRecover()
-			time.Sleep(5 * time.Millisecond)
-			fakeForwarder.SetCreateErr(nil)
-		}()
 		Expect(router.HandleRequest(ctx, createCE)).To(Succeed())
-		Expect(fakeForwarder.CreateCallCount()).To(BeNumerically(">=", 2))
+		Expect(fakeForwarder.CreateCallCount()).To(Equal(2))
 
 		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.creation-acknowledged"))

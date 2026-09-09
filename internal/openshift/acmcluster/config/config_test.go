@@ -65,27 +65,4 @@ var _ = Describe("Config", func() {
 		Expect(cfg).To(BeNil())
 		Expect(err.Error()).To(ContainSubstring("messaging URL is required"))
 	})
-
-	It("uses agent kubeconfig when SP_KUBECONFIG is unset", func() {
-		setAllRequired()
-
-		cfg, err := config.Load(shared.Agent{
-			MessagingURL: "nats://localhost:4222",
-			Kubeconfig:   "/etc/agent/kubeconfig",
-		})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg.Kubeconfig).To(Equal("/etc/agent/kubeconfig"))
-	})
-
-	It("prefers SP_KUBECONFIG over agent kubeconfig", func() {
-		setAllRequired()
-		GinkgoT().Setenv("SP_KUBECONFIG", "/sp/kubeconfig")
-
-		cfg, err := config.Load(shared.Agent{
-			MessagingURL: "nats://localhost:4222",
-			Kubeconfig:   "/agent/kubeconfig",
-		})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg.Kubeconfig).To(Equal("/sp/kubeconfig"))
-	})
 })

@@ -14,7 +14,7 @@ const defaultProviderName = "container-sp"
 // Config is the root configuration for the embedded container service provider.
 type Config struct {
 	shared.Config
-	Namespace           string        `env:"SP_K8S_NAMESPACE" envDefault:"default"`
+	Namespace           string        `env:"SP_CONTAINER_NAMESPACE" envDefault:"default"`
 	ExternalServiceType string        `env:"SP_K8S_EXTERNAL_SVC_TYPE"`
 	DebounceMs          int           `env:"SP_MONITOR_DEBOUNCE_MS" envDefault:"500"`
 	ResyncPeriod        time.Duration `env:"SP_MONITOR_RESYNC_PERIOD" envDefault:"10m"`

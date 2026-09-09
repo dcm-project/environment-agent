@@ -28,7 +28,7 @@ func FromAgent(cfg *agentconfig.Config) Agent {
 	}
 	return Agent{
 		MessagingURL: cfg.Messaging.URL,
-		Kubeconfig:   cfg.Agent.Kubeconfig,
+		Kubeconfig:   cfg.SP.DefaultKubeconfig,
 	}
 }
 

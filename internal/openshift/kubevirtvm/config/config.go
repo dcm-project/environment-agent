@@ -14,7 +14,7 @@ const defaultProviderName = "kubevirt-vm-sp"
 // Config is the root configuration for the embedded VM service provider.
 type Config struct {
 	shared.Config
-	Namespace          string        `env:"KUBERNETES_NAMESPACE" envDefault:"default"`
+	Namespace          string        `env:"SP_VM_NAMESPACE" envDefault:"default"`
 	Timeout            time.Duration `env:"KUBERNETES_TIMEOUT" envDefault:"60s"`
 	MaxRetries         int           `env:"KUBERNETES_MAX_RETRIES" envDefault:"3"`
 	NATSMaxReconnect   int           `env:"NATS_MAX_RECONNECT" envDefault:"-1"`
