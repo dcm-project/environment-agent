@@ -856,7 +856,12 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		// One retryable failure then success, so both the failure-path
 		// (SP error / SP call failed, retrying) and success-path (SP
 		// dispatch completed / published CE) log sites are exercised.
+		// FailFirst deterministically fails only the first CreateResource
+		// call; using a real wall-clock race (sleep + goroutine clearing
+		// CreateErr) against full-jitter backoff is flaky, since jitter can
+		// legitimately land near zero on consecutive retries.
 		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "Service Unavailable"}
+		fakeForwarder.FailFirst = 1
 		routingCfg.RetryMaxAttempts = 3
 		routingCfg.RetryBackoff = 20 * time.Millisecond
 		routingCfg.RetryMaxBackoff = 20 * time.Millisecond
@@ -874,11 +879,6 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(json.Unmarshal(createCE, &envelope)).To(Succeed())
 		ceID := envelope.ID
 
-		go func() {
-			defer GinkgoRecover()
-			time.Sleep(5 * time.Millisecond)
-			fakeForwarder.SetCreateErr(nil)
-		}()
 		Expect(router.HandleRequest(ctx, createCE)).To(Succeed())
 		Expect(fakeForwarder.CreateCallCount()).To(BeNumerically(">=", 2))
 

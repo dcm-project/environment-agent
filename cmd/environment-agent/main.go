@@ -225,8 +225,10 @@ func run(ctx context.Context) int {
 			RegistrationURL:           cfg.DCM.RegistrationURL,
 			InitialBackoff:            cfg.DCM.InitialBackoff,
 			MaxBackoff:                cfg.DCM.MaxBackoff,
+			RequestTimeout:            cfg.DCM.RequestTimeout,
 			HeartbeatInterval:         cfg.Heartbeat.Interval,
 			PrerequisiteRetryInterval: cfg.DCM.PrerequisiteRetryInterval,
+			TokenSource:               buildTokenSource(cfg),
 		},
 		&serviceTypeLister{providerSvc: providerSvc, logger: logger},
 		msgClient,
@@ -331,4 +333,22 @@ func setupMessaging(cfg *config.Config, logger *slog.Logger) (*messaging.Client,
 		DeferConsume: true,
 	}, logger)
 	return client, topics, nil
+}
+
+// buildTokenSource resolves the outbound auth mode from config. Client
+// credentials takes precedence over static token (DD-500, REQ-DCM-230).
+// Returns nil for no-auth mode (REQ-DCM-240).
+func buildTokenSource(cfg *config.Config) dcm.TokenSource {
+	if cfg.DCM.AuthTokenEndpoint != "" {
+		return dcm.NewClientCredentialsTokenSource(
+			cfg.DCM.AuthTokenEndpoint,
+			cfg.DCM.AuthClientID,
+			cfg.DCM.AuthClientSecret,
+			nil,
+		)
+	}
+	if cfg.DCM.AuthToken != "" {
+		return dcm.NewStaticTokenSource(cfg.DCM.AuthToken)
+	}
+	return nil
 }

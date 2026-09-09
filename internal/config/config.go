@@ -69,10 +69,19 @@ type AgentConfig struct {
 
 // DCMConfig holds DCM registration configuration.
 type DCMConfig struct {
-	RegistrationURL           string        `env:"REGISTRATION_URL"`
-	InitialBackoff            time.Duration `env:"REGISTRATION_INITIAL_BACKOFF" envDefault:"1s"`
-	MaxBackoff                time.Duration `env:"REGISTRATION_MAX_BACKOFF" envDefault:"5m"`
+	RegistrationURL string        `env:"REGISTRATION_URL"`
+	InitialBackoff  time.Duration `env:"REGISTRATION_INITIAL_BACKOFF" envDefault:"1s"`
+	MaxBackoff      time.Duration `env:"REGISTRATION_MAX_BACKOFF" envDefault:"5m"`
+	// RequestTimeout bounds a single registration/re-registration HTTP attempt
+	// (REQ-DCM-122), applied identically regardless of whether the attempt is
+	// the initial registration or a re-registration retry (REQ-DCM-121) — see
+	// DD-520 for why this must not be a re-registration-only timeout.
+	RequestTimeout            time.Duration `env:"REQUEST_TIMEOUT" envDefault:"10s"`
 	PrerequisiteRetryInterval time.Duration `env:"PREREQUISITE_RETRY_INTERVAL" envDefault:"5s"`
+	AuthToken                 string        `env:"AUTH_TOKEN"`
+	AuthTokenEndpoint         string        `env:"AUTH_TOKEN_ENDPOINT"`
+	AuthClientID              string        `env:"AUTH_CLIENT_ID"`
+	AuthClientSecret          string        `env:"AUTH_CLIENT_SECRET"`
 }
 
 // HeartbeatConfig holds heartbeat timing configuration.
@@ -203,6 +212,9 @@ func (c *Config) Validate() error {
 	if err := validateDurationRange("DCM_REGISTRATION_MAX_BACKOFF", c.DCM.MaxBackoff, c.DCM.InitialBackoff, time.Hour); err != nil {
 		return err
 	}
+	if err := validateDurationRange("DCM_REQUEST_TIMEOUT", c.DCM.RequestTimeout, time.Second, 5*time.Minute); err != nil {
+		return err
+	}
 	if err := validateDurationRange("DCM_PREREQUISITE_RETRY_INTERVAL", c.DCM.PrerequisiteRetryInterval, time.Second, 5*time.Minute); err != nil {
 		return err
 	}
@@ -250,6 +262,41 @@ func (c *Config) Validate() error {
 	}
 	if err := validateDurationRange("AGENT_ROUTING_NAK_DELAY", c.Routing.NakDelay, 100*time.Millisecond, 30*time.Second); err != nil {
 		return err
+	}
+	if err := c.validateDCMAuth(); err != nil {
+		return fmt.Errorf("validating DCM authentication: %w", err)
+	}
+	return nil
+}
+
+// validateDCMAuth checks that client-credentials auth config is either fully
+// present or fully absent. Partial configuration is a startup-fatal error
+// (REQ-DCM-250).
+func (c *Config) validateDCMAuth() error {
+	endpoint := c.DCM.AuthTokenEndpoint
+	clientID := c.DCM.AuthClientID
+	clientSecret := c.DCM.AuthClientSecret
+
+	anySet := endpoint != "" || clientID != "" || clientSecret != ""
+	if !anySet {
+		return nil
+	}
+
+	var missing []string
+	if endpoint == "" {
+		missing = append(missing, "DCM_AUTH_TOKEN_ENDPOINT")
+	}
+	if clientID == "" {
+		missing = append(missing, "DCM_AUTH_CLIENT_ID")
+	}
+	if clientSecret == "" {
+		missing = append(missing, "DCM_AUTH_CLIENT_SECRET")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("partial client-credentials auth config: missing %s (all three of DCM_AUTH_TOKEN_ENDPOINT, DCM_AUTH_CLIENT_ID, DCM_AUTH_CLIENT_SECRET must be set together)", strings.Join(missing, ", "))
+	}
+	if err := validateAbsoluteHTTPURL("DCM_AUTH_TOKEN_ENDPOINT", endpoint); err != nil {
+		return fmt.Errorf("client-credentials token endpoint: %w", err)
 	}
 	return nil
 }
