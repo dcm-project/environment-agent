@@ -1,17 +1,20 @@
-# DCM Environment Agent stack (standalone): NATS JetStream + environment-agent.
+# Standalone agent compose stack.
 #
-# Image version: defaults to :dev for local builds. Pin with ENVIRONMENT_AGENT_VERSION in deploy/.env.
-# Local dev: `make compose-up` builds the agent from the repo Containerfile.
+# Default (`make compose-up`): environment-agent only — set AGENT_MESSAGING_URL in deploy/.env
+# to reach control-plane NATS (e.g. nats://host.docker.internal:4222).
+#
+# With bundled NATS (`make compose-up-with-nats` or --profile nats): also starts NATS + nats-init.
+# Set AGENT_MESSAGING_URL=nats://nats:4222 in deploy/.env when using the nats profile.
 #
 # For control-plane + agent on one stack, see the control-plane deploy repo.
 
 x-agent-common: &agent-common
   AGENT_NAME: ${AGENT_NAME:-local-agent}
-  AGENT_ENVIRONMENT: ${AGENT_ENVIRONMENT:-dev}
+  AGENT_ENVIRONMENT: ${AGENT_ENVIRONMENT:-main}
   AGENT_COST: ${AGENT_COST:-low}
   # Base URL only — the agent appends /api/v1alpha1/agents for registration.
   DCM_REGISTRATION_URL: ${DCM_REGISTRATION_URL:-http://host.docker.internal:8080}
-  AGENT_MESSAGING_URL: ${AGENT_MESSAGING_URL:-nats://nats:4222}
+  AGENT_MESSAGING_URL: ${AGENT_MESSAGING_URL:-nats://host.docker.internal:4222}
   AGENT_EMBEDDED_SPS: ${AGENT_EMBEDDED_SPS}
   SP_DEFAULT_KUBECONFIG: /kubeconfig
   SP_CONTAINER_NAMESPACE: ${SP_CONTAINER_NAMESPACE:-default}
@@ -52,6 +55,7 @@ x-nats-init-script: &nats-init-script |
 
 services:
   nats:
+    profiles: ["nats"]
     image: docker.io/library/nats:2-alpine
     command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
     ports:
@@ -65,8 +69,8 @@ services:
       retries: 15
       start_period: 5s
 
-  # One-shot: CP-owned JetStream streams for standalone dev (agent cannot create these).
   nats-init:
+    profiles: ["nats"]
     image: docker.io/natsio/nats-box:0.14.3
     depends_on:
       nats:
@@ -87,16 +91,16 @@ services:
     ports:
       - "${AGENT_PORT:-8081}:8080"
     volumes:
-      # Host path (AGENT_KUBECONFIG_HOST). Run make kubeconfig-for-compose before compose-up.
       - ${AGENT_KUBECONFIG_HOST:-.kube/config}:/kubeconfig:ro
       - agent_data:/app/data
     depends_on:
       nats:
         condition: service_healthy
+        required: false
       nats-init:
         condition: service_completed_successfully
+        required: false
     extra_hosts:
-      # Lets the agent reach a control-plane running on the host (default DCM_REGISTRATION_URL).
       - "host.docker.internal:host-gateway"
 
 volumes:

@@ -40,9 +40,13 @@ build:
 run:
 	go run ./cmd/$(BINARY_NAME)
 
-# Standalone stack: NATS + environment-agent (see deploy/DEPLOY.md).
+# Standalone stack: environment-agent (see deploy/DEPLOY.md).
 compose-up:
 	$(COMPOSE) -f $(COMPOSE_FILE) up -d --build
+
+# Standalone stack with bundled NATS (set AGENT_MESSAGING_URL=nats://nats:4222 in deploy/.env).
+compose-up-with-nats:
+	$(COMPOSE) -f $(COMPOSE_FILE) --profile nats up -d --build
 
 # Tear down compose stacks. Disconnect Kind first so network removal succeeds.
 compose-down: kind-disconnect disconnect-compose-networks
@@ -250,7 +254,7 @@ check-container-engine:
 image-build: check-container-engine
 	$(CONTAINER_ENGINE) build -f Containerfile -t $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG) .
 
-.PHONY: build run compose-up compose-down kubeconfig-for-compose kind-connect kind-disconnect \
+.PHONY: build run compose-up compose-up-with-nats compose-down kubeconfig-for-compose kind-connect kind-disconnect \
 	disconnect-compose-networks remove-compose-networks install-kubevirt k8s-deploy k8s-verify k8s-publish-creates deploy-verify publish-creates \
 	clean fmt vet lint test test-unit test-integration test-race test-e2e test-all coverage ci tidy check-tidy \
 	generate-types generate-spec generate-server generate-client \

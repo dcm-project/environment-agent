@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy NATS + environment-agent on the current kubectl cluster (in-cluster auth).
+# Deploy NATS + environment-agent on the current kubectl/OpenShift cluster (in-cluster auth).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -9,15 +9,28 @@ K8S_DIR="${ROOT}/deploy/k8s"
 TAG="${ENVIRONMENT_AGENT_VERSION:-dev}"
 IMAGE="${CONTAINER_IMAGE_NAME:-quay.io/dcm-project/environment-agent}:${TAG}"
 BUILD_IMAGE="${BUILD_IMAGE:-1}"
-LOAD_INTO_KIND="${LOAD_INTO_KIND:-1}"
 
 UTILITIES_DIR="${UTILITIES_DIR:-${ROOT}/../utilities}"
 # shellcheck disable=SC1091
 source "${UTILITIES_DIR}/scripts/kind/kind-env.sh"
-if kind_resolve_from_context; then
+
+CLUSTER_TYPE="kubernetes"
+KIND_CLUSTER=""
+
+if kind_try_resolve_from_context; then
+	CLUSTER_TYPE="kind"
 	KIND_CLUSTER="${KIND_CONTEXT#kind-}"
-else
-	KIND_CLUSTER=""
+elif kubectl api-resources -o name 2>/dev/null | grep -qE '^routes\.route\.openshift\.io$'; then
+	CLUSTER_TYPE="openshift"
+elif command -v oc >/dev/null 2>&1 && oc api-resources -o name 2>/dev/null | grep -qE '^routes\.route\.openshift\.io$'; then
+	CLUSTER_TYPE="openshift"
+fi
+
+CTX="$(kubectl config current-context 2>/dev/null || true)"
+echo "==> Cluster type: ${CLUSTER_TYPE} (context: ${CTX:-<none>})"
+
+if [[ -z "${LOAD_INTO_KIND:-}" ]]; then
+	LOAD_INTO_KIND="$([[ "${CLUSTER_TYPE}" == "kind" ]] && echo 1 || echo 0)"
 fi
 
 if [[ "${BUILD_IMAGE}" == "1" ]]; then
@@ -28,6 +41,10 @@ fi
 if [[ "${LOAD_INTO_KIND}" == "1" ]] && [[ -n "${KIND_CLUSTER}" ]] && command -v kind >/dev/null 2>&1; then
 	echo "==> Loading ${IMAGE} into kind cluster ${KIND_CLUSTER}"
 	kind load docker-image "${IMAGE}" --name "${KIND_CLUSTER}"
+elif [[ "${CLUSTER_TYPE}" == "openshift" ]] && [[ "${BUILD_IMAGE}" == "1" ]] && [[ "${TAG}" == "dev" ]]; then
+	echo "==> OpenShift: push ${IMAGE} to a registry this cluster can pull, or set ENVIRONMENT_AGENT_VERSION to a published tag"
+	echo "    Example: BUILD_IMAGE=0 ENVIRONMENT_AGENT_VERSION=main make k8s-deploy"
+	echo "    Continuing with manifest apply — image must be pullable or the Deployment will fail."
 fi
 
 apply_manifests() {
@@ -70,5 +87,9 @@ if bash "${SCRIPT_DIR}/k8s-host-urls.sh" check; then
 	echo "  make k8s-publish-creates"
 else
 	echo ""
-	echo "  fix host access (see deploy/docs/in-cluster.md), then: make k8s-verify"
+	if [[ "${CLUSTER_TYPE}" == "openshift" ]]; then
+		echo "  OpenShift: see deploy/docs/in-cluster.md for platform NATS / DCM URLs (oc get svc)"
+	else
+		echo "  fix host access (see deploy/docs/in-cluster.md), then: make k8s-verify"
+	fi
 fi
