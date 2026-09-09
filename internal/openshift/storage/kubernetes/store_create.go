@@ -19,14 +19,19 @@ func (s *K8sVolumeStore) Create(ctx context.Context, spec v1alpha1.StorageSpec, 
 		labels = mergeLabels(labels, *spec.Metadata.Labels)
 	}
 
-	storageClass := resolveStorageClass(spec, s.cfg.DefaultStorageClass)
+	hints, err := k8sHintsFromSpec(spec)
+	if err != nil {
+		return nil, fmt.Errorf("parsing kubernetes provider hints for volume %q: %w", name, err)
+	}
+
+	storageClass := resolveStorageClass(hints, s.cfg.DefaultStorageClass)
 	if storageClass != "" {
 		if err := s.validateStorageClass(ctx, storageClass); err != nil {
 			return nil, fmt.Errorf("validating StorageClass %q for volume %q: %w", storageClass, name, err)
 		}
 	}
 
-	pvc, err := buildPVC(spec, s.cfg, labels)
+	pvc, err := buildPVC(spec, s.cfg, labels, hints)
 	if err != nil {
 		return nil, fmt.Errorf("building PVC for volume %q: %w", name, err)
 	}

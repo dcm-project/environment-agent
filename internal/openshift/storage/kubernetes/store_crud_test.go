@@ -119,6 +119,18 @@ func minimalVolumeSpec(name string) v1alpha1.StorageSpec {
 	}
 }
 
+func withK8sProviderHints(spec v1alpha1.StorageSpec, hints map[string]string) v1alpha1.StorageSpec {
+	ph := v1alpha1.ProviderHints{"kubernetes": hints}
+	spec.ProviderHints = &ph
+	return spec
+}
+
+func withK8sProviderHintsRaw(spec v1alpha1.StorageSpec, hints map[string]interface{}) v1alpha1.StorageSpec {
+	ph := v1alpha1.ProviderHints{"kubernetes": hints}
+	spec.ProviderHints = &ph
+	return spec
+}
+
 func createStorageClass(client *fake.Clientset, name string) {
 	sc := &storagev1.StorageClass{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -154,17 +166,11 @@ var _ = Describe("K8s Volume Store CRUD", func() {
 		It("applies provider hints for storage class, access mode, and volume mode", func() {
 			s, client := newTestStore(defaultConfig())
 			createStorageClass(client, "fast-ssd")
-			accessMode := v1alpha1.ReadWriteMany
-			volumeMode := v1alpha1.Block
-			sc := "fast-ssd"
-			spec := minimalVolumeSpec("hinted-vol")
-			spec.ProviderHints = &v1alpha1.ProviderHints{
-				Kubernetes: &v1alpha1.KubernetesProviderHints{
-					StorageClass: &sc,
-					AccessMode:   &accessMode,
-					VolumeMode:   &volumeMode,
-				},
-			}
+			spec := withK8sProviderHints(minimalVolumeSpec("hinted-vol"), map[string]string{
+				"storage_class": "fast-ssd",
+				"access_mode":   "ReadWriteMany",
+				"volume_mode":   "Block",
+			})
 
 			_, err := s.Create(context.Background(), spec, "hinted-vol")
 			Expect(err).NotTo(HaveOccurred())
@@ -241,11 +247,9 @@ var _ = Describe("K8s Volume Store CRUD", func() {
 
 		It("returns failed precondition when StorageClass does not exist", func() {
 			s, _ := newTestStore(defaultConfig())
-			sc := "missing-sc"
-			spec := minimalVolumeSpec("app-data")
-			spec.ProviderHints = &v1alpha1.ProviderHints{
-				Kubernetes: &v1alpha1.KubernetesProviderHints{StorageClass: &sc},
-			}
+			spec := withK8sProviderHints(minimalVolumeSpec("app-data"), map[string]string{
+				"storage_class": "missing-sc",
+			})
 
 			_, err := s.Create(context.Background(), spec, "app-data")
 			Expect(err).To(HaveOccurred())
@@ -266,17 +270,45 @@ var _ = Describe("K8s Volume Store CRUD", func() {
 
 		It("returns invalid argument for unsupported volume mode", func() {
 			s, _ := newTestStore(defaultConfig())
-			badMode := v1alpha1.VolumeMode("Raw")
-			spec := minimalVolumeSpec("app-data")
-			spec.ProviderHints = &v1alpha1.ProviderHints{
-				Kubernetes: &v1alpha1.KubernetesProviderHints{VolumeMode: &badMode},
-			}
+			spec := withK8sProviderHints(minimalVolumeSpec("app-data"), map[string]string{
+				"volume_mode": "Raw",
+			})
 
 			_, err := s.Create(context.Background(), spec, "app-data")
 			Expect(err).To(HaveOccurred())
 			var invalid *store.InvalidArgumentError
 			Expect(errors.As(err, &invalid)).To(BeTrue())
 			Expect(invalid.Message).To(ContainSubstring("volume mode"))
+		})
+
+		It("returns invalid argument for misspelled kubernetes provider hint keys", func() {
+			s, _ := newTestStore(defaultConfig())
+			spec := withK8sProviderHintsRaw(minimalVolumeSpec("app-data"), map[string]interface{}{
+				"storageclass": "fast-ssd",
+			})
+
+			_, err := s.Create(context.Background(), spec, "app-data")
+			Expect(err).To(HaveOccurred())
+			var invalid *store.InvalidArgumentError
+			Expect(errors.As(err, &invalid)).To(BeTrue())
+			Expect(invalid.Message).To(ContainSubstring("unknown kubernetes provider hint"))
+		})
+
+		It("returns invalid argument for malformed hints before validating default StorageClass", func() {
+			cfg := defaultConfig()
+			cfg.DefaultStorageClass = "missing-default-sc"
+			s, _ := newTestStore(cfg)
+			spec := withK8sProviderHintsRaw(minimalVolumeSpec("app-data"), map[string]interface{}{
+				"storage_class": []string{"not-a-string"},
+			})
+
+			_, err := s.Create(context.Background(), spec, "app-data")
+			Expect(err).To(HaveOccurred())
+			var invalid *store.InvalidArgumentError
+			Expect(errors.As(err, &invalid)).To(BeTrue())
+			var failed *store.FailedPreconditionError
+			Expect(errors.As(err, &failed)).To(BeFalse(),
+				"malformed hints should not be masked by missing default StorageClass validation")
 		})
 	})
 

@@ -1,4 +1,4 @@
-// Package storage embeds the k8s storage service provider in the agent.
+// Package storage embeds the storage service provider in the agent.
 package storage
 
 import (
