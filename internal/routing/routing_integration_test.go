@@ -856,6 +856,10 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		// One retryable failure then success, so both the failure-path
 		// (SP error / SP call failed, retrying) and success-path (SP
 		// dispatch completed / published CE) log sites are exercised.
+		// FailFirst deterministically fails only the first CreateResource
+		// call; using a real wall-clock race (sleep + goroutine clearing
+		// CreateErr) against full-jitter backoff is flaky, since jitter can
+		// legitimately land near zero on consecutive retries.
 		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "Service Unavailable"}
 		fakeForwarder.FailFirst = 1
 		routingCfg.RetryMaxAttempts = 3

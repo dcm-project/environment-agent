@@ -546,6 +546,161 @@ func writeConfigFile(contents string) {
 	GinkgoT().Setenv("AGENT_CONFIG_FILE", path)
 }
 
+var _ = Describe("DCM outbound authentication", Label("unit"), func() {
+	Describe("Load", func() {
+		It("parses DCM_AUTH_TOKEN into DCMConfig.AuthToken (TC-CFG-UT-AUTH-010)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("DCM_AUTH_TOKEN", "my-static-jwt")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.DCM.AuthToken).To(Equal("my-static-jwt"))
+		})
+
+		It("parses client-credentials env vars (TC-CFG-UT-AUTH-020)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("DCM_AUTH_TOKEN_ENDPOINT", "http://keycloak:8080/token")
+			GinkgoT().Setenv("DCM_AUTH_CLIENT_ID", "agent-client")
+			GinkgoT().Setenv("DCM_AUTH_CLIENT_SECRET", "super-secret")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.DCM.AuthTokenEndpoint).To(Equal("http://keycloak:8080/token"))
+			Expect(cfg.DCM.AuthClientID).To(Equal("agent-client"))
+			Expect(cfg.DCM.AuthClientSecret).To(Equal("super-secret"))
+		})
+	})
+
+	Describe("Validate", func() {
+		It("rejects partial client-credentials: endpoint without client_id (TC-CFG-UT-AUTH-030)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("DCM_AUTH_TOKEN_ENDPOINT", "http://keycloak:8080/token")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("DCM_AUTH_CLIENT_ID"))
+		})
+
+		It("rejects partial client-credentials: client_id without endpoint (TC-CFG-UT-AUTH-040)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("DCM_AUTH_CLIENT_ID", "agent-client")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("DCM_AUTH_TOKEN_ENDPOINT"))
+		})
+
+		It("rejects partial client-credentials: endpoint + client_id without secret (TC-CFG-UT-AUTH-050)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("DCM_AUTH_TOKEN_ENDPOINT", "http://keycloak:8080/token")
+			GinkgoT().Setenv("DCM_AUTH_CLIENT_ID", "agent-client")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("DCM_AUTH_CLIENT_SECRET"))
+		})
+
+		It("accepts neither auth mode configured (TC-CFG-UT-AUTH-060)", func() {
+			setValidEnv()
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Validate()).To(Succeed())
+		})
+
+		DescribeTable("rejects an invalid DCM_AUTH_TOKEN_ENDPOINT (TC-CFG-UT-AUTH-070)",
+			func(endpoint string) {
+				setValidEnv()
+				GinkgoT().Setenv("DCM_AUTH_TOKEN_ENDPOINT", endpoint)
+				GinkgoT().Setenv("DCM_AUTH_CLIENT_ID", "agent-client")
+				GinkgoT().Setenv("DCM_AUTH_CLIENT_SECRET", "super-secret")
+
+				cfg, err := config.Load()
+				Expect(err).NotTo(HaveOccurred())
+				err = cfg.Validate()
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("DCM_AUTH_TOKEN_ENDPOINT"))
+			},
+			Entry("malformed URL", "http://%zz"),
+			Entry("relative path", "/token"),
+			Entry("hostless (scheme with no host)", "http:///token"),
+			Entry("unsupported scheme", "ftp://keycloak:8080/token"),
+			Entry("empty scheme, host-like value", "keycloak:8080/token"),
+		)
+
+		It("accepts a valid absolute http(s) DCM_AUTH_TOKEN_ENDPOINT (TC-CFG-UT-AUTH-080)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("DCM_AUTH_TOKEN_ENDPOINT", "https://keycloak:8443/realms/dcm/protocol/openid-connect/token")
+			GinkgoT().Setenv("DCM_AUTH_CLIENT_ID", "agent-client")
+			GinkgoT().Setenv("DCM_AUTH_CLIENT_SECRET", "super-secret")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Validate()).To(Succeed())
+		})
+	})
+})
+
+var _ = Describe("DCM per-attempt request timeout", Label("unit"), func() {
+	Describe("Load", func() {
+		It("parses DCM_REQUEST_TIMEOUT from env (TC-CFG-UT-DCM-090)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("DCM_REQUEST_TIMEOUT", "15s")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.DCM.RequestTimeout).To(Equal(15 * time.Second))
+		})
+
+		It("defaults DCM_REQUEST_TIMEOUT to 10s (TC-CFG-UT-DCM-090)", func() {
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.DCM.RequestTimeout).To(Equal(10 * time.Second))
+		})
+	})
+
+	Describe("Validate", func() {
+		It("rejects DCM_REQUEST_TIMEOUT below 1s (TC-CFG-UT-DCM-091)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("DCM_REQUEST_TIMEOUT", "500ms")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("DCM_REQUEST_TIMEOUT"))
+		})
+
+		It("rejects DCM_REQUEST_TIMEOUT above 5m (TC-CFG-UT-DCM-091)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("DCM_REQUEST_TIMEOUT", "6m")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("DCM_REQUEST_TIMEOUT"))
+		})
+
+		It("accepts DCM_REQUEST_TIMEOUT at the 1s/5m boundaries (TC-CFG-UT-DCM-091)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("DCM_REQUEST_TIMEOUT", "1s")
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Validate()).To(Succeed())
+
+			GinkgoT().Setenv("DCM_REQUEST_TIMEOUT", "5m")
+			cfg, err = config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Validate()).To(Succeed())
+		})
+	})
+})
+
 var _ = Describe("File-Based Config", Label("unit"), func() {
 	Describe("Load", func() {
 		It("uses a value from the config file when the env var is not set (UT-XC-CFG-060, AC-XC-CFG-011)", func() {

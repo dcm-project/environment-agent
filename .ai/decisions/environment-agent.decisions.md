@@ -925,3 +925,121 @@ wiring.
 
 **Related requirements:** REQ-SPR-010, REQ-SPR-030, REQ-SPR-040, REQ-HMN-020, REQ-RTE-030,
 REQ-RTE-210
+
+### DD-500: Outbound CP authentication — client credentials + static token fallback
+
+**Decision:** Two authentication modes for outbound HTTP requests (registration +
+heartbeat) to the DCM control plane, resolved at startup by config precedence:
+
+1. **Client credentials (production):** `DCM_AUTH_TOKEN_ENDPOINT` +
+   `DCM_AUTH_CLIENT_ID` + `DCM_AUTH_CLIENT_SECRET` → agent fetches short-lived
+   JWTs from an OIDC token endpoint, caches and auto-refreshes before expiry
+   (default 10s safety buffer).
+2. **Static token (dev/simple deployments):** `DCM_AUTH_TOKEN` → agent sends a
+   pre-obtained JWT as-is, no refresh.
+3. **No auth (backward-compatible default):** Neither configured → no
+   `Authorization` header.
+
+Client credentials takes precedence over static token if both are configured.
+Partial client-credentials config (e.g. endpoint set but client ID missing)
+fails fast at startup.
+
+**Hand-rolled, not `golang.org/x/oauth2`:** The client-credentials grant is a
+single POST (~40 lines). Hand-rolling avoids a direct dependency, is fully
+testable with `httptest`, and is consistent with the hand-rolled `dcmClient`.
+`golang.org/x/oauth2` is already an indirect dep (via k8s libs) but pulling it
+in as a direct dep adds opacity.
+
+**`TokenSource` interface:** Decouples token acquisition from HTTP transport.
+`dcmClient` consumes a `TokenSource` (can be nil for no-auth mode), calling
+`Token(ctx)` before each outbound request.
+
+**Token refresh strategy:** Proactive, before expiry (using `expires_in` from
+the token response minus a safety buffer), not reactive on 401. Token fetch
+failures are surfaced to the caller (register/heartbeat), which retries via
+existing backoff logic — fetch errors do not crash the agent.
+
+**Static token limitations:** No refresh. A 401 from an expired token halts
+registration permanently via existing `ErrNonRetryable` behavior; the agent
+must be restarted with a fresh token.
+
+**Secrets via env vars only:** No `_FILE` indirection. K8s secret mounts can
+populate env vars via `envFrom` in the pod spec.
+
+**Related requirements:** REQ-DCM-190, REQ-DCM-200, REQ-DCM-210, REQ-DCM-220,
+REQ-DCM-230, REQ-DCM-240, REQ-DCM-250
+
+### DD-510: Re-registration shares the initial-registration retry loop
+
+**Decision:** `Registrar.reRegister` (invoked on a service-type-change notification) no longer
+makes a single attempt and drops the notification on failure. Both `doRegistration` (initial
+registration) and `reRegister` now call a single extracted `registerWithRetry(ctx, successLogMsg)`
+helper, so a re-registration failure retries with the exact same backoff policy (REQ-DCM-050),
+`Retry-After`/429 handling, and `ErrNonRetryable` short-circuit (REQ-DCM-060) as initial
+registration — see REQ-DCM-121. The agent ID is only updated in the success branch, after the
+retry succeeds.
+
+**Rationale:** Before this fix, a transient failure while re-sending the registration payload
+(e.g. `DCM_AUTH_CLIENT_*`'s token endpoint being briefly unreachable — DD-500) was logged once at
+WARN and the triggering notification was gone forever: `notifyCh` had already been drained by the
+outer `select` before `reRegister` was called, and `reRegister` itself made no further attempt.
+DCM was then left with stale `service_types` indefinitely, since nothing re-arms without a new
+notification, and the SP-side state that produced this one may never change again.
+
+**Coalescing signals during retry, not a separate re-entrant call:** While `registerWithRetry` is
+backing off, a *new* signal on `notifyCh` (e.g. another service-type change arriving mid-retry)
+resets the attempt counter and immediately retries — it does not need special-casing beyond what
+`doRegistration` already did, because `buildPayload()` re-reads `ServiceTypeLister` on every
+attempt, so the retried call already carries the latest state.
+
+**Trade-off accepted — heartbeats pause during a re-registration retry:** `reRegister` runs
+synchronously inside `run()`'s single event-loop `select`, so while it is retrying (potentially for
+up to `MaxBackoff` per attempt), the heartbeat ticker is not serviced. `time.Ticker` only buffers
+one pending tick, so ticks during a long retry are coalesced/dropped rather than queued — heartbeat
+delivery resumes as soon as `reRegister` returns, it does not queue up a backlog. This mirrors the
+pre-existing initial-registration behavior (the heartbeat loop does not start until
+`doRegistration` returns) and is considered acceptable because the failure modes that make
+re-registration retry (e.g. an auth token outage) also break heartbeat auth on the exact same
+`TokenSource` — heartbeats would be failing anyway during that window. Running re-registration
+retries on a separate goroutine to keep heartbeats flowing during a long outage was considered and
+rejected as unnecessary complexity for v1alpha1; revisit if heartbeat continuity during
+re-registration retries becomes a real operational requirement.
+
+**Related requirements:** REQ-DCM-050, REQ-DCM-060, REQ-DCM-120, REQ-DCM-121
+
+### DD-520: Per-attempt registration timeout is symmetric, not re-registration-only
+
+**Decision:** `registerWithRetry` (shared by `doRegistration` and `reRegister` since DD-510) now
+wraps each individual HTTP attempt in a fresh `context.WithTimeout(ctx, RequestTimeout)`, mirroring
+the pattern `sendHeartbeat` already used. `RequestTimeout` is a new field on `RegistrarConfig`,
+sourced from `DCM_REQUEST_TIMEOUT` (default `10s`, same value the old re-registration-only bound
+used before DD-510 removed it), validated like the other DCM durations (REQ-DCM-122).
+
+**Context:** qodo's PR #38 round-2 review (reviewing DD-510's diff) flagged that removing
+`reRegister`'s own 10s child context left each attempt bounded only by `dcmClient`'s 60s
+`http.Client.Timeout`, so a DCM connection that is accepted but never answered can block the
+registrar's single event-loop `select` — and therefore heartbeat/notification processing — for up
+to 60s per attempt before backoff even begins. qodo's literal recommended fix was to reintroduce
+the 10s context *only* around `reRegister`'s calls, leaving `doRegistration` unbounded beyond the
+60s client timeout.
+
+**Why the literal suggestion was rejected:** `REQ-DCM-121` (added by DD-510 itself) requires
+re-registration to retry "using the same backoff policy and non-retryable error handling as
+initial registration," and DD-510's whole point was to remove the asymmetry between the two call
+sites by extracting one shared `registerWithRetry`. Reintroducing a tighter timeout on
+`reRegister` alone would reopen exactly the asymmetry DD-510 closed, and would contradict
+REQ-DCM-121's wording even though it addresses qodo's literal complaint. The correct fix bounds
+the shared helper itself, so both call sites get the identical bound — expressed as REQ-DCM-122,
+not a `reRegister`-specific rule.
+
+**Why configurable rather than a bare constant:** every other timing knob on `Registrar` —
+`InitialBackoff`, `MaxBackoff`, `HeartbeatInterval`, `PrerequisiteRetryInterval` — is already an
+independently-configurable `RegistrarConfig` field, defaulted in `config.go` and tested at small
+values in `registrar_integration_test.go`. A bare `const` would be the one exception and would
+force any test proving the fix to actually wait out a real ~10s HTTP timeout. `RequestTimeout <= 0`
+falls back to a 10s in-code default in `registerWithRetry` itself (mirroring the existing
+`PrerequisiteRetryInterval <= 0` fallback in `run()`), so every pre-existing `RegistrarConfig{}`
+test literal that doesn't set the new field keeps working unchanged — it implicitly gets the same
+10s bound production deployments get by default via `DCM_REQUEST_TIMEOUT`'s `envDefault`.
+
+**Related requirements:** REQ-DCM-121, REQ-DCM-122

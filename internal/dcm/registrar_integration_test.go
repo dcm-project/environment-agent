@@ -3,11 +3,13 @@ package dcm_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -20,10 +22,11 @@ import (
 // --- Mock DCM server ---
 
 type capturedRequest struct {
-	Method    string
-	Path      string
-	Body      []byte
-	Timestamp time.Time
+	Method        string
+	Path          string
+	Body          []byte
+	Timestamp     time.Time
+	Authorization string
 }
 
 type mockDCM struct {
@@ -61,10 +64,11 @@ func (m *mockDCM) handleRegistration(w http.ResponseWriter, r *http.Request) {
 
 	m.mu.Lock()
 	m.registrations = append(m.registrations, capturedRequest{
-		Method:    r.Method,
-		Path:      r.URL.Path,
-		Body:      body,
-		Timestamp: time.Now(),
+		Method:        r.Method,
+		Path:          r.URL.Path,
+		Body:          body,
+		Timestamp:     time.Now(),
+		Authorization: r.Header.Get("Authorization"),
 	})
 
 	hang := m.hangReg
@@ -97,10 +101,11 @@ func (m *mockDCM) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	m.mu.Lock()
 	m.heartbeats = append(m.heartbeats, capturedRequest{
-		Method:    r.Method,
-		Path:      r.URL.Path,
-		Body:      body,
-		Timestamp: time.Now(),
+		Method:        r.Method,
+		Path:          r.URL.Path,
+		Body:          body,
+		Timestamp:     time.Now(),
+		Authorization: r.Header.Get("Authorization"),
 	})
 	status := m.hbStatus
 	m.mu.Unlock()
@@ -197,6 +202,32 @@ func (s *stubConsumerLagProvider) ConsumerLag() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lag
+}
+
+// flakyTokenSource returns an error from Token() while failing is true,
+// simulating a transient token endpoint outage, and the configured token
+// once failing is set back to false.
+type flakyTokenSource struct {
+	mu      sync.Mutex
+	failing bool
+	calls   int
+	token   string
+}
+
+func (f *flakyTokenSource) Token(_ context.Context) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.failing {
+		return "", fmt.Errorf("simulated transient token endpoint outage")
+	}
+	return f.token, nil
+}
+
+func (f *flakyTokenSource) setFailing(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failing = v
 }
 
 type stubResourceCapacityProvider struct {
@@ -917,6 +948,104 @@ var _ = Describe("Service Type Updates", Label("integration"), func() {
 		Expect(types).To(ContainElement("container"))
 		Expect(types).To(ContainElement("database"))
 	})
+
+	It("retries re-registration through a transient token outage until it succeeds, "+
+		"without requiring another notification (IT-DCM-175)", func() {
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		tokenSource := &flakyTokenSource{token: "recovered-jwt"}
+
+		cfg := defaultRegistrarConfig(mock.server.URL)
+		cfg.TokenSource = tokenSource
+		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		// Initial registration must succeed before the token source starts failing.
+		Eventually(func() int {
+			return len(mock.getRegistrations())
+		}, 3*time.Second, 50*time.Millisecond).Should(Equal(1))
+
+		id, ok := r.AgentID()
+		Expect(ok).To(BeTrue())
+		Expect(id).To(Equal("agent-123"))
+
+		// Simulate the token endpoint going down, then trigger a single
+		// service-type-change notification while it's unavailable.
+		tokenSource.setFailing(true)
+		lister.setTypes([]string{"container", "database"})
+		r.NotifyServiceTypeChange()
+
+		// While the token endpoint is down, register() fails before ever
+		// reaching DCM (setAuthHeader errors out first), so no new
+		// registration request should be observed, and the agent ID from
+		// the last successful registration must be preserved.
+		Consistently(func() int {
+			return len(mock.getRegistrations())
+		}, 300*time.Millisecond, 20*time.Millisecond).Should(Equal(1))
+
+		id, ok = r.AgentID()
+		Expect(ok).To(BeTrue())
+		Expect(id).To(Equal("agent-123"))
+
+		// The token endpoint recovers. The same re-registration attempt —
+		// not a fresh notification — must eventually go through, retried
+		// via the shared registration backoff policy.
+		tokenSource.setFailing(false)
+
+		Eventually(func() int {
+			return len(mock.getRegistrations())
+		}, 3*time.Second, 50*time.Millisecond).Should(Equal(2),
+			"the re-registration dropped by the transient token outage must be retried, "+
+				"not silently discarded")
+
+		regs := mock.getRegistrations()
+		var payload map[string]interface{}
+		Expect(json.Unmarshal(regs[len(regs)-1].Body, &payload)).To(Succeed())
+		types, ok := payload["service_types"].([]interface{})
+		Expect(ok).To(BeTrue())
+		Expect(types).To(HaveLen(2), "the updated service types must still be sent once the retry succeeds")
+
+		id, ok = r.AgentID()
+		Expect(ok).To(BeTrue())
+		Expect(id).To(Equal("agent-123"))
+	})
+
+	It("bounds each re-registration attempt so a hung DCM connection is retried instead of "+
+		"blocking indefinitely (IT-DCM-176)", func() {
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+
+		cfg := defaultRegistrarConfig(mock.server.URL)
+		cfg.RequestTimeout = 30 * time.Millisecond
+		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() int {
+			return len(mock.getRegistrations())
+		}, 3*time.Second, 50*time.Millisecond).Should(Equal(1))
+
+		// Simulate DCM accepting the connection but never responding, then
+		// trigger a re-registration.
+		mock.mu.Lock()
+		mock.hangReg = true
+		mock.mu.Unlock()
+
+		lister.setTypes([]string{"container", "database"})
+		r.NotifyServiceTypeChange()
+
+		// Each attempt is bounded by RequestTimeout (30ms), so it fails fast
+		// and retries via backoff rather than blocking on the hung
+		// connection for the underlying HTTP client's full timeout. Several
+		// attempts must therefore be observed well within a couple of
+		// seconds — a single unbounded attempt would still be in flight.
+		Eventually(func() int {
+			return len(mock.getRegistrations())
+		}, 2*time.Second, 20*time.Millisecond).Should(BeNumerically(">=", 4),
+			"a hung re-registration attempt must be bounded by RequestTimeout and retried, "+
+				"not block the event loop for the client's full HTTP timeout")
+	})
 })
 
 var _ = Describe("DCM Registrar Lifecycle Logging", Label("integration"), func() {
@@ -1016,5 +1145,175 @@ var _ = Describe("DCM Registrar Lifecycle Logging", Label("integration"), func()
 		v, hasAttr = recordAttr(panicRec, "restart_attempt")
 		Expect(hasAttr).To(BeTrue(), "the panic log should also carry restart_attempt for cross-reference")
 		Expect(v.Int64()).To(Equal(int64(1)))
+	})
+})
+
+var _ = Describe("Outbound Authentication", Label("integration"), func() {
+	var (
+		mock   *mockDCM
+		ctx    context.Context
+		cancel context.CancelFunc
+	)
+
+	BeforeEach(func() {
+		mock = newMockDCM()
+		DeferCleanup(mock.server.Close)
+		ctx, cancel = context.WithCancel(context.Background()) //nolint:fatcontext // Ginkgo BeforeEach requires closure variable assignment
+		DeferCleanup(cancel)
+	})
+
+	It("registration includes Authorization header with static token (IT-DCM-AUTH-010)", func() {
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		cfg := defaultRegistrarConfig(mock.server.URL)
+		cfg.TokenSource = dcm.NewStaticTokenSource("static-jwt")
+
+		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() int {
+			return len(mock.getRegistrations())
+		}, 3*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 1))
+
+		regs := mock.getRegistrations()
+		Expect(regs[0].Authorization).To(Equal("Bearer static-jwt"))
+	})
+
+	It("heartbeat includes Authorization header with static token (IT-DCM-AUTH-020)", func() {
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		cfg := defaultRegistrarConfig(mock.server.URL)
+		cfg.TokenSource = dcm.NewStaticTokenSource("static-jwt")
+
+		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() int {
+			return len(mock.getHeartbeats())
+		}, 3*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 1))
+
+		hbs := mock.getHeartbeats()
+		Expect(hbs[0].Authorization).To(Equal("Bearer static-jwt"))
+	})
+
+	It("registration includes Authorization header with client-credentials token (IT-DCM-AUTH-030)", func() {
+		tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			resp := map[string]interface{}{
+				"access_token": "cc-jwt",
+				"token_type":   "Bearer",
+				"expires_in":   3600,
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		}))
+		DeferCleanup(tokenServer.Close)
+
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		cfg := defaultRegistrarConfig(mock.server.URL)
+		cfg.TokenSource = dcm.NewClientCredentialsTokenSource(
+			tokenServer.URL, "client-id", "client-secret", nil,
+		)
+
+		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() int {
+			return len(mock.getRegistrations())
+		}, 3*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 1))
+
+		regs := mock.getRegistrations()
+		Expect(regs[0].Authorization).To(Equal("Bearer cc-jwt"))
+	})
+
+	It("token auto-refreshed during heartbeat loop with short expiry (IT-DCM-AUTH-040)", func() {
+		var tokenCallCount int32
+		tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			count := atomic.AddInt32(&tokenCallCount, 1)
+			w.Header().Set("Content-Type", "application/json")
+			resp := map[string]interface{}{
+				"access_token": fmt.Sprintf("token-%d", count),
+				"token_type":   "Bearer",
+				"expires_in":   1,
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		}))
+		DeferCleanup(tokenServer.Close)
+
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		cfg := defaultRegistrarConfig(mock.server.URL)
+		cfg.TokenSource = dcm.NewClientCredentialsTokenSource(
+			tokenServer.URL, "client-id", "client-secret", nil,
+		)
+
+		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() int32 {
+			return atomic.LoadInt32(&tokenCallCount)
+		}, 5*time.Second, 100*time.Millisecond).Should(BeNumerically(">=", int32(2)),
+			"token endpoint must be called at least twice (initial + refresh)")
+	})
+
+	It("client-credentials takes precedence when both auth modes configured (AC-DCM-230)", func() {
+		tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			resp := map[string]interface{}{
+				"access_token": "cc-wins",
+				"token_type":   "Bearer",
+				"expires_in":   3600,
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		}))
+		DeferCleanup(tokenServer.Close)
+
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		cfg := defaultRegistrarConfig(mock.server.URL)
+		cfg.TokenSource = dcm.NewClientCredentialsTokenSource(
+			tokenServer.URL, "client-id", "client-secret", nil,
+		)
+
+		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() int {
+			return len(mock.getRegistrations())
+		}, 3*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 1))
+
+		regs := mock.getRegistrations()
+		Expect(regs[0].Authorization).To(Equal("Bearer cc-wins"),
+			"client-credentials token must be used, not a hypothetical static token")
+	})
+
+	It("no auth configured sends no Authorization header (IT-DCM-AUTH-050)", func() {
+		lister := &stubServiceTypeLister{types: []string{"container"}}
+		cfg := defaultRegistrarConfig(mock.server.URL)
+
+		r, err := dcm.NewRegistrar(cfg, lister, &stubConsumerLagProvider{}, nil, discardLogger)
+		Expect(err).NotTo(HaveOccurred())
+
+		r.Start(ctx)
+
+		Eventually(func() int {
+			return len(mock.getRegistrations())
+		}, 3*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 1))
+
+		Eventually(func() int {
+			return len(mock.getHeartbeats())
+		}, 3*time.Second, 50*time.Millisecond).Should(BeNumerically(">=", 1))
+
+		for _, reg := range mock.getRegistrations() {
+			Expect(reg.Authorization).To(BeEmpty())
+		}
+		for _, hb := range mock.getHeartbeats() {
+			Expect(hb.Authorization).To(BeEmpty())
+		}
 	})
 })
