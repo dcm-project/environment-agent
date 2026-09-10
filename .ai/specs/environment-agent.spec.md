@@ -18,7 +18,7 @@ agent; duplicate registrations are rejected.
 - Single agent instance per environment (no HA / competing consumers)
 - One SP per service type (no multi-SP selection strategies)
 - Creation and deletion operations only (no update/day-2 operations)
-- External SP authentication deferred (network isolation as interim mitigation)
+- External SP authentication via JWT Bearer tokens validated against Keycloak OIDC (see §4.10); auth can be disabled for development
 - No hot-reload of agent configuration (restart required for config changes)
 - SP un-registration process not yet designed (periodic re-registration is accepted but no consequences defined for non-renewal in v1alpha1)
 
@@ -131,7 +131,7 @@ configuration loading from environment variables, and route registration for all
 OpenAPI-defined endpoints. All endpoints are under `/api/v1alpha1`.
 
 Out of scope: TLS termination (handled by infrastructure/ingress),
-authentication/authorization middleware, rate limiting.
+rate limiting. Authentication middleware is specified in §4.10.
 
 #### Requirements
 
@@ -332,8 +332,8 @@ at startup via configuration. External SPs register via REST API
 (`POST /api/v1alpha1/providers`). Only one SP may serve a given service type.
 The registry is persisted to local storage to survive restarts.
 
-Out of scope: Authentication of external SP registrations, multiple SPs per
-service type with selection strategies.
+Out of scope: Multiple SPs per service type with selection strategies.
+Authentication of external SP registration requests is handled by §4.10.
 
 #### Requirements — Embedded SP Registration
 
@@ -2102,6 +2102,140 @@ Integration), and Topic 8 (Resource Operation Routing).
 
 ---
 
+### 4.10 API Authentication
+
+#### Overview
+
+JWT Bearer token authentication for the agent's REST API, validated against
+Keycloak via OIDC discovery. The health endpoint is exempt (unauthenticated).
+Authentication can be entirely disabled for development and testing.
+
+This is a simplified port of the control-plane's auth package. Key differences:
+no actor resolution (no database, no actor model), no proxy-secret path, no
+`ActorCache`. JWT claims (`sub`, `preferred_username`) go directly into request
+context.
+
+Out of scope: Authorization (RBAC/policy decisions beyond "is the token valid"),
+actor provisioning, proxy-secret header authentication, token refresh/issuance.
+
+#### Requirements
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-AUTH-010 | The agent MUST validate JWT Bearer tokens on all REST API endpoints (except health, see REQ-AUTH-020) using OIDC discovery against the configured issuer URL to obtain JWKS keys | MUST | Validates signature, expiry, issuer, audience |
+| REQ-AUTH-020 | The agent MUST bypass authentication for the health endpoint (`GET /api/v1alpha1/health`) | MUST | Health probes must succeed without credentials |
+| REQ-AUTH-030 | The agent MUST support a disabled authentication mode (`AGENT_AUTH_DISABLED=true`) that passes all requests through without token validation | MUST | Default for v1alpha1 to avoid breaking existing deployments |
+| REQ-AUTH-040 | When authentication is enabled and a request lacks a valid Bearer token, the agent MUST return HTTP 401 with an RFC 7807 error body (`type: UNAUTHORIZED`) and a `WWW-Authenticate: Bearer` response header | MUST | Per REQ-XC-ERR-010 |
+| REQ-AUTH-050 | After successful JWT validation, the agent MUST extract `sub` and `preferred_username` claims from the token and make them available in the request context for downstream middleware and handlers | MUST | |
+| REQ-AUTH-060 | After successful JWT validation, the auth middleware MUST log the authenticated identity at DEBUG level including `sub`, `preferred_username`, HTTP method, and request path | MUST | DEBUG keeps production logs clean; operators enable when needed |
+| REQ-AUTH-070 | The request logger middleware (REQ-HTTP-060) MUST include `sub` and `preferred_username` from context in per-request log entries when authentication has populated them | MUST | Every request log line gets an identity tag for audit |
+| REQ-AUTH-080 | Auth middleware MUST execute after panic recovery (REQ-HTTP-071) and before the request logger (REQ-HTTP-060) in the middleware chain | MUST | Rejects unauthenticated requests before body parsing; panics in auth are caught |
+| REQ-AUTH-090 | When authentication is disabled, the agent MUST log a warning at startup | MUST | |
+| REQ-AUTH-100 | The agent MUST fail fast on startup when authentication is enabled (`AGENT_AUTH_DISABLED=false`) and `AGENT_AUTH_ISSUER_URL` is empty | MUST | |
+| REQ-AUTH-110 | When `AGENT_AUTH_ISSUER_URL` is set but `AGENT_AUTH_JWT_AUDIENCE` is empty, the agent SHOULD log a warning | SHOULD | Audience validation is strongly recommended |
+| REQ-AUTH-120 | When the auth middleware rejects a request due to a missing, malformed, or invalid Bearer token, the agent MUST emit exactly one per-request INFO log entry equivalent to the request logger's (REQ-HTTP-060), including `method`, `path`, `status` (401), and `duration` | MUST | Auth executes before the request logger (REQ-AUTH-080), so rejected requests never reach it; this keeps the audit trail complete without reordering the chain |
+
+#### Configuration Introduced
+
+| Config Key | Env Var | Default | Min | Max | Unit | Description |
+|------------|---------|---------|-----|-----|------|-------------|
+| auth.disabled | AGENT_AUTH_DISABLED | true | - | - | bool | Disable JWT authentication entirely |
+| auth.issuerUrl | AGENT_AUTH_ISSUER_URL | - | - | - | URL | Keycloak OIDC issuer URL (required when auth enabled) |
+| auth.audience | AGENT_AUTH_JWT_AUDIENCE | - | - | - | string | Expected JWT audience claim |
+
+#### Acceptance Criteria
+
+##### AC-AUTH-010: Valid JWT token accepted
+
+- **Validates:** REQ-AUTH-010, REQ-AUTH-050
+- **Given** authentication is enabled with a valid OIDC issuer URL
+- **When** a request includes a valid Bearer token with `sub` and `preferred_username` claims
+- **Then** the request MUST proceed to the handler
+- **And** JWT claims MUST be available in the request context
+
+##### AC-AUTH-020: Health endpoint bypasses authentication
+
+- **Validates:** REQ-AUTH-020
+- **Given** authentication is enabled
+- **When** a `GET` request targets `/api/v1alpha1/health`
+- **Then** the request MUST proceed without requiring a Bearer token
+
+##### AC-AUTH-030: Missing Bearer token rejected
+
+- **Validates:** REQ-AUTH-040
+- **Given** authentication is enabled
+- **When** a request arrives without an `Authorization` header
+- **Then** the agent MUST respond with HTTP 401
+- **And** the response body MUST be RFC 7807 JSON with `type: UNAUTHORIZED`
+- **And** the response MUST include a `WWW-Authenticate: Bearer` header
+
+##### AC-AUTH-040: Invalid Bearer token rejected
+
+- **Validates:** REQ-AUTH-040
+- **Given** authentication is enabled
+- **When** a request includes an expired, malformed, or incorrectly-signed Bearer token
+- **Then** the agent MUST respond with HTTP 401
+- **And** the response body MUST be RFC 7807 JSON with `type: UNAUTHORIZED`
+
+##### AC-AUTH-050: Disabled auth mode passes all requests
+
+- **Validates:** REQ-AUTH-030
+- **Given** `AGENT_AUTH_DISABLED=true`
+- **When** any request arrives (with or without a Bearer token)
+- **Then** the request MUST proceed without authentication checks
+
+##### AC-AUTH-060: Config validation — issuer required when enabled
+
+- **Validates:** REQ-AUTH-100
+- **Given** `AGENT_AUTH_DISABLED=false` and `AGENT_AUTH_ISSUER_URL` is empty
+- **When** configuration is validated at startup
+- **Then** the agent MUST fail fast with an error identifying the missing issuer URL
+
+##### AC-AUTH-070: Authenticated identity in request log
+
+- **Validates:** REQ-AUTH-070
+- **Given** authentication is enabled and a request includes a valid Bearer token
+- **When** the request logger emits its per-request INFO log line
+- **Then** the log MUST include `sub` from JWT claims
+- **And** MUST include `preferred_username` when present in the token
+
+##### AC-AUTH-080: Authenticated identity logged at DEBUG
+
+- **Validates:** REQ-AUTH-060
+- **Given** authentication is enabled and a request includes a valid Bearer token
+- **When** the auth middleware validates the token
+- **Then** a DEBUG-level log MUST be emitted with `sub`, `preferred_username`, `method`, and `path`
+
+##### AC-AUTH-090: Middleware ordering
+
+- **Validates:** REQ-AUTH-080
+- **Given** the middleware chain is configured
+- **Then** the auth middleware MUST execute after `PanicRecovery` and before `RequestLogger`
+- **And** auth MUST execute before the OpenAPI request validator
+
+##### AC-AUTH-100: Startup warning when auth disabled
+
+- **Validates:** REQ-AUTH-090
+- **Given** `AGENT_AUTH_DISABLED=true`
+- **When** the agent starts
+- **Then** a WARN-level log MUST be emitted indicating authentication is disabled
+
+##### AC-AUTH-110: Authentication rejection produces request audit log
+
+- **Validates:** REQ-AUTH-120
+- **Given** authentication is enabled
+- **When** a request is rejected with HTTP 401 due to a missing, malformed, or invalid Bearer token
+- **Then** exactly one INFO-level log entry equivalent to the request logger's MUST be emitted, including `method`, `path`, `status: 401`, and `duration`
+- **And** the middleware ordering from AC-AUTH-090 (auth before `RequestLogger`) MUST be unchanged
+- **And** successful authenticated requests MUST continue to include `sub` and `preferred_username` per AC-AUTH-070
+
+#### Dependencies
+
+Depends on Topic 1 (HTTP Server) for middleware chain and server lifecycle.
+Uses cross-cutting error handling (§5.1) for RFC 7807 responses.
+
+---
+
 ## 5. Cross-Cutting Concerns
 
 ### 5.1 Error Handling
@@ -2351,6 +2485,9 @@ All configuration is loadable from environment variables. Configuration files ar
 | routing.denyListMaxSize | AGENT_DENY_LIST_MAX_SIZE | 100000 | No | 1000 | 10000000 | integer | 8 |
 | messaging.maxDeliver | AGENT_MESSAGING_MAX_DELIVER | 10 | No | 1 | 100 | integer | 9 |
 | routing.handlerTimeout | AGENT_ROUTING_HANDLER_TIMEOUT | 60s | No | 1s | 10m | duration | 9 |
+| auth.disabled | AGENT_AUTH_DISABLED | true | No | - | - | bool | 10 |
+| auth.issuerUrl | AGENT_AUTH_ISSUER_URL | - | When auth enabled | - | - | URL | 10 |
+| auth.audience | AGENT_AUTH_JWT_AUDIENCE | - | No | - | - | string | 10 |
 
 \* `health.podConditionsEnabled` is parsed and validated but never read past
 config loading — pod-condition updates are unimplemented in v1alpha1. See
@@ -2402,8 +2539,9 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
 | REQ-MSG-NNN | 4.7: Messaging System Integration | 28 |
 | REQ-RTE-NNN | 4.8: Resource Operation Routing | 28 |
 | REQ-RCM-NNN | 4.9: Retry & Cancel Mechanisms | 26 |
+| REQ-AUTH-NNN | 4.10: API Authentication | 11 |
 | REQ-XC-ERR-NNN | 5.1: Error Handling | 4 |
 | REQ-XC-CE-NNN | 5.2: CloudEvent Definitions | 5 |
 | REQ-XC-LOG-NNN | 5.3: Logging | 3 |
 | REQ-XC-CFG-NNN | 5.4: Configuration Management | 6 |
-| **Total** | | **213** |
+| **Total** | | **224** |

@@ -15,6 +15,7 @@ import (
 	"github.com/dcm-project/environment-agent/api/v1alpha1"
 	oapigen "github.com/dcm-project/environment-agent/internal/api/server"
 	"github.com/dcm-project/environment-agent/internal/apiserver"
+	"github.com/dcm-project/environment-agent/internal/auth"
 	"github.com/dcm-project/environment-agent/internal/config"
 	"github.com/dcm-project/environment-agent/internal/dcm"
 	"github.com/dcm-project/environment-agent/internal/embedded"
@@ -90,6 +91,25 @@ func run(ctx context.Context) int {
 	if err := cfg.ValidateCancelHandlerAckWaitInvariant(); err != nil {
 		logger.Error("invalid configuration", "error", err)
 		return 1
+	}
+
+	// Construct auth middleware (REQ-AUTH-030, REQ-AUTH-090, REQ-AUTH-100, REQ-AUTH-110)
+	var authMW func(http.Handler) http.Handler
+	if cfg.Auth.Disabled {
+		authMW = auth.DisabledMiddleware(logger)
+	} else {
+		if cfg.Auth.IssuerURL != "" && cfg.Auth.Audience == "" {
+			logger.Warn("AGENT_AUTH_JWT_AUDIENCE is empty; audience validation will be skipped")
+		}
+		validator, err := auth.NewOIDCValidator(ctx, cfg.Auth.IssuerURL, cfg.Auth.Audience)
+		if err != nil {
+			logger.Error("failed to create OIDC validator", "error", err)
+			return 1
+		}
+		authMW = auth.Middleware(auth.MiddlewareConfig{
+			JWTValidator: validator,
+			Logger:       logger,
+		})
 	}
 
 	ln, err := net.Listen("tcp", cfg.Server.Address)
@@ -288,7 +308,7 @@ func run(ctx context.Context) int {
 				err.Error(), &r.RequestURI)
 		},
 	})
-	srv := apiserver.New(cfg, logger, h)
+	srv := apiserver.New(cfg, logger, h, authMW)
 
 	if err := srv.Run(ctx, ln); err != nil {
 		logger.Error("server error", "error", err)

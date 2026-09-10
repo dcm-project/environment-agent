@@ -18,8 +18,19 @@ import (
 	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 	"github.com/dcm-project/environment-agent/internal/api/server"
 	"github.com/dcm-project/environment-agent/internal/apiserver"
+	"github.com/dcm-project/environment-agent/internal/auth"
 	"github.com/dcm-project/environment-agent/internal/config"
 )
+
+// mockJWTValidator implements auth.JWTValidator for tests.
+type mockJWTValidator struct {
+	claims *auth.JWTClaims
+	err    error
+}
+
+func (m *mockJWTValidator) Validate(_ context.Context, _ string) (*auth.JWTClaims, error) {
+	return m.claims, m.err
+}
 
 // stubHandler implements server.ServerInterface with controllable behavior.
 type stubHandler struct {
@@ -119,13 +130,13 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 		DeferCleanup(cancel)
 	})
 
-	startServer := func(handler server.ServerInterface, opts ...time.Duration) {
+	// runAndAwaitReady starts srv and blocks until ready to serve HTTP.
+	runAndAwaitReady := func(opts ...time.Duration) {
 		probeTimeout := 200 * time.Millisecond
 		if len(opts) > 0 {
 			probeTimeout = opts[0]
 		}
 
-		srv = apiserver.New(cfg, logger, handler)
 		runErrCh := make(chan error, 1)
 		go func() { runErrCh <- srv.Run(ctx, ln) }()
 
@@ -158,6 +169,22 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 		case <-time.After(3 * time.Second):
 			Fail("timed out waiting for server readiness")
 		}
+	}
+
+	startServer := func(handler server.ServerInterface, opts ...time.Duration) {
+		srv = apiserver.New(cfg, logger, handler, nil)
+		runAndAwaitReady(opts...)
+	}
+
+	// startServerWithAuth wires the real auth middleware into the full server
+	// chain, instead of the identity passthrough used elsewhere in this suite.
+	startServerWithAuth := func(handler server.ServerInterface, validator auth.JWTValidator) {
+		authMW := auth.Middleware(auth.MiddlewareConfig{
+			JWTValidator: validator,
+			Logger:       logger,
+		})
+		srv = apiserver.New(cfg, logger, handler, authMW)
+		runAndAwaitReady()
 	}
 
 	Describe("Server Lifecycle", func() {
@@ -253,6 +280,91 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 				"request log must be at INFO level")
 			Expect(logBuf.String()).To(MatchRegexp(`duration|elapsed|latency`),
 				"request log must contain duration")
+		})
+	})
+
+	Describe("Auth Rejection Logging", func() {
+		const providersPath = "/api/v1alpha1/providers"
+
+		// requestLogCountForPath counts per-request audit log lines (the ones
+		// RequestLogger — or auth's rejection-path log call — emits with
+		// msg="request") for a specific path, so the readiness probe's own
+		// /health request log isn't counted alongside the request under test.
+		requestLogCountForPath := func(path string) int {
+			count := 0
+			for _, line := range strings.Split(logBuf.String(), "\n") {
+				if strings.Contains(line, `"msg":"request"`) && strings.Contains(line, `"path":"`+path+`"`) {
+					count++
+				}
+			}
+			return count
+		}
+
+		It("logs exactly one INFO request audit entry when credentials are missing, without moving RequestLogger ahead of auth (IT-AUTH-120)", func() {
+			handler := &stubHandler{}
+			startServerWithAuth(handler, &mockJWTValidator{})
+
+			client := httpClient()
+			resp, err := client.Get(fmt.Sprintf("http://%s%s", ln.Addr().String(), providersPath))
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = resp.Body.Close() }()
+
+			Expect(resp.StatusCode).To(Equal(http.StatusUnauthorized))
+
+			Eventually(func() int { return requestLogCountForPath(providersPath) }).
+				WithTimeout(2 * time.Second).Should(Equal(1))
+			Expect(logBuf.String()).To(And(
+				MatchRegexp(`"level"\s*:\s*"INFO"`),
+				ContainSubstring(`"method":"GET"`),
+				ContainSubstring(`"path":"`+providersPath+`"`),
+				ContainSubstring(`"status":401`),
+			), "the audit log for a rejected request must match the shape of a normal request log")
+		})
+
+		It("logs exactly one INFO request audit entry when credentials are invalid (IT-AUTH-121)", func() {
+			handler := &stubHandler{}
+			startServerWithAuth(handler, &mockJWTValidator{err: fmt.Errorf("token is expired")})
+
+			req, err := http.NewRequest(http.MethodGet,
+				fmt.Sprintf("http://%s%s", ln.Addr().String(), providersPath), nil)
+			Expect(err).NotTo(HaveOccurred())
+			req.Header.Set("Authorization", "Bearer invalid-token")
+
+			resp, err := httpClient().Do(req)
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = resp.Body.Close() }()
+
+			Expect(resp.StatusCode).To(Equal(http.StatusUnauthorized))
+
+			Eventually(func() int { return requestLogCountForPath(providersPath) }).
+				WithTimeout(2 * time.Second).Should(Equal(1))
+			Expect(logBuf.String()).To(ContainSubstring(`"status":401`))
+		})
+
+		It("retains sub and preferred_username on successful authenticated requests (IT-AUTH-122)", func() {
+			handler := &stubHandler{}
+			startServerWithAuth(handler, &mockJWTValidator{
+				claims: &auth.JWTClaims{Subject: "user-123", PreferredUsername: "jdoe"},
+			})
+
+			req, err := http.NewRequest(http.MethodGet,
+				fmt.Sprintf("http://%s%s", ln.Addr().String(), providersPath), nil)
+			Expect(err).NotTo(HaveOccurred())
+			req.Header.Set("Authorization", "Bearer valid-token")
+
+			resp, err := httpClient().Do(req)
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = resp.Body.Close() }()
+
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+			Eventually(func() int { return requestLogCountForPath(providersPath) }).
+				WithTimeout(2 * time.Second).Should(Equal(1))
+			Expect(logBuf.String()).To(And(
+				ContainSubstring(`"status":200`),
+				ContainSubstring(`"sub":"user-123"`),
+				ContainSubstring(`"preferred_username":"jdoe"`),
+			), "successful requests must keep JWT identity attributes in the audit log")
 		})
 	})
 

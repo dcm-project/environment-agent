@@ -616,3 +616,49 @@ var _ = Describe("File-Based Config", Label("unit"), func() {
 		})
 	})
 })
+
+var _ = Describe("Auth Config Validation", Label("unit"), func() {
+	Describe("Validate", func() {
+		It("rejects enabled auth with empty issuer URL (UT-AUTH-080)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_AUTH_DISABLED", "false")
+			// AGENT_AUTH_ISSUER_URL intentionally not set
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AGENT_AUTH_ISSUER_URL"))
+		})
+
+		It("accepts disabled auth with empty issuer URL (UT-AUTH-081)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_AUTH_DISABLED", "true")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Validate()).To(Succeed())
+		})
+
+		It("accepts enabled auth with valid issuer URL (UT-AUTH-082)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_AUTH_DISABLED", "false")
+			GinkgoT().Setenv("AGENT_AUTH_ISSUER_URL", "http://keycloak:8080/realms/dcm")
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Validate()).To(Succeed())
+		})
+
+		It("accepts enabled auth with issuer URL but empty audience (UT-AUTH-083)", func() {
+			setValidEnv()
+			GinkgoT().Setenv("AGENT_AUTH_DISABLED", "false")
+			GinkgoT().Setenv("AGENT_AUTH_ISSUER_URL", "http://keycloak:8080/realms/dcm")
+			// AGENT_AUTH_JWT_AUDIENCE intentionally not set
+
+			cfg, err := config.Load()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Validate()).To(Succeed())
+		})
+	})
+})

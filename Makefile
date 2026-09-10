@@ -38,7 +38,7 @@ test:
 	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --skip-package=test/e2e
 
 test-unit:
-	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --label-filter=unit ./internal/config ./internal/httperror ./internal/provider ./internal/health/monitor ./internal/backoff ./internal/dcm ./internal/messaging ./internal/cloudevent ./internal/routing ./cmd/environment-agent
+	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --label-filter=unit ./internal/auth ./internal/config ./internal/httperror ./internal/provider ./internal/health/monitor ./internal/backoff ./internal/dcm ./internal/messaging ./internal/cloudevent ./internal/routing ./cmd/environment-agent
 
 test-integration:
 	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --label-filter=integration ./internal/apiserver ./internal/health ./internal/health/monitor ./internal/provider ./internal/dcm ./internal/messaging ./internal/routing

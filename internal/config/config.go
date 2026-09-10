@@ -28,6 +28,7 @@ type Config struct {
 	Heartbeat HeartbeatConfig `envPrefix:"AGENT_"`
 	Messaging MessagingConfig `envPrefix:"AGENT_"`
 	Routing   RoutingConfig   `envPrefix:"AGENT_"`
+	Auth      AuthConfig      `envPrefix:"AGENT_AUTH_"`
 }
 
 // RoutingConfig holds resource operation routing configuration.
@@ -42,6 +43,13 @@ type RoutingConfig struct {
 	// CancelAckWait's much shorter default (10s vs AckWait's 120s).
 	CancelHandlerTimeout time.Duration `env:"ROUTING_CANCEL_HANDLER_TIMEOUT" envDefault:"5s"`
 	NakDelay             time.Duration `env:"ROUTING_NAK_DELAY" envDefault:"500ms"`
+}
+
+// AuthConfig holds JWT authentication configuration.
+type AuthConfig struct {
+	Disabled  bool   `env:"DISABLED" envDefault:"true"`
+	IssuerURL string `env:"ISSUER_URL"`
+	Audience  string `env:"JWT_AUDIENCE"`
 }
 
 // HealthConfig holds SP health monitoring configuration.
@@ -242,6 +250,10 @@ func (c *Config) Validate() error {
 	}
 	if c.Routing.DenyListMaxSize < 1000 || c.Routing.DenyListMaxSize > 10000000 {
 		return fmt.Errorf("AGENT_DENY_LIST_MAX_SIZE: value %d is outside valid range [1000, 10000000]", c.Routing.DenyListMaxSize)
+	}
+
+	if !c.Auth.Disabled && c.Auth.IssuerURL == "" {
+		return fmt.Errorf("AGENT_AUTH_ISSUER_URL: required when authentication is enabled (AGENT_AUTH_DISABLED=false)")
 	}
 
 	if c.Messaging.MaxDeliver < 1 || c.Messaging.MaxDeliver > 100 {
