@@ -1,0 +1,614 @@
+openapi: 3.0.4
+info:
+  title: CloudNativePG Database Service Provider API
+  description: |
+    DCM service provider for managing databases in Kubernetes clusters via
+    CloudNativePG.
+    This API follows AEP standards for consistency across DCM services.
+  version: 1.0.0
+  contact:
+    name: DCM Project
+    url: https://github.com/dcm-project/cnpg-database-service-provider
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: /
+    description: CNPG Database Service Provider
+
+tags:
+  - name: Health
+    description: Health check operations
+  - name: Databases
+    description: Database lifecycle management operations
+
+paths:
+  /api/v1alpha1/databases/health:
+    get:
+      summary: Health Check
+      description: Returns the health status of the service
+      operationId: getHealth
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /api/v1alpha1/databases:
+    get:
+      summary: List Databases
+      description: Retrieve a list of databases with pagination support
+      operationId: listDatabases
+      tags:
+        - Databases
+      parameters:
+        - name: max_page_size
+          in: query
+          description: Maximum number of resources to return in a single page
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 1000
+            default: 50
+        - name: page_token
+          in: query
+          description: Token indicating the starting point for the page
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successfully retrieved databases
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatabaseList'
+        '400':
+          description: Bad request
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Authentication required
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Permission denied
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    post:
+      summary: Create Database
+      description: Create a new database instance
+      operationId: createDatabase
+      tags:
+        - Databases
+      parameters:
+        - name: id
+          in: query
+          description: |
+            Optional client-specified ID for the database. If not provided,
+            the server will generate an ID.
+
+            Requirements follow AEP-122 Resource ID - https://aep.dev/122/#resource-id
+          required: false
+          schema:
+            type: string
+            pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+            minLength: 1
+            maxLength: 63
+          example: my-db
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Database'
+      responses:
+        '201':
+          description: Database created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Database'
+        '400':
+          description: Bad request
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Authentication required
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Permission denied
+          content:
+            application/problem+json:
+              schema:
+               $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict - Database with the same name already exists
+          content:
+            application/problem+json:
+              schema:
+               $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+               $ref: '#/components/schemas/Error'
+
+  /api/v1alpha1/databases/{database_id}:
+    get:
+      summary: Get Database
+      description: Retrieve a specific database instance by ID
+      operationId: getDatabase
+      tags:
+        - Databases
+      parameters:
+        - $ref: '#/components/parameters/DatabaseIdPath'
+      responses:
+        '200':
+          description: Database retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Database'
+        '400':
+          description: Bad request
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Authentication required
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Permission denied
+          content:
+            application/problem+json:
+              schema:
+               $ref: '#/components/schemas/Error'
+        '404':
+          description: Database not found
+          content:
+            application/problem+json:
+              schema:
+               $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+               $ref: '#/components/schemas/Error'
+
+    delete:
+      summary: Delete Database
+      description: Delete a specific database instance
+      operationId: deleteDatabase
+      tags:
+        - Databases
+      parameters:
+        - $ref: '#/components/parameters/DatabaseIdPath'
+      responses:
+        '204':
+          description: database deleted successfully
+        '401':
+          description: Authentication required
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Permission denied
+          content:
+            application/problem+json:
+              schema:
+               $ref: '#/components/schemas/Error'
+        '404':
+          description: Database not found
+          content:
+            application/problem+json:
+              schema:
+               $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+               $ref: '#/components/schemas/Error'
+
+components:
+  parameters:
+    DatabaseIdPath:
+      name: database_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+      description: Unique identifier for the database
+      example: my-database
+
+  schemas:
+    Health:
+      type: object
+      description: Health status singleton resource
+      x-aep-resource:
+        singular: health
+        plural: healths
+        singleton: true
+        type: cnpg-database-service-provider.dcm.io/health
+        patterns:
+          - health
+      required:
+        - type
+        - status
+        - path
+        - version
+        - uptime
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          readOnly: true
+          description: Resource type identifier
+          example: "cnpg-database-service-provider.dcm.io/health"
+        status:
+          type: string
+          description: Health status
+          example: "healthy"
+          enum:
+            - healthy
+            - unhealthy
+        path:
+          type: string
+          readOnly: true
+          description: Canonical path of the resource
+          example: "health"
+        version:
+          type: string
+          readOnly: true
+          description: Service provider build version
+          example: "1.0.0"
+        uptime:
+          type: integer
+          readOnly: true
+          description: Seconds since the service provider started
+          example: 3600
+
+    DatabaseStatus:
+      type: string
+      enum:
+        - PENDING
+        - RUNNING
+        - FAILED
+        - UNKNOWN
+        - DELETED
+      description: Current status of the database instance
+
+    DatabaseEngine:
+      type: string
+      description: Database engine (e.g. "postgresql")
+      enum:
+        - postgresql
+
+    DatabaseVersion:
+      type: string
+      description: Database version (e.g. "18", "latest")
+
+    DatabaseCpu:
+      type: object
+      description: CPU allocation for each replica in cores or millicores (e.g., "2", "500m")
+      additionalProperties: true
+      required:
+        - min
+        - max
+      properties:
+        min:
+          type: string
+          description: Minimum guaranteed CPU for each replica in cores or millicores (e.g., "1", "500m")
+          pattern: '^[1-9][0-9]*m?$'
+          example: "500m"
+        max:
+          type: string
+          description: Maximum allowed CPU for each replica in cores or millicores (e.g., "2", "750m")
+          pattern: '^[1-9][0-9]*m?$'
+          example: "750m"
+
+    DatabaseMemory:
+      type: object
+      description: Memory allocation for each replica
+      additionalProperties: true
+      required:
+        - min
+        - max
+      properties:
+        min:
+          type: string
+          description: Minimum guaranteed memory for each replica with unit (e.g., "1GB", "512MB")
+          pattern: '^[1-9][0-9]*(MB|GB|TB|MiB|GiB|TiB)$'
+        max:
+          type: string
+          description: Maximum allowed memory for each replica with unit (e.g., "1GB", "512MB")
+          pattern: '^[1-9][0-9]*(MB|GB|TB|MiB|GiB|TiB)$'
+
+    DatabaseStorage:
+      type: string
+      description: Storage allocation for each replica with units (e.g., "100GB", "2TB")
+      pattern: '^[1-9][0-9]*(MB|GB|TB|MiB|GiB|TiB)$'
+
+
+    DatabaseResources:
+      type: object
+      description: CPU and memory resource constraints
+      additionalProperties: true
+      required:
+        - cpu
+        - memory
+      properties:
+        cpu:
+          $ref: '#/components/schemas/DatabaseCpu'
+        memory:
+          $ref: '#/components/schemas/DatabaseMemory'
+        storage:
+          $ref: '#/components/schemas/DatabaseStorage'
+
+    DatabaseReplicas:
+      type: integer
+      description: Database replica count
+
+    DatabaseNetwork:
+      type: object
+      description: Network configuration
+      additionalProperties: true
+      properties:
+        port:
+          type: integer
+          description: Port for database to listen on
+          minimum: 1
+          maximum: 65535
+        visibility:
+          type: string
+          description: Database visibility
+          enum:
+            - internal
+            - external
+
+    DatabaseMetadata:
+      type: object
+      description: Resource metadata for identification
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: Resource name identifier
+          pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+          minLength: 1
+          maxLength: 63
+        labels:
+          type: object
+          description: Custom key-value pairs for tagging and filtering
+          additionalProperties:
+            type: string
+        namespace:
+          type: string
+          readOnly: true
+          description: Kubernetes namespace where resources are created
+
+    DatabaseSpec:
+      type: object
+      description: Database specification with input fields for creation
+      required:
+        - service_type
+        - metadata
+        - engine
+        - resources
+      properties:
+        service_type:
+          type: string
+          description: Service type identifier (must be "database")
+          enum: [database]
+        metadata:
+          $ref: '#/components/schemas/DatabaseMetadata'
+        engine:
+          $ref: '#/components/schemas/DatabaseEngine'
+        version:
+          $ref: '#/components/schemas/DatabaseVersion'
+        replicas:
+          $ref: '#/components/schemas/DatabaseReplicas'
+        resources:
+          $ref: '#/components/schemas/DatabaseResources'
+        network:
+          $ref: '#/components/schemas/DatabaseNetwork'
+        connection_string:
+          type: string
+          description: |
+            database connection URI (response-only).
+            Format: <scheme>://<username>:<password>@<hostname>:<port>/<database>
+            Empty until the database is running.
+          pattern: '^[a-z][a-z0-9+.-]*://[^/@]+:[^/@]+@[^:/]+:[0-9]+/.+$'
+          readOnly: true
+          example: "postgresql://app:s3cret@pg-db-rw.databases.svc:5432/app"
+        provider_hints:
+          type: object
+          description: Optional provider-specific hints from the catalog (accepted, not acted upon)
+          additionalProperties: true
+
+    Database:
+      type: object
+      description: Database resource representing a database instance
+      x-aep-resource:
+        type: cnpg-database-service-provider.dcm.io/database
+        singular: database
+        plural: databases
+        patterns:
+          - databases/{database_id}
+      required:
+        - spec
+      properties:
+        id:
+          type: string
+          readOnly: true
+          description: Unique identifier for the database instance
+          pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+          minLength: 1
+          maxLength: 63
+          example: my-database
+        path:
+          type: string
+          readOnly: true
+          description: Resource path identifier
+          example: "databases/my-database"
+        spec:
+          $ref: '#/components/schemas/DatabaseSpec'
+        status:
+          readOnly: true
+          allOf:
+            - $ref: '#/components/schemas/DatabaseStatus'
+        create_time:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when the database was created
+        update_time:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when the database was last updated
+
+    DatabaseList:
+      type: object
+      description: Paginated list of database instances
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Database'
+        next_page_token:
+          type: string
+          description: Token for retrieving the next page of results
+
+    ErrorDetail:
+      type: object
+      description: Individual validation error within a multi-error response
+      required: [detail]
+      properties:
+        detail:
+          type: string
+          description: Human-readable explanation of this validation error
+        pointer:
+          type: string
+          description: >
+            JSON Pointer fragment identifier (RFC 6901 §6) locating the request
+            body field that caused this error, e.g. "#/spec/resources/cpu/min".
+            Absent when the error cannot be attributed to a single request body
+            field or is not a validation error.
+          format: json-pointer
+
+    Errors:
+      type: array
+      description: |
+        Present only when two or more same-type validation errors occur.
+        Each entry describes one validation failure. Never empty, never
+        single-entry. Top-level detail equals the first entry for backward
+        compatibility.
+      minItems: 2
+      items:
+        $ref: '#/components/schemas/ErrorDetail'
+
+    Error:
+      type: object
+      description: |
+        RFC 9457 compliant error response (Problem Details for HTTP APIs).
+
+        Defined problem types:
+        | Type URI | Title | HTTP Status |
+        |----------|-------|-------------|
+        | .../problems/invalid-argument | Invalid argument | 400 |
+        | .../problems/not-found | Not found | 404 |
+        | .../problems/already-exists | Already exists | 409 |
+        | .../problems/permission-denied | Permission denied | 403 |
+        | .../problems/unauthenticated | Unauthenticated | 401 |
+        | .../problems/internal | Internal Server Error | 500 |
+        | .../problems/unavailable | Service unavailable | 503 |
+      externalDocs:
+        description: "RFC 9457: Problem Details for HTTP APIs"
+        url: https://datatracker.ietf.org/doc/html/rfc9457
+      required:
+        - type
+        - title
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: URI reference identifying the error type
+          enum:
+            - https://dcm-project.github.io/problems/invalid-argument
+            - https://dcm-project.github.io/problems/not-found
+            - https://dcm-project.github.io/problems/already-exists
+            - https://dcm-project.github.io/problems/permission-denied
+            - https://dcm-project.github.io/problems/unauthenticated
+            - https://dcm-project.github.io/problems/internal
+            - https://dcm-project.github.io/problems/unavailable
+          x-enum-varnames:
+            - INVALIDARGUMENT
+            - NOTFOUND
+            - ALREADYEXISTS
+            - PERMISSIONDENIED
+            - UNAUTHENTICATED
+            - INTERNAL
+            - UNAVAILABLE
+        title:
+          type: string
+          description: Short, human-readable summary
+        status:
+          type: integer
+          format: int16
+          description: HTTP status code
+          minimum: 100
+          maximum: 599
+        detail:
+          type: string
+          description: Human readable explanation specific to this occurrence
+        instance:
+          type: string
+          format: uri-reference
+          description: URI reference for this specific error occurrence
+        pointer:
+          type: string
+          description: >
+            JSON Pointer fragment identifier (RFC 6901 §6) locating the request
+            body field that caused this error, e.g. "#/spec/resources/cpu/min".
+            Absent when the error cannot be attributed to a single request body
+            field or is not a validation error.
+          format: json-pointer
+        errors:
+          $ref: '#/components/schemas/Errors'
+
