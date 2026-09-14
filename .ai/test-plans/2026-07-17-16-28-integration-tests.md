@@ -2391,6 +2391,57 @@ Unless overridden, tests use:
 
 ---
 
+## Container Status Monitoring — Stuck Rollout
+
+> **ID convention note:** this package's test files (`reconcile_integration_test.go`,
+> `reconcile_unit_test.go`, `debounce_integration_test.go`) have always used a `TC-U0xx` (unit) /
+> `TC-I1xx` (integration) comment convention, distinct from the `UT-XXX-NNN`/`IT-XXX-NNN`
+> convention used elsewhere in this doc. The rows below intentionally keep the `TC-` IDs to stay
+> consistent with the code's own comments — this is not an oversight. IDs continue from the
+> existing `TC-I044`–`TC-I046`/`TC-I062`–`TC-I065`/`TC-I113`–`TC-I114` cases in
+> `reconcile_integration_test.go`; `TC-I115` is used in `debounce_integration_test.go` in the same
+> package, so `TC-I120`/`TC-I121` are the next free IDs.
+
+### TC-I120: Publisher receives FAILED when Deployment reaches ProgressDeadlineExceeded
+
+- **Validates AC:** AC-CNT-500
+- **Test Infrastructure:** `monitoring.StatusMonitor` against a fake clientset
+  (`k8s.io/client-go/kubernetes/fake`), using the test file's existing `createDeployment`/
+  `createPod` helpers and `mockStatusPublisher`
+- **Given** a Deployment named `"my-app"` and a Pod named `"my-app-pod"` for instance ID
+  `"abc-123"` are created via `createDeployment("my-app", "abc-123")` and
+  `createPod("my-app-pod", "abc-123", corev1.PodPending)`
+- **When** the Deployment is subsequently fetched and its status updated via `UpdateStatus` to
+  set `Status.Conditions` to exactly
+  `[]appsv1.DeploymentCondition{{Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse, Reason: "ProgressDeadlineExceeded", Message: "ReplicaSet \"my-app-abc123\" has timed out progressing."}}`
+  (mirroring the TC-U080 condition shape, adapted to this test's Deployment name), and the test
+  waits for reconciliation (the file's existing `500 * time.Millisecond` sleep pattern, e.g. as
+  used after the TC-I045 status update)
+- **Then** `publisher.Events()` MUST eventually contain an event with `InstanceID == "abc-123"`
+  and `Status == v1alpha1.FAILED`
+- **Mirrors:** the real image-pull-failure shape end-to-end through the Deployment informer
+  (Pod present, stuck rather than the pre-fix Pod-phase-only path)
+
+---
+
+### TC-I121: Publisher's last event flips to RUNNING when the rollout recovers (no latch)
+
+- **Validates AC:** AC-CNT-501
+- **Test Infrastructure:** same as TC-I120, continuing from its end-state (last published event
+  for instance `"abc-123"` is `FAILED`)
+- **Given** the TC-I120 end-state (Deployment `"my-app"` / Pod `"my-app-pod"` for instance
+  `"abc-123"`, last published event `Status == v1alpha1.FAILED`)
+- **When** the Deployment's condition is updated via `UpdateStatus` to
+  `[]appsv1.DeploymentCondition{{Type: appsv1.DeploymentProgressing, Status: corev1.ConditionTrue}}`
+  (rollout recovered, no `Reason`/`Message`), AND the Pod's phase is updated via `UpdateStatus` to
+  `corev1.PodRunning`, and the test again waits for reconciliation (`500 * time.Millisecond`)
+- **Then** the publisher's LAST event for instance `"abc-123"` MUST have `Status == v1alpha1.RUNNING`
+- **And** it MUST NOT remain latched at `Status == v1alpha1.FAILED`
+- **Proves:** D3/AC-CNT-501 (no-latch) end-to-end — the reconciliation loop reflects live cluster
+  state on every event, mirroring the existing TC-I113/TC-I114 "last event wins" assertion style
+
+---
+
 ## Traceability Matrix
 
 | AC ID | IT ID(s) |
@@ -2562,3 +2613,5 @@ Unless overridden, tests use:
 | AC-XC-CFG-020 | IT-XC-CFG-040 |
 | AC-XC-CFG-030 | IT-XC-CFG-050 |
 | AC-XC-CFG-050 | IT-XC-CFG-060 |
+| AC-CNT-500 | TC-I120 |
+| AC-CNT-501 | TC-I121 |
