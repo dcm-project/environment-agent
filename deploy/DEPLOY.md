@@ -79,10 +79,13 @@ NATS (`deploy/samples/`). The agent routes them to the embedded SPs on Kind.
 make publish-creates
 ```
 
-**In-cluster** (`make k8s-verify` must succeed first to resolve agent and NATS URLs via NodePort):
+**In-cluster** port-forward platform NATS and export URLs (see [in-cluster.md](docs/in-cluster.md#5-publish-sample-create-requests)):
 
 ```bash
-make k8s-publish-creates
+kubectl -n dcm port-forward svc/dcm-nats 4222:4222   # terminal 1
+export AGENT_URL=http://<node-ip>:30081
+export AGENT_MESSAGING_URL=nats://127.0.0.1:4222
+make publish-creates
 ```
 
 Watch workloads on Kind:

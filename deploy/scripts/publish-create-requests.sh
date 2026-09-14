@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Publish sample container + VM dcm.request.create CloudEvents to NATS JetStream.
+#
+# Compose defaults: AGENT_URL=http://localhost:8081, AGENT_MESSAGING_URL=nats://127.0.0.1:4222
+# In-cluster: see deploy/docs/in-cluster.md (port-forward NATS, export AGENT_URL).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-# Host-side defaults (compose .env uses nats://nats:4222).
 export AGENT_MESSAGING_URL="${AGENT_MESSAGING_URL:-nats://127.0.0.1:4222}"
 SAMPLES_DIR="${DEPLOY_SAMPLES_DIR:-${ROOT}/deploy/samples}"
 AGENT_URL="${AGENT_URL:-http://localhost:8081}"
@@ -18,25 +20,6 @@ if ! command -v jq >/dev/null 2>&1; then
 	echo "error: jq is required" >&2
 	exit 1
 fi
-
-nats_cmd() {
-	if command -v nats >/dev/null 2>&1; then
-		nats --server "$AGENT_MESSAGING_URL" "$@"
-	else
-		if [[ -z "${CONTAINER_ENGINE:-}" ]]; then
-			if command -v podman >/dev/null 2>&1; then
-				CONTAINER_ENGINE=podman
-			elif command -v docker >/dev/null 2>&1; then
-				CONTAINER_ENGINE=docker
-			else
-				echo "error: install nats CLI or podman/docker for nats-box fallback" >&2
-				exit 1
-			fi
-		fi
-		"${CONTAINER_ENGINE}" run --rm -i --network host "$NATS_BOX_IMAGE" \
-			nats --server "$AGENT_MESSAGING_URL" "$@"
-	fi
-}
 
 publish_to_nats() {
 	local subject="$1"
@@ -51,7 +34,6 @@ publish_to_nats() {
 				CONTAINER_ENGINE=docker
 			fi
 		fi
-		# Pipe payload on stdin — avoids bind-mount permission issues (rootless podman, SELinux).
 		<"${msg_file}" "${CONTAINER_ENGINE}" run --rm -i --network host "$NATS_BOX_IMAGE" \
 			nats --server "$AGENT_MESSAGING_URL" pub "$subject" --force-stdin
 	fi
@@ -99,8 +81,7 @@ publish_create() {
 
 if ! curl -sf "${AGENT_URL}/api/v1alpha1/health" >/dev/null 2>&1; then
 	echo "warning: agent not healthy at ${AGENT_URL}" >&2
-	echo "         compose: make compose-up  |  in-cluster: make k8s-verify (sets AGENT_URL)" >&2
-	echo "         (publish will still run; agent must be up to route requests)" >&2
+	echo "         see deploy/docs/in-cluster.md for AGENT_URL and AGENT_MESSAGING_URL" >&2
 fi
 
 container_id="${CONTAINER_RESOURCE_ID:-local-container-$(uuidgen | tr -d '-' | cut -c1-8)}"

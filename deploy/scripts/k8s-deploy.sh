@@ -12,23 +12,18 @@ IMAGE="${CONTAINER_IMAGE_NAME:-quay.io/dcm-project/environment-agent}:${TAG}"
 BUILD_IMAGE="${BUILD_IMAGE:-1}"
 K8S_DEPLOY_NATS="${K8S_DEPLOY_NATS:-0}"
 
-UTILITIES_DIR="${UTILITIES_DIR:-${ROOT}/../utilities}"
-KIND_ENV="${UTILITIES_DIR}/scripts/kind/kind-env.sh"
-if [[ ! -f "${KIND_ENV}" ]]; then
-	echo "error: ${KIND_ENV} not found — clone utilities beside this repo or set UTILITIES_DIR" >&2
-	exit 1
-fi
-# shellcheck disable=SC1091
-source "${KIND_ENV}"
-if ! declare -F kind_try_resolve_from_context >/dev/null; then
-	echo "error: ${KIND_ENV} is missing kind_try_resolve_from_context — update utilities" >&2
-	exit 1
-fi
-
 CLUSTER_TYPE="kubernetes"
 KIND_CLUSTER=""
 
-if kind_try_resolve_from_context; then
+UTILITIES_DIR="${UTILITIES_DIR:-${ROOT}/../utilities}"
+KIND_ENV="${UTILITIES_DIR}/scripts/kind/kind-env.sh"
+if [[ -f "${KIND_ENV}" ]]; then
+	# shellcheck disable=SC1091
+	source "${KIND_ENV}"
+fi
+
+# Kind detection is optional (OpenShift and vanilla Kubernetes skip kind load).
+if declare -F kind_try_resolve_from_context >/dev/null && kind_try_resolve_from_context; then
 	CLUSTER_TYPE="kind"
 	KIND_CLUSTER="${KIND_CONTEXT#kind-}"
 elif kubectl api-resources -o name 2>/dev/null | grep -qE '^routes\.route\.openshift\.io$'; then
@@ -105,7 +100,7 @@ echo ""
 if bash "${SCRIPT_DIR}/k8s-host-urls.sh" check; then
 	echo ""
 	echo "  make k8s-verify"
-	echo "  make k8s-publish-creates"
+	echo "  see deploy/docs/in-cluster.md — port-forward NATS, export AGENT_URL, make publish-creates"
 else
 	echo ""
 	if [[ "${CLUSTER_TYPE}" == "openshift" ]]; then

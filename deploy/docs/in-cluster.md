@@ -81,8 +81,25 @@ until a control-plane is reachable.
 
 ### 5. Publish sample create requests
 
+Helm NATS (`dcm-nats`) is in-cluster only. Port-forward from your machine, then set URLs and
+publish:
+
 ```bash
-make k8s-publish-creates
+# Terminal 1 (leave running)
+kubectl -n dcm port-forward svc/dcm-nats 4222:4222
+
+# Terminal 2
+export AGENT_URL=http://<node-ip>:30081          # same host as make k8s-verify
+export AGENT_MESSAGING_URL=nats://127.0.0.1:4222
+make publish-creates
+```
+
+With bundled in-cluster NATS (`make k8s-deploy-with-nats`), use NodePort instead:
+
+```bash
+export AGENT_URL=http://<node-ip>:30081
+export AGENT_MESSAGING_URL=nats://<node-ip>:30422
+make publish-creates
 ```
 
 ### 6. Teardown
@@ -274,7 +291,8 @@ Use a PVC instead of `emptyDir` if SP registrations must survive Pod restarts.
 
 ```bash
 make k8s-verify
-make k8s-publish-creates
+# then port-forward NATS and export AGENT_URL and AGENT_MESSAGING_URL (see step 5)
+make publish-creates
 ```
 
 ## Troubleshooting
