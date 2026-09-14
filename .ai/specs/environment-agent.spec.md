@@ -2102,6 +2102,51 @@ Integration), and Topic 8 (Resource Operation Routing).
 
 ---
 
+### 4.10 Container Status Monitoring (Stuck-Rollout Detection)
+
+#### Overview
+
+The embedded container SP's status-monitoring subsystem
+(`internal/openshift/container/monitoring`) derives a `container` resource's DCM status from
+the live state of its Kubernetes Deployment and Pod. This stub covers only the stuck-initial-
+rollout detection added for FLPATH-4851: a Deployment whose rollout never progresses (bad/
+missing image, unschedulable Pod, bad container config) past `spec.progressDeadlineSeconds`
+(API-server default: 600s). Scope is deliberately limited to the initial rollout — a container
+that starts fine and only later crash-loops (`CrashLoopBackOff` after a prior successful
+`Running`/`Available` state) is out of scope (see D1 in
+`.ai/exploration/FLPATH-4851-assessment.md`). This is a minimal stub, not a full Topic; the
+broader container/storage Kubernetes status-monitoring subsystem has no other tracked REQ/AC/DD
+coverage yet — that remains a separate, larger follow-up.
+
+#### Requirements
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-CNT-500 | `ReconcileStatus` MUST check the Deployment's `Progressing`/`ProgressDeadlineExceeded` condition before, and with precedence over, pod-phase mapping, and MUST evaluate it unconditionally of whether a Pod exists | MUST | See DD-500 |
+
+##### AC-CNT-500: FAILED reported on stuck rollout regardless of Pod existence/phase
+
+- **Validates:** REQ-CNT-500
+- **Given** a Deployment whose rollout has exceeded `progressDeadlineSeconds` (`Status.Conditions` contains `Type: Progressing, Status: False, Reason: ProgressDeadlineExceeded`)
+- **When** `ReconcileStatus` is called, whether or not a Pod exists and regardless of the Pod's phase
+- **Then** the resource MUST be reported `FAILED`
+
+##### AC-CNT-501: No latching — live state on recovery
+
+- **Validates:** REQ-CNT-500
+- **Given** a resource previously reported `FAILED` per AC-CNT-500
+- **When** the Deployment's rollout subsequently recovers (`Progressing` flips back to `True`)
+- **Then** the next reconcile MUST report the corresponding live status (e.g. `PENDING`/`RUNNING`), not remain latched at `FAILED` (see DD-500's no-latch divergence from storage)
+
+##### AC-CNT-502: Existing deploy-only Replicas==0/ReplicaFailure checks unaffected
+
+- **Validates:** REQ-CNT-500
+- **Given** a Deployment explicitly scaled to zero, or reporting `DeploymentReplicaFailure=True`, with no stuck-rollout condition present
+- **When** `ReconcileStatus` is called
+- **Then** existing `FAILED`-detection behavior for those cases MUST be unaffected (regression guard)
+
+---
+
 ## 5. Cross-Cutting Concerns
 
 ### 5.1 Error Handling
@@ -2402,8 +2447,9 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
 | REQ-MSG-NNN | 4.7: Messaging System Integration | 28 |
 | REQ-RTE-NNN | 4.8: Resource Operation Routing | 28 |
 | REQ-RCM-NNN | 4.9: Retry & Cancel Mechanisms | 26 |
+| REQ-CNT-NNN | 4.10: Container Status Monitoring | 1 |
 | REQ-XC-ERR-NNN | 5.1: Error Handling | 4 |
 | REQ-XC-CE-NNN | 5.2: CloudEvent Definitions | 5 |
 | REQ-XC-LOG-NNN | 5.3: Logging | 3 |
 | REQ-XC-CFG-NNN | 5.4: Configuration Management | 6 |
-| **Total** | | **213** |
+| **Total** | | **214** |
