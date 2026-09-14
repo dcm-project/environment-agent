@@ -925,3 +925,36 @@ wiring.
 
 **Related requirements:** REQ-SPR-010, REQ-SPR-030, REQ-SPR-040, REQ-HMN-020, REQ-RTE-030,
 REQ-RTE-210
+
+### DD-500: Elevate `Progressing`/`ProgressDeadlineExceeded` above pod-phase mapping, unconditionally of Pod existence
+
+**Decision:** `ReconcileStatus` (`internal/openshift/container/monitoring/reconcile.go`) now
+checks the Deployment's `Progressing`/`ProgressDeadlineExceeded` condition **before** the
+pod-phase branch, and evaluates it whether or not a Pod currently exists. When the condition
+is present (`Status: False`, `Reason: "ProgressDeadlineExceeded"`), the resource is reported
+`FAILED` regardless of the Pod's phase or existence. The existing deploy-only checks
+(`Replicas == 0`, `DeploymentReplicaFailure`) are unchanged and remain reachable only when
+`pod == nil`.
+
+**Rationale:** A stuck rollout can manifest either as a Pod that never leaves `Pending` (bad
+image reference) or as a Pod cycling `Running`/`CrashLoopBackOff` without the Deployment ever
+reaching `Available` (bad container config) — pod-phase alone cannot distinguish either case
+from a workload that is merely still starting. Both causes are covered uniformly by
+Kubernetes' own native `spec.progressDeadlineSeconds` deadline (API-server default: 600s),
+which the Deployment controller already enforces and surfaces via `.status.conditions`. Using
+this native signal avoids inventing a bespoke agent-side timeout timer for a class of failure
+Kubernetes already detects natively.
+
+**No-latch divergence (deliberate — do not "fix" this back to match storage):** unlike
+storage's PVC Warning-Event pattern (`internal/openshift/storage/monitoring/k8s_events.go`,
+which latches a terminal `FAILED` status once a Warning Event is observed — no DD entry exists
+for that pattern in this file as of this writing), the stuck-rollout check here is a
+**stateless, live read of `Deployment.Status.Conditions` on every reconcile**. If Kubernetes
+later un-sticks the rollout (e.g. `Progressing` flips back to `True`, the Pod reaches
+`Running`), the next reconcile falls through to the pod-phase/deploy-only branches again and
+reports the corresponding live status — it does not remain latched at `FAILED`. This divergence
+is intentional: storage's PVCs have no equivalent self-describing "recovered" signal to revert
+on, while a Deployment's `Progressing` condition is inherently reversible. A future reviewer
+must not port storage's latch to this code path.
+
+**Related requirements:** REQ-CNT-500
