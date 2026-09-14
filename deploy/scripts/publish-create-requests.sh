@@ -51,9 +51,9 @@ publish_to_nats() {
 				CONTAINER_ENGINE=docker
 			fi
 		fi
-		"${CONTAINER_ENGINE}" run --rm --network host \
-			-v "${msg_file}:/msg:ro" "$NATS_BOX_IMAGE" \
-			nats --server "$AGENT_MESSAGING_URL" pub "$subject" "@/msg"
+		# Pipe payload on stdin — avoids bind-mount permission issues (rootless podman, SELinux).
+		<"${msg_file}" "${CONTAINER_ENGINE}" run --rm -i --network host "$NATS_BOX_IMAGE" \
+			nats --server "$AGENT_MESSAGING_URL" pub "$subject" --force-stdin
 	fi
 }
 
@@ -98,7 +98,8 @@ publish_create() {
 }
 
 if ! curl -sf "${AGENT_URL}/api/v1alpha1/health" >/dev/null 2>&1; then
-	echo "warning: agent not healthy at ${AGENT_URL} — start with: make compose-up" >&2
+	echo "warning: agent not healthy at ${AGENT_URL}" >&2
+	echo "         compose: make compose-up  |  in-cluster: make k8s-verify (sets AGENT_URL)" >&2
 	echo "         (publish will still run; agent must be up to route requests)" >&2
 fi
 
