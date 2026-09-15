@@ -96,9 +96,14 @@ make publish-creates
 With bundled in-cluster NATS (`make k8s-deploy-with-nats`), use NodePort instead:
 
 ```bash
-export AGENT_URL=http://<node-ip>:30081
+eval "$(bash deploy/scripts/k8s-host-urls.sh export)"
 export AGENT_MESSAGING_URL=nats://<node-ip>:30422
 make publish-creates
+```
+
+To extract node-ip run command:
+```bash
+kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'
 ```
 
 ### 6. Teardown
