@@ -1,0 +1,14 @@
+# Kind config for local in-cluster dev: maps NodePorts to localhost so
+# make k8s-verify works on Docker Desktop and rootless Podman hosts.
+# Cluster name is set by kind create --name (see deploy/DEPLOY.md).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30081
+        hostPort: 30081
+        protocol: TCP
+      - containerPort: 30422
+        hostPort: 30422
+        protocol: TCP

@@ -1,0 +1,8 @@
+# Optional — not applied by default (see kustomization.yaml).
+# Use when deploying without Helm (no platform namespace yet):
+#   kubectl apply -f deploy/k8s/namespace.yaml
+# When DCM is already installed via Helm, use that namespace and skip this file.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dcm

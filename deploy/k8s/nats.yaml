@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+  namespace: dcm
+  labels:
+    app: nats
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nats
+  template:
+    metadata:
+      labels:
+        app: nats
+    spec:
+      containers:
+        - name: nats
+          image: docker.io/library/nats:2-alpine
+          args: ["--jetstream", "--store_dir=/data"]
+          ports:
+            - name: client
+              containerPort: 4222
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: dcm
+  labels:
+    app: nats
+spec:
+  type: NodePort
+  selector:
+    app: nats
+  ports:
+    - name: client
+      port: 4222
+      targetPort: client
+      nodePort: 30422
