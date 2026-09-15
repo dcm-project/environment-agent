@@ -11,6 +11,7 @@ TAG="${ENVIRONMENT_AGENT_VERSION:-main}"
 IMAGE="${CONTAINER_IMAGE_NAME:-quay.io/dcm-project/environment-agent}:${TAG}"
 BUILD_IMAGE="${BUILD_IMAGE:-1}"
 K8S_DEPLOY_NATS="${K8S_DEPLOY_NATS:-0}"
+K8S_NAMESPACE="${K8S_NAMESPACE:-dcm}"
 
 CLUSTER_TYPE="kubernetes"
 KIND_CLUSTER=""
@@ -18,7 +19,7 @@ KIND_CLUSTER=""
 UTILITIES_DIR="${UTILITIES_DIR:-${ROOT}/../utilities}"
 KIND_ENV="${UTILITIES_DIR}/scripts/kind/kind-env.sh"
 if [[ -f "${KIND_ENV}" ]]; then
-	# shellcheck disable=SC1091
+	# shellcheck disable=SC1090
 	source "${KIND_ENV}"
 fi
 
@@ -62,7 +63,7 @@ apply_manifests() {
 
 	if [[ "${K8S_DEPLOY_NATS}" == "1" ]]; then
 		if ! grep -q 'nats.yaml' "${work_dir}/kustomization.yaml"; then
-			sed -i '/^  - namespace.yaml$/a\  - nats.yaml' "${work_dir}/kustomization.yaml"
+			sed -i '/^  - rbac.yaml$/a\  - nats.yaml' "${work_dir}/kustomization.yaml"
 		fi
 	fi
 
@@ -78,23 +79,29 @@ apply_manifests() {
 		| kubectl apply -f -
 }
 
-echo "==> Applying manifests (image: ${IMAGE}, bundled NATS: ${K8S_DEPLOY_NATS})"
+if ! kubectl get namespace "${K8S_NAMESPACE}" >/dev/null 2>&1; then
+	echo "error: namespace '${K8S_NAMESPACE}' does not exist" >&2
+	echo "  use the Helm release namespace, or: kubectl apply -f ${K8S_DIR}/namespace.yaml" >&2
+	exit 1
+fi
+
+echo "==> Applying manifests to namespace ${K8S_NAMESPACE} (image: ${IMAGE}, bundled NATS: ${K8S_DEPLOY_NATS})"
 apply_manifests
 
 if [[ "${K8S_DEPLOY_NATS}" == "1" ]]; then
 	echo "==> Waiting for NATS"
-	kubectl -n dcm wait --for=condition=available deployment/nats --timeout=120s
+	kubectl -n "${K8S_NAMESPACE}" wait --for=condition=available deployment/nats --timeout=120s
 
 	echo "==> JetStream streams (nats-init)"
-	kubectl -n dcm delete job nats-init --ignore-not-found
+	kubectl -n "${K8S_NAMESPACE}" delete job nats-init --ignore-not-found
 	kubectl apply -f "${K8S_DIR}/nats-init-job.yaml"
-	kubectl -n dcm wait --for=condition=complete job/nats-init --timeout=180s
+	kubectl -n "${K8S_NAMESPACE}" wait --for=condition=complete job/nats-init --timeout=180s
 else
 	echo "==> Skipping bundled NATS (using platform NATS; set K8S_DEPLOY_NATS=1 to deploy in-cluster NATS)"
 fi
 
 echo "==> Waiting for environment-agent"
-kubectl -n dcm rollout status deployment/environment-agent --timeout=180s
+kubectl -n "${K8S_NAMESPACE}" rollout status deployment/environment-agent --timeout=180s
 
 echo ""
 if bash "${SCRIPT_DIR}/k8s-host-urls.sh" check; then

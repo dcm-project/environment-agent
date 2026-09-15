@@ -85,12 +85,11 @@ Helm NATS (`dcm-nats`) is in-cluster only. Port-forward from your machine, then 
 publish:
 
 ```bash
-# Terminal 1 (leave running)
+# On another terminal (leave running)
 kubectl -n dcm port-forward svc/dcm-nats 4222:4222
 
-# Terminal 2
-export AGENT_URL=http://<node-ip>:30081          # same host as make k8s-verify
-export AGENT_MESSAGING_URL=nats://127.0.0.1:4222
+# Current Terminal
+eval "$(bash deploy/scripts/k8s-host-urls.sh export)"
 make publish-creates
 ```
 
@@ -161,7 +160,22 @@ Edit `deploy/k8s/environment-agent.yaml` before deploy:
 make k8s-deploy
 ```
 
-### 3. Teardown
+### 3. Verify and export URLs
+```bash
+make k8s-verify
+eval "$(bash deploy/scripts/k8s-host-urls.sh export)"
+```
+
+### 4. Publish sample create requests
+
+```bash
+# On another terminal (leave running)
+oc -n <namespace> port-forward svc/dcm-nats 4222:4222
+# Current terminal
+make publish-creates
+```
+
+### 5. Teardown
 
 ```bash
 kubectl -n <namespace> delete deployment,service environment-agent --ignore-not-found
@@ -170,6 +184,9 @@ kubectl -n default delete role,rolebinding environment-agent-workloads --ignore-
 ```
 
 ## Configuration
+
+If the agent is not deployed in the same namespace as the Helm DCM release, update `namespace:
+dcm` in `deploy/k8s/`.
 
 Do **not** set `SP_DEFAULT_KUBECONFIG` and do **not** mount a kubeconfig file. When unset, embedded SPs
 use in-cluster configuration (see `internal/config/config.go` and `internal/openshift/kubeconfig/rest.go`).
@@ -183,9 +200,9 @@ env:
   - name: AGENT_NAME
     value: "cluster-agent"
   - name: DCM_REGISTRATION_URL
-    value: "http://dcm-control-plane:8080"
+    value: "http://dcm-control-plane.<namespace>.svc.cluster.local:8080"
   - name: AGENT_MESSAGING_URL
-    value: "nats://dcm-nats:4222"
+    value: "nats://dcm-nats.<namespace>.svc.cluster.local:4222"
   - name: SP_CONTAINER_NAMESPACE
     value: default
   - name: SP_K8S_EXTERNAL_SVC_TYPE

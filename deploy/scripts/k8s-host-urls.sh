@@ -3,6 +3,8 @@
 set -euo pipefail
 
 AGENT_NODE_PORT="${K8S_AGENT_NODE_PORT:-30081}"
+K8S_NAMESPACE="${K8S_NAMESPACE:-dcm}"
+NATS_URL="${AGENT_MESSAGING_URL:-nats://127.0.0.1:4222}"
 
 agent_healthy() {
 	local base="$1"
@@ -31,7 +33,7 @@ resolve_agent_url() {
 }
 
 usage() {
-	echo "usage: $0 {agent|check}" >&2
+	echo "usage: $0 {agent|nats|export|check}" >&2
 	exit 1
 }
 
@@ -39,7 +41,7 @@ cmd="${1:-check}"
 
 if ! AGENT_URL="$(resolve_agent_url)"; then
 	echo "error: agent not reachable on NodePort ${AGENT_NODE_PORT}" >&2
-	echo "  kubectl -n dcm get pods,svc" >&2
+	echo "  kubectl -n ${K8S_NAMESPACE} get pods,svc" >&2
 	node_ip="$(node_internal_ip)"
 	if [[ -n "${node_ip}" ]]; then
 		echo "  try: curl http://${node_ip}:${AGENT_NODE_PORT}/api/v1alpha1/health" >&2
@@ -49,6 +51,14 @@ fi
 
 case "${cmd}" in
 agent) echo "${AGENT_URL}" ;;
-check) echo "AGENT_URL=${AGENT_URL}" ;;
+nats) echo "${NATS_URL}" ;;
+export)
+	echo "export AGENT_URL=${AGENT_URL}"
+	echo "export AGENT_MESSAGING_URL=${NATS_URL}"
+	;;
+check)
+	echo "AGENT_URL=${AGENT_URL}"
+	echo "AGENT_MESSAGING_URL=${NATS_URL}"
+	;;
 *) usage ;;
 esac
