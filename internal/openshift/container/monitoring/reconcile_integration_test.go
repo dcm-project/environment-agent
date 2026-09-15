@@ -255,5 +255,69 @@ var _ = Describe("Status Monitor", func() {
 			Expect(last.Status).To(Equal(v1alpha1.RUNNING),
 				"last event for abc-123 should be RUNNING (surviving pod), not PENDING (deploy-only fallback)")
 		})
+
+		It("should publish FAILED when Deployment reaches ProgressDeadlineExceeded, then un-latch to RUNNING when the rollout recovers (TC-I120, TC-I121)", func() {
+			// TC-I120: Deployment + Pod (Pending), then Deployment status
+			// updated to a stuck-rollout condition -> publisher eventually
+			// receives a FAILED event for the instance.
+			createDeployment("my-app", "abc-123")
+			createPod("my-app-pod", "abc-123", corev1.PodPending)
+
+			deploy, err := client.AppsV1().Deployments("default").Get(ctx, "my-app", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			deploy.Status.Conditions = []appsv1.DeploymentCondition{
+				{
+					Type:    appsv1.DeploymentProgressing,
+					Status:  corev1.ConditionFalse,
+					Reason:  "ProgressDeadlineExceeded",
+					Message: `ReplicaSet "my-app-abc123" has timed out progressing.`,
+				},
+			}
+			_, err = client.AppsV1().Deployments("default").UpdateStatus(ctx, deploy, metav1.UpdateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			time.Sleep(500 * time.Millisecond)
+
+			events := publisher.Events()
+			Expect(events).NotTo(BeEmpty())
+			var foundFailed bool
+			for _, e := range events {
+				if e.InstanceID == "abc-123" && e.Status == v1alpha1.FAILED {
+					foundFailed = true
+					break
+				}
+			}
+			Expect(foundFailed).To(BeTrue(), "expected FAILED event for instance abc-123")
+
+			// TC-I121: continuing from the TC-I120 FAILED end-state, the
+			// rollout recovers (Progressing=True, no Reason/Message) and the
+			// Pod becomes Running -> the publisher's LAST event for the
+			// instance must be RUNNING, not latched at FAILED.
+			deploy, err = client.AppsV1().Deployments("default").Get(ctx, "my-app", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			deploy.Status.Conditions = []appsv1.DeploymentCondition{
+				{Type: appsv1.DeploymentProgressing, Status: corev1.ConditionTrue},
+			}
+			_, err = client.AppsV1().Deployments("default").UpdateStatus(ctx, deploy, metav1.UpdateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			pod, err := client.CoreV1().Pods("default").Get(ctx, "my-app-pod", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			pod.Status.Phase = corev1.PodRunning
+			_, err = client.CoreV1().Pods("default").UpdateStatus(ctx, pod, metav1.UpdateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			time.Sleep(500 * time.Millisecond)
+
+			events = publisher.Events()
+			var last monitoring.StatusEvent
+			for _, e := range events {
+				if e.InstanceID == "abc-123" {
+					last = e
+				}
+			}
+			Expect(last.Status).To(Equal(v1alpha1.RUNNING),
+				"last event for abc-123 should be RUNNING, not latched at FAILED")
+		})
 	})
 })
