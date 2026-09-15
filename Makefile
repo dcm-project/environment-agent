@@ -129,6 +129,20 @@ generate-storage-spec:
 
 generate-storage-api: generate-storage-types generate-storage-spec
 
+generate-database-types:
+	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
+		--config=api/database/v1alpha1/types.gen.cfg \
+		-o api/database/v1alpha1/types.gen.go \
+		api/database/v1alpha1/openapi.yaml
+
+generate-database-spec:
+	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
+		--config=api/database/v1alpha1/spec.gen.cfg \
+		-o api/database/v1alpha1/spec.gen.go \
+		api/database/v1alpha1/openapi.yaml
+
+generate-database-api: generate-database-types generate-database-spec
+
 bundle-vm-openapi:
 	@echo "Bundling VM OpenAPI specification..."
 	@command -v redocly >/dev/null 2>&1 || { \
@@ -159,7 +173,7 @@ generate-vm-server:
 
 generate-vm-api: generate-vm-types generate-vm-spec generate-vm-server
 
-generate-sp-api: generate-cluster-api generate-container-api generate-storage-api generate-vm-api
+generate-sp-api: generate-cluster-api generate-container-api generate-storage-api generate-database-api generate-vm-api
 
 generate-api: generate-types generate-spec generate-server generate-client generate-sp-api
 
@@ -185,5 +199,6 @@ image-build: check-container-engine
 	generate-cluster-types generate-cluster-spec generate-cluster-api \
 	generate-container-types generate-container-spec generate-container-server generate-container-api \
 	generate-storage-types generate-storage-spec generate-storage-api \
+	generate-database-types generate-database-spec generate-database-api \
 	bundle-vm-openapi generate-vm-types generate-vm-spec generate-vm-server generate-vm-api \
 	generate-sp-api generate-api check-generate-api check-aep check-container-engine image-build
