@@ -309,14 +309,6 @@ the parent directory (e.g. `.../data`) and point the env var at `.../data/regist
 
 Use a PVC instead of `emptyDir` if SP registrations must survive Pod restarts.
 
-## Verify
-
-```bash
-make k8s-verify
-# then port-forward NATS and export AGENT_URL and AGENT_MESSAGING_URL (see step 5)
-make publish-creates
-```
-
 ## Troubleshooting
 
 **Embedded SP missing or unhealthy after start**
