@@ -27,6 +27,10 @@ go.work.sum
 
 # env file
 .env
+deploy/.env
+
+# Generated kubeconfig for compose + Kind (see make kubeconfig-for-compose)
+deploy/.kube/
 
 # --- Editor/IDE ---
 .idea/
