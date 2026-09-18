@@ -138,7 +138,7 @@ type Disk struct {
 	AdditionalProperties map[string]interface{} `json:"-"`
 }
 
-// Error RFC 7807 compliant error response
+// Error Problem details error response (RFC 9457)
 type Error struct {
 	// Detail Human-readable explanation specific to this occurrence
 	//

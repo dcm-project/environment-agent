@@ -1,8 +1,10 @@
 package kubevirt_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -47,6 +49,23 @@ var _ = Describe("Errors", func() {
 			Expect(statusCode).To(Equal(http.StatusBadRequest))
 			Expect(body.Title).To(Equal("Validation Error"))
 			Expect(*body.Detail).To(Equal("invalid field"))
+			Expect(*body.Status).To(Equal(http.StatusBadRequest))
+		})
+	})
+
+	Describe("WriteProblem", func() {
+		It("should write application/problem+json with type and title", func() {
+			rec := httptest.NewRecorder()
+			kubevirt.WriteProblem(rec, http.StatusBadRequest, "Validation Error", "value is required but missing")
+
+			Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			Expect(rec.Header().Get("Content-Type")).To(Equal("application/problem+json"))
+
+			var body server.Error
+			Expect(json.Unmarshal(rec.Body.Bytes(), &body)).To(Succeed())
+			Expect(body.Type).To(Equal("about:blank"))
+			Expect(body.Title).To(Equal("Validation Error"))
+			Expect(*body.Detail).To(Equal("value is required but missing"))
 			Expect(*body.Status).To(Equal(http.StatusBadRequest))
 		})
 	})

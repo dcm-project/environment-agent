@@ -1,7 +1,10 @@
 package kubevirt
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -9,7 +12,7 @@ import (
 	"github.com/dcm-project/environment-agent/internal/openshift/kubevirtvm/oapi/server"
 )
 
-// problemError creates a server.Error with the standard "about:blank" type.
+// problemError creates a server.Error with the generic about:blank type (RFC 9457).
 func problemError(status int, title, detail string) server.Error {
 	typ := "about:blank"
 	return server.Error{
@@ -50,6 +53,22 @@ func InternalServerError(detail string) (server.Error, int) {
 // ValidationError returns a problem+json error body and 400 status code.
 func ValidationError(detail string) (server.Error, int) {
 	return problemError(http.StatusBadRequest, "Validation Error", detail), http.StatusBadRequest
+}
+
+// WriteProblem writes an RFC 9457 problem+json response.
+func WriteProblem(w http.ResponseWriter, status int, title, detail string) {
+	body := problemError(status, title, detail)
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(body); err != nil {
+		slog.Default().Error("failed to encode problem+json", "error", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	if _, err := buf.WriteTo(w); err != nil {
+		slog.Default().Error("failed to write problem+json", "error", err)
+	}
 }
 
 // IsAlreadyExistsError checks if the error indicates a resource already exists.
