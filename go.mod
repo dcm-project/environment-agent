@@ -14,7 +14,7 @@ require (
 	github.com/oapi-codegen/oapi-codegen/v2 v2.8.0
 	github.com/oapi-codegen/runtime v1.7.0
 	github.com/onsi/ginkgo/v2 v2.32.1
-	github.com/onsi/gomega v1.42.1
+	github.com/onsi/gomega v1.43.0
 	github.com/openshift/hypershift/api v0.0.0-20260318145522-655c0d2abeaa
 	k8s.io/api v0.35.0
 	k8s.io/apimachinery v0.35.2
