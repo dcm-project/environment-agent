@@ -113,6 +113,62 @@ Unless overridden, tests use:
 
 ---
 
+### IT-AUTH-120: Missing-credential rejection produces one request audit log entry
+
+- **Validates AC:** AC-AUTH-110
+- **Test Infrastructure:** Real HTTP server wired with the real `auth.Middleware` (mock `JWTValidator`), log capture
+- **Given** the agent is running with authentication enabled
+- **When** `GET /api/v1alpha1/providers` is sent without an `Authorization` header
+- **Then** the response MUST be HTTP 401
+- **And** exactly one INFO-level request audit log entry MUST be emitted for that request, with method=`GET`, path=`/api/v1alpha1/providers`, status=`401`, and a non-zero duration
+- **And** the middleware ordering (auth before `RequestLogger`) MUST remain unchanged
+
+---
+
+### IT-AUTH-121: Invalid-credential rejection produces one request audit log entry
+
+- **Validates AC:** AC-AUTH-110
+- **Test Infrastructure:** Real HTTP server wired with the real `auth.Middleware` (mock `JWTValidator` returning an error), log capture
+- **Given** the agent is running with authentication enabled
+- **When** `GET /api/v1alpha1/providers` is sent with `Authorization: Bearer invalid-token`
+- **Then** the response MUST be HTTP 401
+- **And** exactly one INFO-level request audit log entry MUST be emitted for that request
+
+---
+
+### IT-AUTH-122: Successful authenticated request retains JWT identity in the audit log
+
+- **Validates AC:** AC-AUTH-110, AC-AUTH-070
+- **Test Infrastructure:** Real HTTP server wired with the real `auth.Middleware` (mock `JWTValidator` returning claims), log capture
+- **Given** the agent is running with authentication enabled
+- **When** `GET /api/v1alpha1/providers` is sent with a valid Bearer token whose claims include `sub=user-123` and `preferred_username=jdoe`
+- **Then** the response MUST be HTTP 200
+- **And** exactly one INFO-level request audit log entry MUST be emitted including `sub=user-123` and `preferred_username=jdoe`
+
+---
+
+### IT-AUTH-130: A hanging JWTValidator does not hang the request past the configured timeout
+
+- **Validates AC:** AC-AUTH-090
+- **Test Infrastructure:** Real HTTP server wired with the real `auth.Middleware`, a `JWTValidator`
+  whose `Validate` deliberately outlasts the configured timeout (returns on `ctx.Done()` or its own
+  delay, whichever comes first — the same idiom as IT-HTTP-120's slow handler),
+  `AGENT_SERVER_REQUEST_TIMEOUT=1s`
+- **Given** the agent is running with authentication enabled and a per-request timeout of 1s
+- **When** `GET /api/v1alpha1/providers` is sent with a Bearer token, and the validator would take
+  3s to return (an error, in this case)
+- **Then** the client MUST receive a response at approximately the 1s timeout, not the validator's
+  3s delay
+- **And** the response MUST be HTTP 503 with RFC 7807 body (`type=UNAVAILABLE`) — deterministically,
+  never the 401 the validator's error would otherwise have produced, and never a 200 — because
+  `RequestTimeout` only checks `ctx.Err()` after `next.ServeHTTP` returns and unconditionally
+  discards the buffered response once the deadline has already passed (DD-170)
+- **Note:** demonstrates that the middleware ordering from AC-AUTH-090 (auth executing after
+  `PanicRecovery` and before `RequestLogger`) also places auth *inside* `RequestTimeout`'s
+  boundary, so a hanging validator cannot hang the whole server past the deadline
+
+---
+
 ### IT-HTTP-080: Panic recovery returns RFC 7807 INTERNAL error
 
 - **Validates AC:** AC-HTTP-070
@@ -124,6 +180,22 @@ Unless overridden, tests use:
 - **And** the body MUST NOT contain stack traces or file paths
 - **And** the process MUST NOT crash
 - **And** logs MUST contain an ERROR-level entry with the panic and stack trace
+
+---
+
+### IT-HTTP-081: Panic recovery still produces a request audit log entry
+
+- **Validates AC:** AC-HTTP-060
+- **Test Infrastructure:** Real HTTP server with a test handler that panics, log capture
+- **Given** a handler is registered that triggers a panic
+- **When** a request is made to that handler
+- **Then** the response MUST be HTTP 500 (as tested in IT-HTTP-080)
+- **And** logs MUST also contain an INFO-level `msg=request` audit log entry with `status=500`
+- **Note:** guards the DD-510 centralization of audit-log emission in `RequestTimeout` against
+  regressing the pre-existing guarantee that a panicking request still produces one audit entry
+  (previously emitted by `RequestLogger`'s own panic-safe defer, calling `auth.LogRequest`
+  directly; now emitted via `RequestTimeout`'s recover, using the status `RequestLogger` recorded
+  into the shared `requestctx.Outcome` before the panic reached it)
 
 ---
 
@@ -191,6 +263,23 @@ Unless overridden, tests use:
 - **When** a request reaches a handler that takes longer than 1s
 - **Then** the response MUST be HTTP 503 with RFC 7807 body (`type=UNAVAILABLE`)
 - **And** the request context MUST be cancelled (handler observes context done)
+
+---
+
+### IT-HTTP-121: Disabled timeout enforcement still buffers, flushes, and audit-logs
+
+- **Validates AC:** AC-HTTP-095
+- **Test Infrastructure:** Real HTTP server, `RequestTimeout` configured to `0` (disabled), log capture
+- **Given** the agent is configured with per-request timeout enforcement disabled (`timeout <= 0`)
+- **When** a request is processed
+- **Then** the response MUST still carry the handler's status, headers, and body (buffering and
+  flushing MUST still occur)
+- **And** exactly one INFO-level `msg=request` audit log entry MUST still be emitted for that
+  request
+- **Note:** guards `RequestTimeout` always wrapping the request for buffering and single-point
+  audit-log emission (DD-510) even when deadline enforcement itself is off — i.e. against the
+  previous `if timeout <= 0 { return next }` short-circuit (which skipped buffering and left
+  `RequestLogger` to log directly) silently reappearing
 
 ---
 
@@ -2451,12 +2540,14 @@ Unless overridden, tests use:
 | AC-HTTP-030 | IT-HTTP-030, IT-HTTP-050 |
 | AC-HTTP-040 | IT-HTTP-040 |
 | AC-HTTP-050 | IT-HTTP-060 |
-| AC-HTTP-060 | IT-HTTP-070 |
-| AC-HTTP-070 | IT-HTTP-080 |
+| AC-HTTP-060 | IT-HTTP-070, IT-HTTP-081 |
+| AC-AUTH-110 | IT-AUTH-120, IT-AUTH-121, IT-AUTH-122 |
+| AC-AUTH-090 | IT-AUTH-130 |
+| AC-HTTP-070 | IT-HTTP-080, IT-HTTP-081 |
 | AC-HTTP-080 | IT-HTTP-030, IT-HTTP-090 |
 | AC-HTTP-090 | IT-HTTP-100 |
 | AC-HTTP-091 | IT-HTTP-110, IT-HTTP-110b |
-| AC-HTTP-095 | IT-HTTP-120 |
+| AC-HTTP-095 | IT-HTTP-120, IT-HTTP-121 |
 | AC-HLT-010 | IT-HLT-010 |
 | AC-HLT-020 | IT-HLT-020 |
 | AC-HLT-030 | IT-HLT-030 |
