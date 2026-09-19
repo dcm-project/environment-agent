@@ -48,11 +48,12 @@ type registrationResponse struct {
 // dcmClient is hand-rolled pending a generated control-plane client once the
 // DCM agent registration OpenAPI spec is published.
 type dcmClient struct {
-	baseURL    *url.URL
-	httpClient *http.Client
+	baseURL     *url.URL
+	httpClient  *http.Client
+	tokenSource TokenSource
 }
 
-func newDCMClient(registrationURL string) (*dcmClient, error) {
+func newDCMClient(registrationURL string, tokenSource TokenSource) (*dcmClient, error) {
 	u, err := url.Parse(registrationURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid registration URL: %w", err)
@@ -61,8 +62,9 @@ func newDCMClient(registrationURL string) (*dcmClient, error) {
 		return nil, fmt.Errorf("invalid registration URL: missing host")
 	}
 	return &dcmClient{
-		baseURL:    u,
-		httpClient: &http.Client{Timeout: 60 * time.Second},
+		baseURL:     u,
+		httpClient:  &http.Client{Timeout: 60 * time.Second},
+		tokenSource: tokenSource,
 	}, nil
 }
 
@@ -78,6 +80,10 @@ func (c *dcmClient) register(ctx context.Context, payload registrationPayload) (
 		return "", fmt.Errorf("create registration request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+
+	if err := c.setAuthHeader(ctx, req); err != nil {
+		return "", fmt.Errorf("registration: %w", err)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -133,6 +139,10 @@ func (c *dcmClient) heartbeat(ctx context.Context, agentID string, payload heart
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	if err := c.setAuthHeader(ctx, req); err != nil {
+		return fmt.Errorf("heartbeat: %w", err)
+	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("heartbeat request failed: %w", err)
@@ -143,4 +153,18 @@ func (c *dcmClient) heartbeat(ctx context.Context, agentID string, payload heart
 		return nil
 	}
 	return fmt.Errorf("heartbeat failed (HTTP %d)", resp.StatusCode)
+}
+
+func (c *dcmClient) setAuthHeader(ctx context.Context, req *http.Request) error {
+	if c.tokenSource == nil {
+		return nil
+	}
+	token, err := c.tokenSource.Token(ctx)
+	if err != nil {
+		return fmt.Errorf("obtain auth token: %w", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return nil
 }

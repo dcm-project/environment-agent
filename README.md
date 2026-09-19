@@ -77,6 +77,97 @@ For integration with the control-plane stack, see
 To run the agent on the same cluster as embedded SP workloads, see
 [deploy/docs/in-cluster.md](deploy/docs/in-cluster.md) (`make k8s-deploy` on Kind).
 
+## Control Plane Authentication
+
+The agent authenticates outbound HTTP requests (registration and heartbeat) to
+the DCM control plane when the control plane has authentication enabled. Two
+modes are available; when neither is configured, requests are sent without an
+`Authorization` header (backward-compatible default).
+
+See the DCM [authentication user guide](https://dcm-project.github.io/docs/getting-started/authentication/)
+([dcm-project.github.io#22](https://github.com/dcm-project/dcm-project.github.io/pull/22))
+for the control plane's OIDC/JWT behavior, issuer/audience configuration, and
+the reference Keycloak stack used by `make compose-up`.
+
+### Mode 1: OAuth2 Client Credentials (recommended for production)
+
+The agent obtains short-lived JWTs from an OIDC token endpoint using the
+`client_credentials` grant, and refreshes them automatically before expiry.
+
+| Variable | Description |
+|---|---|
+| `DCM_AUTH_TOKEN_ENDPOINT` | OIDC token endpoint URL (e.g. `https://keycloak:8443/realms/dcm/protocol/openid-connect/token`) |
+| `DCM_AUTH_CLIENT_ID` | OAuth2 client ID for the agent's service account |
+| `DCM_AUTH_CLIENT_SECRET` | OAuth2 client secret |
+
+> **Caution:** Using `http://` for `DCM_AUTH_TOKEN_ENDPOINT` sends the client secret unencrypted
+> on every token request. The agent logs a startup warning in this case; prefer `https://` in any
+> non-local deployment. The agent also refuses to follow any HTTP redirect returned by the token
+> endpoint, so the client secret is never resent to a different origin.
+
+All three variables must be set together. Partial configuration (e.g. endpoint
+without client ID) causes a startup-fatal error identifying the missing fields.
+
+Tokens are cached in memory and refreshed proactively (with a 10-second safety
+buffer before the `expires_in` deadline). Token fetch failures do not crash the
+agent — the affected registration or heartbeat call fails and is retried by the
+existing backoff logic.
+
+#### Keycloak Setup
+
+1. Create a service-account client in the DCM realm (e.g. `environment-agent`).
+2. Enable **Client authentication** and **Service accounts roles**.
+3. Assign the role(s) the control plane expects for agent registration.
+4. Attach an audience mapper for `aud=dcm-api` to the client (see caveat below).
+5. Set the three `DCM_AUTH_*` variables to the client's credentials.
+
+> **Known gap — audience mapper missing for the agent client:** The control
+> plane requires `aud=dcm-api` on inbound tokens, but in the reference
+> Keycloak realm the `dcm-api` audience mapper is shipped attached only to the
+> `dcm-proxy` and `dcm-cli` clients, not to the agent's service-account client.
+> Validating the full registration flow against that stock realm produces a
+> token without the `dcm-api` audience, and the control plane rejects it with
+> `401`. Until an equivalent mapper is added for the agent's client (or the
+> realm's reference config is updated upstream), explicitly attach a
+> `dcm-api` audience mapper to the client created above before relying on
+> Mode 1 against the reference stack.
+
+#### Kubernetes Secrets
+
+Store the client secret in a Kubernetes Secret and inject it via `envFrom`:
+
+```yaml
+envFrom:
+  - secretRef:
+      name: environment-agent-auth
+```
+
+This avoids embedding secrets in pod specs or config maps.
+
+### Mode 2: Static Bearer Token (dev / simple deployments)
+
+| Variable | Description |
+|---|---|
+| `DCM_AUTH_TOKEN` | A pre-obtained JWT sent as-is on every request |
+
+**Limitations:**
+
+- No automatic refresh. When the token expires, the control plane returns 401,
+  which is a non-retryable error — registration halts permanently until the
+  agent is restarted with a fresh token.
+- Intended for development or short-lived environments where token lifetime
+  exceeds the agent's expected uptime.
+
+### Config Precedence
+
+If both modes are configured, client credentials takes precedence over the
+static token. The resolution order is:
+
+1. **Client Credentials** — `DCM_AUTH_TOKEN_ENDPOINT` + `DCM_AUTH_CLIENT_ID` +
+   `DCM_AUTH_CLIENT_SECRET` all set
+2. **Static Token** — `DCM_AUTH_TOKEN` set
+3. **No Auth** — neither configured (no `Authorization` header)
+
 ## API Endpoints
 
 | Method | Endpoint                              | Description                         |

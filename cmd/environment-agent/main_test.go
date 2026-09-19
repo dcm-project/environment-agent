@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dcm-project/environment-agent/internal/config"
+	"github.com/dcm-project/environment-agent/internal/dcm"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -113,5 +115,61 @@ var _ = Describe("run", Label("unit"), func() {
 			"run() must fail fast on a 240-char AGENT_NAME (too long for JetStream stream/consumer "+
 				"names once a suffix is appended, per REQ-MSG-011) rather than ever reaching the 30s "+
 				"createRequestConsumer retry loop")
+	})
+})
+
+var _ = Describe("buildTokenSource", Label("unit"), func() {
+	It("returns a ClientCredentialsTokenSource when only client-credentials is configured (TC-MAIN-UT-AUTH-010)", func() {
+		cfg := &config.Config{
+			DCM: config.DCMConfig{
+				AuthTokenEndpoint: "http://keycloak:8080/token",
+				AuthClientID:      "agent-client",
+				AuthClientSecret:  "super-secret",
+			},
+		}
+
+		got := buildTokenSource(cfg)
+
+		_, ok := got.(*dcm.ClientCredentialsTokenSource)
+		Expect(ok).To(BeTrue(), "expected *dcm.ClientCredentialsTokenSource, got %T", got)
+	})
+
+	It("returns a StaticTokenSource when only a static token is configured (TC-MAIN-UT-AUTH-020)", func() {
+		cfg := &config.Config{
+			DCM: config.DCMConfig{
+				AuthToken: "my-static-jwt",
+			},
+		}
+
+		got := buildTokenSource(cfg)
+
+		_, ok := got.(*dcm.StaticTokenSource)
+		Expect(ok).To(BeTrue(), "expected *dcm.StaticTokenSource, got %T", got)
+	})
+
+	// Real proof of AC-DCM-230 precedence; see IT-DCM-AUTH-030b for the integration side.
+	It("prefers client-credentials over a competing static token (TC-MAIN-UT-AUTH-030)", func() {
+		cfg := &config.Config{
+			DCM: config.DCMConfig{
+				AuthToken:         "my-static-jwt",
+				AuthTokenEndpoint: "http://keycloak:8080/token",
+				AuthClientID:      "agent-client",
+				AuthClientSecret:  "super-secret",
+			},
+		}
+
+		got := buildTokenSource(cfg)
+
+		_, ok := got.(*dcm.ClientCredentialsTokenSource)
+		Expect(ok).To(BeTrue(), "expected client-credentials to take precedence over the static "+
+			"token, got %T", got)
+	})
+
+	It("returns nil when neither auth mode is configured (TC-MAIN-UT-AUTH-040)", func() {
+		cfg := &config.Config{DCM: config.DCMConfig{}}
+
+		got := buildTokenSource(cfg)
+
+		Expect(got).To(BeNil())
 	})
 })
