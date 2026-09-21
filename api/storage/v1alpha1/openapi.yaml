@@ -1,9 +1,8 @@
 openapi: 3.0.4
 info:
-  title: Kubernetes Storage Service Provider API
+  title: Storage Service Provider API
   description: |
-    REST API for managing persistent storage volumes (PersistentVolumeClaims)
-    on Kubernetes clusters on behalf of DCM.
+    REST API for managing persistent storage volumes on behalf of DCM.
     This API follows AEP standards for consistency across DCM services.
   version: 1.0.0
   contact:
@@ -14,7 +13,7 @@ info:
 
 servers:
   - url: /
-    description: K8s Storage Service Provider
+    description: Storage Service Provider
 
 tags:
   - name: Health
@@ -69,7 +68,7 @@ paths:
 
     post:
       summary: Create Volume
-      description: Create a new storage volume instance (PersistentVolumeClaim)
+      description: Create a new storage volume instance
       operationId: createVolume
       tags:
         - Volumes
@@ -107,13 +106,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: Volume with the same instance ID (PVC name) already exists
+          description: Volume with the same instance ID already exists
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Error'
         '422':
-          description: Requested StorageClass does not exist
+          description: Requested storage class does not exist
           content:
             application/problem+json:
               schema:
@@ -171,7 +170,7 @@ paths:
 
     delete:
       summary: Delete Volume
-      description: Delete a specific volume instance (PVC)
+      description: Delete a specific volume instance
       operationId: deleteVolume
       tags:
         - Volumes
@@ -213,7 +212,7 @@ components:
         singular: health
         plural: healths
         singleton: true
-        type: k8s-storage-service-provider.dcm.io/health
+        type: storage-service-provider.dcm.io/health
         patterns:
           - health
       required:
@@ -228,7 +227,7 @@ components:
           format: uri-reference
           readOnly: true
           description: Resource type identifier
-          example: "k8s-storage-service-provider.dcm.io/health"
+          example: "storage-service-provider.dcm.io/health"
         status:
           type: string
           description: Health status
@@ -259,24 +258,6 @@ components:
         - DELETED
       description: Current status of the storage instance (CloudEvents payload uses this enum)
 
-    VolumeAccessMode:
-      type: string
-      enum:
-        - ReadWriteOnce
-        - ReadOnlyMany
-        - ReadWriteMany
-      description: |
-        PVC access mode. Controls attachment scope and permissions at creation
-        time (Kubernetes-specific; see service type definitions).
-      example: ReadWriteOnce
-
-    VolumeMode:
-      type: string
-      enum:
-        - Filesystem
-        - Block
-      description: PVC volume mode
-
     VolumeMetadata:
       type: object
       description: Resource metadata for identification
@@ -285,7 +266,7 @@ components:
       properties:
         name:
           type: string
-          description: DCM instance ID and Kubernetes PVC name (AEP-122)
+          description: DCM instance ID (AEP-122)
           pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
           minLength: 1
           maxLength: 63
@@ -297,40 +278,24 @@ components:
         namespace:
           type: string
           readOnly: true
-          description: Kubernetes namespace where the PVC was created
+          description: Platform namespace where the volume was created
         storage_class:
           type: string
           readOnly: true
-          description: StorageClass name bound to the PVC
+          description: Storage class name bound to the volume
         volume_name:
           type: string
           readOnly: true
-          description: Bound PersistentVolume name when available
-
-    KubernetesProviderHints:
-      type: object
-      description: Kubernetes-specific PVC settings
-      additionalProperties: false
-      properties:
-        storage_class:
-          type: string
-          description: StorageClass name (overrides SP default)
-        volume_mode:
-          $ref: '#/components/schemas/VolumeMode'
-        access_mode:
-          $ref: '#/components/schemas/VolumeAccessMode'
+          description: Bound backend volume name when available
 
     ProviderHints:
       type: object
       description: Provider-specific hints from the catalog
       additionalProperties: true
-      properties:
-        kubernetes:
-          $ref: '#/components/schemas/KubernetesProviderHints'
 
     StorageSpec:
       type: object
-      description: Storage specification for creating a PVC (implements the portable storage service type)
+      description: Storage specification for creating a volume (implements the portable storage service type)
       required:
         - service_type
         - metadata
@@ -352,9 +317,9 @@ components:
 
     Volume:
       type: object
-      description: Volume resource representing a PVC instance
+      description: Volume resource representing a storage instance
       x-aep-resource:
-        type: k8s-storage-service-provider.dcm.io/volume
+        type: storage-service-provider.dcm.io/volume
         singular: volume
         plural: volumes
         patterns:

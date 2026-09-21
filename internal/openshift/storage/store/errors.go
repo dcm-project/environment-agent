@@ -23,10 +23,18 @@ func (e *ConflictError) Error() string {
 // InvalidArgumentError indicates a validation failure in the request.
 type InvalidArgumentError struct {
 	Message string
+	Err     error
 }
 
 func (e *InvalidArgumentError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s: %v", e.Message, e.Err)
+	}
 	return e.Message
+}
+
+func (e *InvalidArgumentError) Unwrap() error {
+	return e.Err
 }
 
 // FailedPreconditionError indicates a request that cannot be fulfilled due to
