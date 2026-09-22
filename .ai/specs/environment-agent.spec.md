@@ -2177,11 +2177,14 @@ left empty (REQ-AUTH-110). This behavior, including both the audience-match
 and no-audience-configured paths, is proven independently in this repo (see
 AC-AUTH-120 / UT-AUTH-110–112) against a locally-generated RSA keypair, OIDC
 discovery document, and JWKS — it does not depend on `control-plane`'s tests.
-The corroborating evidence that this pattern is sound in production is that
-`control-plane`'s `internal/auth/jwt.go` uses a structurally near-identical
-`NewOIDCValidator`/`Validate` implementation (same `coreos/go-oidc/v3` usage),
-proven there against a real Keycloak container in a docker-compose subsystem
-test.
+This repo also has its own real-Keycloak proof, independent of `control-plane`'s:
+AC-AUTH-130, exercised by a dedicated `docker-compose`-based subsystem test
+(`test/subsystem/auth`, Ginkgo `-tags=subsystem`) that runs the full agent
+binary against a real Keycloak container. `control-plane`'s `internal/auth/jwt.go`
+uses a structurally near-identical `NewOIDCValidator`/`Validate` implementation
+(same `coreos/go-oidc/v3` usage) and predates this repo's own proof — it remains
+useful prior art, but is no longer the sole evidence that this pattern holds
+against a real IdP.
 
 #### Requirements
 
@@ -2304,6 +2307,24 @@ test.
 - **Then** `OIDCValidator.Validate` MUST succeed and return the token's `sub`/`preferred_username`
 - **And** when the token's `aud` claim does not match the configured audience, `Validate` MUST fail
 - **And** when the token carries no `aud` claim at all and `AGENT_AUTH_JWT_AUDIENCE` is empty (the `SkipClientIDCheck` path), `Validate` MUST still succeed, so authentication fails open on audience rather than silently breaking when no mapper is configured
+
+##### AC-AUTH-130: Full agent process authenticates against a real Keycloak container end-to-end
+
+- **Validates:** REQ-AUTH-010, REQ-AUTH-040
+- **Given** the full agent binary is running with `AGENT_AUTH_DISABLED=false`, `AGENT_AUTH_ISSUER_URL`
+  pointed at a real Keycloak container, and `AGENT_AUTH_JWT_AUDIENCE` set — not a mocked
+  `JWTValidator` (see AC-AUTH-010/030/040) and not the self-signed OIDC harness (see AC-AUTH-120)
+- **When** a request to `GET /api/v1alpha1/providers` carries a genuine access token issued by
+  that Keycloak instance whose `aud` claim matches `AGENT_AUTH_JWT_AUDIENCE`
+- **Then** the request MUST succeed
+- **And** a request with no `Authorization` header MUST be rejected with HTTP 401
+- **And** a request with a tampered (signature-invalidated) token MUST be rejected with HTTP 401
+- **And** a request with a validly-signed token from the same issuer whose `aud` claim does not
+  match `AGENT_AUTH_JWT_AUDIENCE` MUST be rejected with HTTP 401
+- **Note:** proven by a dedicated `docker-compose`-based subsystem test
+  (`test/subsystem/auth`, Ginkgo `-tags=subsystem`, run by `.github/workflows/subsystem.yaml`),
+  the same real-container pattern control-plane uses for its own auth subsystem proof. See
+  `.ai/test-plans/2026-09-22-subsystem-tests.md` (ST-AUTH-010–040).
 
 #### Dependencies
 

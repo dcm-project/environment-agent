@@ -1,0 +1,20 @@
+name: Subsystem Tests
+
+on:
+  push:
+    branches: [main, 'release/v*']
+  pull_request:
+    branches: [main, 'release/v*']
+
+jobs:
+  auth-subsystem:
+    uses: dcm-project/shared-workflows/.github/workflows/black-box.yaml@main
+    with:
+      up-target: auth-subsystem-test-up
+      test-target: auth-subsystem-test
+      down-target: auth-subsystem-test-down
+      images: >-
+        registry.access.redhat.com/ubi9/go-toolset:9.8
+        registry.access.redhat.com/ubi9/ubi-minimal:latest
+        quay.io/keycloak/keycloak:26.0.1
+        docker.io/library/nats:2-alpine
