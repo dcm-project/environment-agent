@@ -77,6 +77,10 @@ For integration with the control-plane stack, see
 To run the agent on the same cluster as embedded SP workloads, see
 [deploy/docs/in-cluster.md](deploy/docs/in-cluster.md) (`make k8s-deploy` on Kind).
 
+For how to enable each embedded SP (`container`, `vm`, `cluster`, `storage`, `network`) and the
+full list of environment variables each one reads, see
+[deploy/docs/embedded-sps.md](deploy/docs/embedded-sps.md).
+
 ## Control Plane Authentication
 
 The agent authenticates outbound HTTP requests (registration and heartbeat) to
