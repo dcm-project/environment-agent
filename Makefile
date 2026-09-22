@@ -237,6 +237,20 @@ check-container-engine:
 image-build: check-container-engine
 	$(CONTAINER_ENGINE) build -f Containerfile -t $(CONTAINER_IMAGE_NAME):$(CONTAINER_IMAGE_TAG) .
 
+# Subsystem compose stacks read credentials from gitignored test/subsystem/.env.
+subsystem-env:
+	@test -f test/subsystem/.env || cp test/subsystem/.env.example test/subsystem/.env
+
+auth-subsystem-test-up: subsystem-env
+	COMPOSE_PROJECT_NAME=auth-subsystem $(COMPOSE) --env-file test/subsystem/.env -f test/subsystem/auth/docker-compose.yaml up -d --build
+
+auth-subsystem-test-down:
+	COMPOSE_PROJECT_NAME=auth-subsystem $(COMPOSE) --env-file test/subsystem/.env -f test/subsystem/auth/docker-compose.yaml down -v
+
+auth-subsystem-test: subsystem-env
+	set -a && . test/subsystem/.env && set +a && \
+		go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --tags=subsystem ./test/subsystem/auth
+
 .PHONY: build run compose-up compose-up-with-nats compose-down kubeconfig-for-compose kind-connect kind-disconnect \
 	disconnect-compose-networks remove-compose-networks install-kubevirt k8s-deploy k8s-deploy-with-nats k8s-verify deploy-verify publish-creates \
 	clean fmt vet lint test test-unit test-integration test-race test-e2e test-all coverage ci tidy check-tidy \
@@ -247,4 +261,5 @@ image-build: check-container-engine
 	generate-database-types generate-database-api \
 	generate-network-types generate-network-api \
 	bundle-vm-openapi generate-vm-types generate-vm-api \
-	generate-sp-api generate-api check-generate-api check-aep check-container-engine image-build
+	generate-sp-api generate-api check-generate-api check-aep check-container-engine image-build \
+	subsystem-env auth-subsystem-test-up auth-subsystem-test-down auth-subsystem-test

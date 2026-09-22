@@ -1,0 +1,74 @@
+# Auth subsystem test stack. Shared env: test/subsystem/.env (see .env.example).
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.1
+    command: ["start-dev", "--import-realm"]
+    env_file: ../.env
+    environment:
+      KC_HEALTH_ENABLED: "true"
+      KC_HOSTNAME: "http://keycloak:8080"
+      KC_HOSTNAME_STRICT: "false"
+    ports:
+      - "29180:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro,z
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && cat <&3 | grep -q '\"status\": \"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  # No host port published — only reachable inside the compose network.
+  # AGENT_MESSAGING_URL is a hard-required config value (internal/config
+  # validateRequired), and unlike control-plane's NATS_DISABLED escape
+  # hatch, environment-agent has no way to skip messaging setup. A real
+  # broker (rather than a syntactically-valid-but-absent host) avoids an
+  # indefinite NATS-reconnect warning loop in the agent's logs for the
+  # duration of the test run.
+  nats:
+    image: docker.io/library/nats:2-alpine
+    command: ["--jetstream", "-m", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+  environment-agent:
+    build:
+      context: ../../..
+      dockerfile: Containerfile
+    image: auth-subsystem-environment-agent:latest
+    env_file: ../.env
+    environment:
+      AGENT_NAME: subsystem-test-agent
+      AGENT_ENVIRONMENT: subsystem-test
+      AGENT_COST: low
+      # Syntactically valid but unreachable — DCM registration runs in a
+      # non-blocking background goroutine (internal/dcm/registrar.go
+      # Start/runSupervised), so it never delays the listener or /health.
+      DCM_REGISTRATION_URL: "http://dcm-control-plane.invalid:8080"
+      AGENT_MESSAGING_URL: "nats://nats:4222"
+      # Default AGENT_SP_PERSISTENCE_PATH (/var/lib/environment-agent/registrations)
+      # is not writable by the Containerfile's non-root UID 1001; /app/data is
+      # the directory the Containerfile chowns to 1001:0 (mirrors deploy/compose.yaml).
+      AGENT_SP_PERSISTENCE_PATH: /app/data/registrations.json
+      AGENT_AUTH_DISABLED: "false"
+      AGENT_AUTH_ISSUER_URL: "http://keycloak:8080/realms/dcm"
+      AGENT_AUTH_JWT_AUDIENCE: environment-agent-api
+    ports:
+      - "29080:8080"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1alpha1/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
