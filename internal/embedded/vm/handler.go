@@ -4,13 +4,14 @@ package vm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
 	vmapi "github.com/dcm-project/environment-agent/api/vm/v1alpha1"
 	embutil "github.com/dcm-project/environment-agent/internal/embedded/util"
-	"github.com/dcm-project/environment-agent/internal/openshift/kubevirtvm/kubevirt"
 	"github.com/dcm-project/environment-agent/internal/routing"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 )
 
@@ -71,8 +72,7 @@ func (h *vmHandler) CreateResource(ctx context.Context, req routing.CreateResour
 
 	_, err = h.lifecycle.CreateVirtualMachine(ctx, virtualMachine)
 	if err != nil {
-		code, msg := kubevirt.HTTPError(err, "failed to create virtual machine")
-		return &routing.SPResponseError{StatusCode: code, Message: msg}
+		return mapKubeVirtError(err)
 	}
 	return nil
 }
@@ -80,10 +80,27 @@ func (h *vmHandler) CreateResource(ctx context.Context, req routing.CreateResour
 func (h *vmHandler) DeleteResource(ctx context.Context, req routing.DeleteResourceRequest) error {
 	err := h.lifecycle.DeleteVirtualMachine(ctx, req.ResourceID)
 	if err != nil {
-		code, msg := kubevirt.HTTPError(err, "failed to delete virtual machine")
-		return &routing.SPResponseError{StatusCode: code, Message: msg}
+		return mapKubeVirtError(err)
 	}
 	return nil
+}
+
+// mapKubeVirtError copies known Kubernetes statuses onto SPResponseError and keeps the original message.
+func mapKubeVirtError(err error) error {
+	var statusErr *apierrors.StatusError
+	if errors.As(err, &statusErr) {
+		switch statusErr.ErrStatus.Code {
+		case http.StatusConflict, http.StatusUnprocessableEntity, http.StatusBadRequest, http.StatusNotFound:
+			return &routing.SPResponseError{
+				StatusCode: int(statusErr.ErrStatus.Code),
+				Message:    err.Error(),
+			}
+		}
+	}
+	return &routing.SPResponseError{
+		StatusCode: http.StatusInternalServerError,
+		Message:    err.Error(),
+	}
 }
 
 func parseVMSpec(raw json.RawMessage) (*vmapi.VMSpec, error) {

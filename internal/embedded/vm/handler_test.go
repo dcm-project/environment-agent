@@ -190,6 +190,23 @@ var _ = Describe("Handler", func() {
 		Expect(spErr.StatusCode).To(Equal(http.StatusConflict))
 	})
 
+	It("keeps the original message for a non-status create error", func() {
+		client.createErr = fmt.Errorf("connection refused")
+		spec, err := json.Marshal(validVMSpec())
+		Expect(err).NotTo(HaveOccurred())
+
+		err = handler.CreateResource(context.Background(), routing.CreateResourceRequest{
+			ResourceID:  "vm-1",
+			ServiceType: vm.ServiceType,
+			Spec:        spec,
+			EventID:     "ce-7",
+		})
+		Expect(err).To(BeAssignableToTypeOf(&routing.SPResponseError{}))
+		spErr := err.(*routing.SPResponseError)
+		Expect(spErr.StatusCode).To(Equal(http.StatusInternalServerError))
+		Expect(spErr.Message).To(ContainSubstring("connection refused"))
+	})
+
 	It("maps kubernetes delete errors", func() {
 		client.deleteErr = apierrors.NewNotFound(
 			schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachines"},

@@ -165,13 +165,7 @@ generate-cluster-types:
 		-o api/cluster/v1alpha1/types.gen.go \
 		api/cluster/v1alpha1/openapi.yaml
 
-generate-cluster-spec:
-	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
-		--config=api/cluster/v1alpha1/spec.gen.cfg \
-		-o api/cluster/v1alpha1/spec.gen.go \
-		api/cluster/v1alpha1/openapi.yaml
-
-generate-cluster-api: generate-cluster-types generate-cluster-spec
+generate-cluster-api: generate-cluster-types
 
 generate-container-types:
 	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
@@ -179,13 +173,7 @@ generate-container-types:
 		-o api/container/v1alpha1/types.gen.go \
 		api/container/v1alpha1/openapi.yaml
 
-generate-container-spec:
-	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
-		--config=api/container/v1alpha1/spec.gen.cfg \
-		-o api/container/v1alpha1/spec.gen.go \
-		api/container/v1alpha1/openapi.yaml
-
-generate-container-api: generate-container-types generate-container-spec
+generate-container-api: generate-container-types
 
 generate-storage-types:
 	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
@@ -193,13 +181,7 @@ generate-storage-types:
 		-o api/storage/v1alpha1/types.gen.go \
 		api/storage/v1alpha1/openapi.yaml
 
-generate-storage-spec:
-	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
-		--config=api/storage/v1alpha1/spec.gen.cfg \
-		-o api/storage/v1alpha1/spec.gen.go \
-		api/storage/v1alpha1/openapi.yaml
-
-generate-storage-api: generate-storage-types generate-storage-spec
+generate-storage-api: generate-storage-types
 
 generate-database-types:
 	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
@@ -207,13 +189,7 @@ generate-database-types:
 		-o api/database/v1alpha1/types.gen.go \
 		api/database/v1alpha1/openapi.yaml
 
-generate-database-spec:
-	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
-		--config=api/database/v1alpha1/spec.gen.cfg \
-		-o api/database/v1alpha1/spec.gen.go \
-		api/database/v1alpha1/openapi.yaml
-
-generate-database-api: generate-database-types generate-database-spec
+generate-database-api: generate-database-types
 
 generate-network-types:
 	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
@@ -221,13 +197,7 @@ generate-network-types:
 		-o api/network/v1alpha1/types.gen.go \
 		api/network/v1alpha1/openapi.yaml
 
-generate-network-spec:
-	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
-		--config=api/network/v1alpha1/spec.gen.cfg \
-		-o api/network/v1alpha1/spec.gen.go \
-		api/network/v1alpha1/openapi.yaml
-
-generate-network-api: generate-network-types generate-network-spec
+generate-network-api: generate-network-types
 
 bundle-vm-openapi:
 	@echo "Bundling VM OpenAPI specification..."
@@ -245,27 +215,14 @@ generate-vm-types:
 		-o api/vm/v1alpha1/types.gen.go \
 		api/vm/v1alpha1/openapi.yaml
 
-generate-vm-spec:
-	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
-		--config=api/vm/v1alpha1/spec.gen.cfg \
-		-o api/vm/v1alpha1/spec.gen.go \
-		api/vm/v1alpha1/openapi.yaml
-
-generate-vm-server:
-	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen \
-		--config=internal/openshift/kubevirtvm/oapi/server/server.gen.cfg \
-		-o internal/openshift/kubevirtvm/oapi/server/server.gen.go \
-		api/vm/v1alpha1/openapi.yaml
-
-generate-vm-api: generate-vm-types generate-vm-spec generate-vm-server
+generate-vm-api: generate-vm-types
 
 generate-sp-api: generate-cluster-api generate-container-api generate-storage-api generate-database-api generate-network-api generate-vm-api
 
 generate-api: generate-types generate-spec generate-server generate-client generate-sp-api
 
 check-generate-api: generate-api
-	git diff --exit-code api/ internal/api/server/ pkg/client/ \
-		internal/openshift/kubevirtvm/oapi/server/ || \
+	git diff --exit-code api/ internal/api/server/ pkg/client/ || \
 		(echo "Generated files out of sync. Run 'make generate-api'." && exit 1)
 
 check-aep:
@@ -284,10 +241,10 @@ image-build: check-container-engine
 	disconnect-compose-networks remove-compose-networks install-kubevirt k8s-deploy k8s-deploy-with-nats k8s-verify deploy-verify publish-creates \
 	clean fmt vet lint test test-unit test-integration test-race test-e2e test-all coverage ci tidy check-tidy \
 	generate-types generate-spec generate-server generate-client \
-	generate-cluster-types generate-cluster-spec generate-cluster-api \
-	generate-container-types generate-container-spec generate-container-server generate-container-api \
-	generate-storage-types generate-storage-spec generate-storage-api \
-	generate-database-types generate-database-spec generate-database-api \
-	generate-network-types generate-network-spec generate-network-api \
-	bundle-vm-openapi generate-vm-types generate-vm-spec generate-vm-server generate-vm-api \
+	generate-cluster-types generate-cluster-api \
+	generate-container-types generate-container-api \
+	generate-storage-types generate-storage-api \
+	generate-database-types generate-database-api \
+	generate-network-types generate-network-api \
+	bundle-vm-openapi generate-vm-types generate-vm-api \
 	generate-sp-api generate-api check-generate-api check-aep check-container-engine image-build
