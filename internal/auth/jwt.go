@@ -39,7 +39,7 @@ type JWTValidator interface {
 // JWTClaims holds the identity claims extracted from a validated JWT token.
 type JWTClaims struct {
 	Subject           string
-	PreferredUsername string
+	PreferredUsername string `json:"preferred_username"`
 }
 
 // OIDCValidator validates JWT tokens using OIDC discovery.
@@ -108,16 +108,12 @@ func (v *OIDCValidator) Validate(ctx context.Context, rawToken string) (*JWTClai
 	if err != nil {
 		return nil, fmt.Errorf("verifying token: %w", err)
 	}
-	var extra struct {
-		PreferredUsername string `json:"preferred_username"`
-	}
-	if err := idToken.Claims(&extra); err != nil {
+	var claims JWTClaims
+	if err := idToken.Claims(&claims); err != nil {
 		return nil, fmt.Errorf("extracting claims: %w", err)
 	}
-	return &JWTClaims{
-		Subject:           idToken.Subject,
-		PreferredUsername: extra.PreferredUsername,
-	}, nil
+	claims.Subject = idToken.Subject
+	return &claims, nil
 }
 
 // ExtractBearerToken extracts the raw token from an HTTP request's
