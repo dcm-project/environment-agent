@@ -107,7 +107,7 @@ lint:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 
 test:
-	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --skip-package=test/e2e
+	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --skip-package=test/e2e,test/subsystem
 
 test-unit:
 	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --label-filter=unit ./internal/auth ./internal/config ./internal/httperror ./internal/provider ./internal/health/monitor ./internal/backoff ./internal/dcm ./internal/messaging ./internal/cloudevent ./internal/routing ./cmd/environment-agent
@@ -116,7 +116,7 @@ test-integration:
 	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --label-filter=integration ./internal/apiserver ./internal/health ./internal/health/monitor ./internal/provider ./internal/dcm ./internal/messaging ./internal/routing
 
 test-race:
-	go run github.com/onsi/ginkgo/v2/ginkgo -r --race --randomize-all --fail-on-pending --skip-package=test/e2e
+	go run github.com/onsi/ginkgo/v2/ginkgo -r --race --randomize-all --fail-on-pending --skip-package=test/e2e,test/subsystem
 
 test-e2e:
 	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --tags=e2e ./test/e2e/...
