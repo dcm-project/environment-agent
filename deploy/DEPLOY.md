@@ -100,6 +100,10 @@ kubectl get virtualmachines -A -l dcm.project/managed-by=dcm
 Copy `deploy/.env.example` to `deploy/.env`. With `-f deploy/compose.yaml`, Compose uses `deploy/` as the
 project directory, so `.env` and paths like `.kube/config` resolve there automatically.
 
+For how to enable each embedded Service Provider and every env var it reads, see
+[docs/embedded-sps.md](docs/embedded-sps.md). The table below covers only agent-wide/deploy-scaffolding
+variables, not per-SP settings.
+
 Compose and in-cluster deploy share the default image tag `main` (`ENVIRONMENT_AGENT_VERSION`).
 Override to pin another release or a local tag (e.g. when building with `make image-build`).
 
@@ -128,6 +132,7 @@ Shared Kind, compose, KubeVirt helpers live in [dcm-project/utilities](https://g
 
 ## Further reading
 
+- [Enabling embedded Service Providers](docs/embedded-sps.md)
 - [Agent in the same cluster as workloads](docs/in-cluster.md)
 - [Compose + Kind setup](docs/compose-kind.md)
 - [Control-plane deploy integration](https://github.com/dcm-project/control-plane/blob/main/deploy/docs/environment-agent-kind.md)
