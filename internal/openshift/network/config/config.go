@@ -14,7 +14,7 @@ const defaultProviderName = "network"
 // Config is the root configuration for the embedded network service provider.
 type Config struct {
 	shared.Config
-	Namespace          string        `env:"SP_K8S_NAMESPACE" envDefault:"default"`
+	Namespace          string        `env:"SP_NETWORK_NAMESPACE" envDefault:"default"`
 	DebounceMs         int           `env:"SP_MONITOR_DEBOUNCE_MS" envDefault:"500"`
 	ResyncPeriod       time.Duration `env:"SP_MONITOR_RESYNC_PERIOD" envDefault:"10m"`
 	PublishMaxAttempts int           `env:"SP_MONITOR_PUBLISH_MAX_ATTEMPTS" envDefault:"5"`

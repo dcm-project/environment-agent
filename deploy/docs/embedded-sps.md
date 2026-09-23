@@ -178,7 +178,7 @@ resources (Services).
 
 | Env var | Default | Required? | Notes |
 |---|---|---|---|
-| `SP_K8S_NAMESPACE` | `default` | No | Namespace for network workloads; must exist on the cluster if changed. |
+| `SP_NETWORK_NAMESPACE` | `default` | No | Namespace for network workloads; must exist on the cluster if changed. |
 | `SP_MONITOR_DEBOUNCE_MS` | `500` | No | Debounce window for the network status-watch monitor. |
 | `SP_MONITOR_RESYNC_PERIOD` | `10m` | No | Informer resync period. |
 | `SP_MONITOR_PUBLISH_MAX_ATTEMPTS` | `5` | No | Max attempts publishing a status update to NATS. |
@@ -187,7 +187,7 @@ resources (Services).
 > no example env vars for `network` (nor for `cluster`/`storage`, which also aren't demoed
 > there — that manifest is a minimal Kind quick-start, not full coverage). `deploy/.env.example`
 > and `deploy/compose.yaml` now wire `network` like the other Kubernetes-namespace-scoped SPs;
-> add it to `AGENT_EMBEDDED_SPS` and set `SP_K8S_NAMESPACE` if you need it there too.
+> add it to `AGENT_EMBEDDED_SPS` and set `SP_NETWORK_NAMESPACE` if you need it there too.
 
 ## Further reading
 
