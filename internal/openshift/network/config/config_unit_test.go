@@ -14,7 +14,7 @@ var _ = Describe("Configuration", Label("unit"), func() {
 	clearEnv := func() {
 		_ = os.Unsetenv("SP_NAME")
 		_ = os.Unsetenv("SP_KUBECONFIG")
-		_ = os.Unsetenv("SP_K8S_NAMESPACE")
+		_ = os.Unsetenv("SP_NETWORK_NAMESPACE")
 	}
 
 	BeforeEach(func() {
@@ -40,7 +40,7 @@ var _ = Describe("Configuration", Label("unit"), func() {
 	})
 
 	It("applies namespace from environment", func() {
-		_ = os.Setenv("SP_K8S_NAMESPACE", "production")
+		_ = os.Setenv("SP_NETWORK_NAMESPACE", "production")
 		agent := shared.Agent{
 			MessagingURL: "nats://localhost:4222",
 		}
