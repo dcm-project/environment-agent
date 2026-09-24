@@ -18,6 +18,11 @@ import (
 // ServiceType is the embedded SP identifier for the container service provider.
 const ServiceType = "container"
 
+// Operations are the resource operations advertised at registration time.
+// They mirror the createContainer/getContainer/listContainers/deleteContainer
+// operations declared by the container capability contract in api/container/v1alpha1.
+var Operations = []string{"CREATE", "READ", "DELETE"}
+
 // containerLifecycle is the subset of store.Repository the embedded handler needs.
 type containerLifecycle interface {
 	Create(ctx context.Context, spec containerapi.ContainerSpec, id string) (*containerapi.Container, error)

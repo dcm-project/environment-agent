@@ -15,6 +15,11 @@ import (
 // ServiceType is the embedded SP identifier for the cluster service provider.
 const ServiceType = "cluster"
 
+// Operations are the resource operations advertised at registration time.
+// They mirror the createCluster/getCluster/listClusters/deleteCluster
+// operations declared by the cluster capability contract in api/cluster/v1alpha1.
+var Operations = []string{"CREATE", "READ", "DELETE"}
+
 // clusterLifecycle is the subset of service.ClusterService the embedded handler needs.
 type clusterLifecycle interface {
 	Create(ctx context.Context, id string, cluster clusterapi.Cluster) (*clusterapi.Cluster, error)

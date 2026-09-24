@@ -141,6 +141,36 @@ func Checkers(b *Bundles) map[string]monitor.Checker {
 	return checkers
 }
 
+// Operations returns the advertised resource operations for all enabled
+// embedded SP types, keyed by service type. Registration surfaces these as the
+// provider's operations field so consumers can discover what each embedded SP
+// supports, the same way external SPs declare operations when they register.
+func Operations(b *Bundles) map[string][]string {
+	if b == nil {
+		return nil
+	}
+	operations := make(map[string][]string)
+	if b.Cluster != nil && len(b.Cluster.Operations) > 0 {
+		operations[cluster.ServiceType] = b.Cluster.Operations
+	}
+	if b.Container != nil && len(b.Container.Operations) > 0 {
+		operations[container.ServiceType] = b.Container.Operations
+	}
+	if b.Network != nil && len(b.Network.Operations) > 0 {
+		operations[network.ServiceType] = b.Network.Operations
+	}
+	if b.Storage != nil && len(b.Storage.Operations) > 0 {
+		operations[storage.ServiceType] = b.Storage.Operations
+	}
+	if b.VM != nil && len(b.VM.Operations) > 0 {
+		operations[vm.ServiceType] = b.VM.Operations
+	}
+	if len(operations) == 0 {
+		return nil
+	}
+	return operations
+}
+
 // Start launches background workers for all embedded bundles.
 func (b *Bundles) Start(ctx context.Context) {
 	if b == nil {
