@@ -1,7 +1,6 @@
 package embedded_test
 
 import (
-	"context"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -13,7 +12,6 @@ import (
 	"github.com/dcm-project/environment-agent/internal/embedded/network"
 	"github.com/dcm-project/environment-agent/internal/embedded/storage"
 	"github.com/dcm-project/environment-agent/internal/embedded/vm"
-	"github.com/dcm-project/environment-agent/internal/routing"
 )
 
 func TestEmbedded(t *testing.T) {
@@ -21,12 +19,18 @@ func TestEmbedded(t *testing.T) {
 	RunSpecs(t, "Embedded Wiring Suite")
 }
 
-type stubHandler struct{}
-
-func (stubHandler) CreateResource(context.Context, routing.CreateResourceRequest) error { return nil }
-func (stubHandler) DeleteResource(context.Context, routing.DeleteResourceRequest) error { return nil }
-
 var _ = Describe("Operations", Label("unit"), func() {
+	DescribeTable("every embedded SP declares the operations its capability contract implements",
+		func(serviceType string, declared []string) {
+			Expect(declared).To(Equal([]string{"CREATE", "READ", "DELETE"}), "service type %q", serviceType)
+		},
+		Entry("cluster", cluster.ServiceType, cluster.Operations),
+		Entry("container", container.ServiceType, container.Operations),
+		Entry("network", network.ServiceType, network.Operations),
+		Entry("storage", storage.ServiceType, storage.Operations),
+		Entry("vm", vm.ServiceType, vm.Operations),
+	)
+
 	It("returns nil for a nil bundle set", func() {
 		Expect(embedded.Operations(nil)).To(BeNil())
 	})
@@ -35,8 +39,8 @@ var _ = Describe("Operations", Label("unit"), func() {
 		Expect(embedded.Operations(&embedded.Bundles{})).To(BeNil())
 	})
 
-	It("advertises CREATE, READ and DELETE for the VM SP", func() {
-		ops := embedded.Operations(&embedded.Bundles{VM: &vm.Bundle{Handler: stubHandler{}}})
+	It("advertises the VM SP's declared operations under its service type", func() {
+		ops := embedded.Operations(&embedded.Bundles{VM: &vm.Bundle{Operations: vm.Operations}})
 
 		Expect(ops).To(HaveLen(1))
 		Expect(ops[vm.ServiceType]).To(Equal([]string{"CREATE", "READ", "DELETE"}))
@@ -44,11 +48,11 @@ var _ = Describe("Operations", Label("unit"), func() {
 
 	It("keys operations by service type for every enabled SP", func() {
 		ops := embedded.Operations(&embedded.Bundles{
-			Cluster:   &cluster.Bundle{Handler: stubHandler{}},
-			Container: &container.Bundle{Handler: stubHandler{}},
-			Network:   &network.Bundle{Handler: stubHandler{}},
-			Storage:   &storage.Bundle{Handler: stubHandler{}},
-			VM:        &vm.Bundle{Handler: stubHandler{}},
+			Cluster:   &cluster.Bundle{Operations: cluster.Operations},
+			Container: &container.Bundle{Operations: container.Operations},
+			Network:   &network.Bundle{Operations: network.Operations},
+			Storage:   &storage.Bundle{Operations: storage.Operations},
+			VM:        &vm.Bundle{Operations: vm.Operations},
 		})
 
 		Expect(ops).To(HaveLen(5))
@@ -61,15 +65,12 @@ var _ = Describe("Operations", Label("unit"), func() {
 		} {
 			Expect(ops).To(HaveKey(st))
 		}
-		for st, declared := range ops {
-			Expect(declared).To(ConsistOf("CREATE", "READ", "DELETE"), "service type %q", st)
-		}
 	})
 
-	It("skips a bundle that was constructed without a handler", func() {
+	It("skips a bundle that declares no operations", func() {
 		ops := embedded.Operations(&embedded.Bundles{
 			VM:      &vm.Bundle{},
-			Storage: &storage.Bundle{Handler: stubHandler{}},
+			Storage: &storage.Bundle{Operations: storage.Operations},
 		})
 
 		Expect(ops).To(HaveLen(1))

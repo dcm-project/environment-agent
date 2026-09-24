@@ -150,20 +150,20 @@ func Operations(b *Bundles) map[string][]string {
 		return nil
 	}
 	operations := make(map[string][]string)
-	if b.Cluster != nil && b.Cluster.Handler != nil {
-		operations[cluster.ServiceType] = cluster.Operations
+	if b.Cluster != nil && len(b.Cluster.Operations) > 0 {
+		operations[cluster.ServiceType] = b.Cluster.Operations
 	}
-	if b.Container != nil && b.Container.Handler != nil {
-		operations[container.ServiceType] = container.Operations
+	if b.Container != nil && len(b.Container.Operations) > 0 {
+		operations[container.ServiceType] = b.Container.Operations
 	}
-	if b.Network != nil && b.Network.Handler != nil {
-		operations[network.ServiceType] = network.Operations
+	if b.Network != nil && len(b.Network.Operations) > 0 {
+		operations[network.ServiceType] = b.Network.Operations
 	}
-	if b.Storage != nil && b.Storage.Handler != nil {
-		operations[storage.ServiceType] = storage.Operations
+	if b.Storage != nil && len(b.Storage.Operations) > 0 {
+		operations[storage.ServiceType] = b.Storage.Operations
 	}
-	if b.VM != nil && b.VM.Handler != nil {
-		operations[vm.ServiceType] = vm.Operations
+	if b.VM != nil && len(b.VM.Operations) > 0 {
+		operations[vm.ServiceType] = b.VM.Operations
 	}
 	if len(operations) == 0 {
 		return nil
