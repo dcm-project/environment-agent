@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -37,6 +38,10 @@ var (
 	kubevirtCodecs         serializer.CodecFactory
 	kubevirtParameterCodec runtime.ParameterCodec
 )
+
+// virtualMachineGroupResource identifies the resource reported by the
+// not-found errors this client synthesizes.
+var virtualMachineGroupResource = schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachines"}
 
 func init() {
 	// Register KubeVirt types so the REST client can serialize/deserialize them
@@ -146,7 +151,13 @@ func (c *Client) CreateVirtualMachine(ctx context.Context, vm *kubevirtv1.Virtua
 	return result, nil
 }
 
-// GetVirtualMachine retrieves a VirtualMachine by DCM instance ID
+// GetVirtualMachine retrieves a VirtualMachine by DCM instance ID.
+//
+// A label-selector list that matches nothing is a 200 with an empty list, not a
+// 404, so the absent-VM case is synthesized here as an *apierrors.StatusError
+// rather than a plain error: callers distinguish "no such VM" from "the API
+// call failed" with apierrors.IsNotFound, and the embedded handler maps it to
+// a 404 SP response. A plain error would surface as a retryable 500.
 func (c *Client) GetVirtualMachine(ctx context.Context, vmID string) (*kubevirtv1.VirtualMachine, error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
@@ -164,7 +175,7 @@ func (c *Client) GetVirtualMachine(ctx context.Context, vmID string) (*kubevirtv
 		return nil, fmt.Errorf("failed to get VirtualMachine by dcmlabelinstanceid: %w", err)
 	}
 	if len(vmList.Items) == 0 {
-		return nil, fmt.Errorf("VirtualMachine with dcmlabelinstanceid %q not found", vmID)
+		return nil, apierrors.NewNotFound(virtualMachineGroupResource, vmID)
 	}
 	vmList.Items[0].SetGroupVersionKind(kubevirtv1.VirtualMachineGroupVersionKind)
 	return &vmList.Items[0], nil
@@ -196,12 +207,15 @@ func (c *Client) DeleteVirtualMachine(ctx context.Context, vmId string) error {
 	timeoutCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
+	// Returned unwrapped: GetVirtualMachine already annotates its own failures,
+	// and a second "failed to get" prefix would misdescribe the not-found case
+	// (the list call succeeded; the VM simply does not exist).
 	item, err := c.GetVirtualMachine(ctx, vmId)
 	if err != nil {
-		return fmt.Errorf("failed to get VirtualMachine by dcmlabelinstanceid: %w", err)
+		return err
 	}
 	if item == nil {
-		return fmt.Errorf("VirtualMachine with dcmlabelinstanceid %q not found", vmId)
+		return apierrors.NewNotFound(virtualMachineGroupResource, vmId)
 	}
 	return c.restClient.Delete().
 		Resource("virtualmachines").

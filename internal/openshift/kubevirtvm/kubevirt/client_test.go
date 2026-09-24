@@ -3,12 +3,14 @@ package kubevirt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -108,7 +110,7 @@ var _ = Describe("Client", func() {
 			Expect(result.Name).To(Equal("found-vm"))
 		})
 
-		It("should return not-found error for empty list", func() {
+		It("should return a typed not-found error for empty list", func() {
 			responseList := &kubevirtv1.VirtualMachineList{
 				TypeMeta: metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachineList"},
 				Items:    []kubevirtv1.VirtualMachine{},
@@ -121,7 +123,12 @@ var _ = Describe("Client", func() {
 
 			_, err := c.GetVirtualMachine(context.Background(), "vm-123")
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("not found"))
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "empty label-selector list must be a 404, not a 500")
+
+			var statusErr *apierrors.StatusError
+			Expect(errors.As(err, &statusErr)).To(BeTrue())
+			Expect(statusErr.ErrStatus.Code).To(BeNumerically("==", http.StatusNotFound))
+			Expect(statusErr.ErrStatus.Details.Name).To(Equal("vm-123"))
 		})
 
 		It("should return error on API failure", func() {
@@ -132,6 +139,7 @@ var _ = Describe("Client", func() {
 
 			_, err := c.GetVirtualMachine(context.Background(), "vm-123")
 			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsNotFound(err)).To(BeFalse(), "an API failure must not be mistaken for an absent VM")
 		})
 	})
 
@@ -215,6 +223,31 @@ var _ = Describe("Client", func() {
 
 			err := c.DeleteVirtualMachine(context.Background(), "vm-123")
 			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsNotFound(err)).To(BeFalse())
+		})
+
+		It("should return a typed not-found error for an unknown instance ID", func() {
+			emptyList := &kubevirtv1.VirtualMachineList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachineList"},
+				Items:    []kubevirtv1.VirtualMachine{},
+			}
+
+			deleted := false
+			c, ts := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodGet:
+					writeJSON(w, http.StatusOK, emptyList)
+				case http.MethodDelete:
+					deleted = true
+					w.WriteHeader(http.StatusOK)
+				}
+			}))
+			defer ts.Close()
+
+			err := c.DeleteVirtualMachine(context.Background(), "never-created")
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			Expect(deleted).To(BeFalse(), "no DELETE should be issued for a VM that does not exist")
 		})
 	})
 

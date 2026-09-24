@@ -221,6 +221,21 @@ var _ = Describe("Handler", func() {
 		Expect(err).To(BeAssignableToTypeOf(&routing.SPResponseError{}))
 		spErr := err.(*routing.SPResponseError)
 		Expect(spErr.StatusCode).To(Equal(http.StatusNotFound))
+		Expect(routing.IsRetryable(err)).To(BeFalse(), "deleting an absent VM is terminal, not worth retrying")
+	})
+
+	It("does not mistake a plain delete failure for an absent VM", func() {
+		client.deleteErr = fmt.Errorf("etcdserver: request timed out")
+
+		err := handler.DeleteResource(context.Background(), routing.DeleteResourceRequest{
+			ResourceID:  "vm-1",
+			ServiceType: vm.ServiceType,
+			EventID:     "ce-5b",
+		})
+		Expect(err).To(BeAssignableToTypeOf(&routing.SPResponseError{}))
+		spErr := err.(*routing.SPResponseError)
+		Expect(spErr.StatusCode).To(Equal(http.StatusInternalServerError))
+		Expect(routing.IsRetryable(err)).To(BeTrue())
 	})
 
 	It("deletes by resource ID", func() {
