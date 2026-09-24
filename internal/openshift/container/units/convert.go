@@ -9,12 +9,24 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// ConvertCPU converts a ContainerCpu spec to Kubernetes resource quantities
-// for requests and limits.
-func ConvertCPU(cpu v1alpha1.ContainerCpu) (requests, limits resource.Quantity) {
-	requests = *resource.NewQuantity(int64(cpu.Min), resource.DecimalSI)
-	limits = *resource.NewQuantity(int64(cpu.Max), resource.DecimalSI)
-	return requests, limits
+// ConvertCPU converts CPU core or millicore strings (e.g. "2", "500m") to
+// Kubernetes resource quantities for requests and limits.
+func ConvertCPU(cpu v1alpha1.ContainerCpu) (requests, limits resource.Quantity, err error) {
+	requests, err = resource.ParseQuantity(cpu.Min)
+	if err != nil {
+		return resource.Quantity{}, resource.Quantity{}, fmt.Errorf("invalid cpu.min %q: %w", cpu.Min, err)
+	}
+	limits, err = resource.ParseQuantity(cpu.Max)
+	if err != nil {
+		return resource.Quantity{}, resource.Quantity{}, fmt.Errorf("invalid cpu.max %q: %w", cpu.Max, err)
+	}
+	return requests, limits, nil
+}
+
+// CPUQuantityToAPI converts a Kubernetes resource.Quantity to a millicore
+// string (e.g. "500m"). It always uses millicore format for consistency.
+func CPUQuantityToAPI(q resource.Quantity) string {
+	return fmt.Sprintf("%dm", q.MilliValue())
 }
 
 // apiToK8s maps API memory units to Kubernetes binary units.

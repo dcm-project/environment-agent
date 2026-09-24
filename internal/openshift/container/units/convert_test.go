@@ -16,18 +16,70 @@ func TestUnits(t *testing.T) {
 }
 
 var _ = Describe("ConvertCPU", func() {
-	It("converts min/max to request/limit quantities", func() {
-		cpu := v1alpha1.ContainerCpu{Min: 1, Max: 4}
-		req, lim := units.ConvertCPU(cpu)
-		Expect(req.Equal(*resource.NewQuantity(1, resource.DecimalSI))).To(BeTrue())
-		Expect(lim.Equal(*resource.NewQuantity(4, resource.DecimalSI))).To(BeTrue())
+	It("converts millicore strings to request/limit quantities", func() {
+		cpu := v1alpha1.ContainerCpu{Min: "1000m", Max: "4000m"}
+		req, lim, err := units.ConvertCPU(cpu)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(req.Equal(*resource.NewMilliQuantity(1000, resource.DecimalSI))).To(BeTrue())
+		Expect(lim.Equal(*resource.NewMilliQuantity(4000, resource.DecimalSI))).To(BeTrue())
 	})
 
-	It("handles zero values", func() {
-		cpu := v1alpha1.ContainerCpu{Min: 0, Max: 0}
-		req, lim := units.ConvertCPU(cpu)
-		Expect(req.IsZero()).To(BeTrue())
-		Expect(lim.IsZero()).To(BeTrue())
+	It("handles fractional CPU (sub-core)", func() {
+		cpu := v1alpha1.ContainerCpu{Min: "500m", Max: "1500m"}
+		req, lim, err := units.ConvertCPU(cpu)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(req.MilliValue()).To(Equal(int64(500)))
+		Expect(lim.MilliValue()).To(Equal(int64(1500)))
+	})
+
+	It("returns error for invalid Min", func() {
+		cpu := v1alpha1.ContainerCpu{Min: "invalid", Max: "1000m"}
+		_, _, err := units.ConvertCPU(cpu)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("cpu.min"))
+	})
+
+	It("returns error for invalid Max", func() {
+		cpu := v1alpha1.ContainerCpu{Min: "1000m", Max: "invalid"}
+		_, _, err := units.ConvertCPU(cpu)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("cpu.max"))
+	})
+
+	It("returns error for empty Min and Max", func() {
+		cpu := v1alpha1.ContainerCpu{Min: "", Max: ""}
+		_, _, err := units.ConvertCPU(cpu)
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("parses explicit zero CPU values", func() {
+		cpu := v1alpha1.ContainerCpu{Min: "0m", Max: "0m"}
+		req, lim, err := units.ConvertCPU(cpu)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(req.MilliValue()).To(Equal(int64(0)))
+		Expect(lim.MilliValue()).To(Equal(int64(0)))
+	})
+})
+
+var _ = Describe("CPUQuantityToAPI", func() {
+	It("converts whole core quantity to millicore string", func() {
+		q := resource.MustParse("2")
+		Expect(units.CPUQuantityToAPI(q)).To(Equal("2000m"))
+	})
+
+	It("converts millicore quantity to millicore string", func() {
+		q := resource.MustParse("500m")
+		Expect(units.CPUQuantityToAPI(q)).To(Equal("500m"))
+	})
+
+	It("converts zero quantity to millicore string", func() {
+		q := resource.MustParse("0")
+		Expect(units.CPUQuantityToAPI(q)).To(Equal("0m"))
+	})
+
+	It("converts fractional core quantity to millicore string", func() {
+		q := resource.MustParse("0.5")
+		Expect(units.CPUQuantityToAPI(q)).To(Equal("500m"))
 	})
 })
 

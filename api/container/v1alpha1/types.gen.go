@@ -150,13 +150,17 @@ type Container struct {
 	UpdateTime *time.Time `json:"update_time,omitempty"`
 }
 
-// ContainerCpu CPU resource constraints
+// ContainerCpu CPU allocation in cores or millicores (e.g., "2", "500m")
 type ContainerCpu struct {
-	// Max Maximum allowed CPU cores
-	Max int `json:"max"`
+	// Max Maximum allowed CPU in cores or millicores (e.g., "2", "1000m")
+	//
+	// Example: 1000m
+	Max string `json:"max"`
 
-	// Min Minimum guaranteed CPU cores
-	Min                  int                    `json:"min"`
+	// Min Minimum guaranteed CPU in cores or millicores (e.g., "1", "500m")
+	//
+	// Example: 500m
+	Min                  string                 `json:"min"`
 	AdditionalProperties map[string]interface{} `json:"-"`
 }
 
@@ -264,7 +268,7 @@ type ContainerProcess struct {
 
 // ContainerResources CPU and memory resource constraints
 type ContainerResources struct {
-	// Cpu CPU resource constraints
+	// Cpu CPU allocation in cores or millicores (e.g., "2", "500m")
 	Cpu ContainerCpu `json:"cpu"`
 
 	// Memory Memory resource constraints

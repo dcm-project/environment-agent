@@ -55,7 +55,7 @@ func validContainerSpec() containerapi.ContainerSpec {
 			Reference: "nginx:latest",
 		},
 		Resources: containerapi.ContainerResources{
-			Cpu: containerapi.ContainerCpu{Min: 1, Max: 2},
+			Cpu: containerapi.ContainerCpu{Min: "1000m", Max: "2000m"},
 			Memory: containerapi.ContainerMemory{
 				Min: "1GB",
 				Max: "2GB",

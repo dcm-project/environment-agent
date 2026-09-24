@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"github.com/dcm-project/environment-agent/api/container/v1alpha1"
 	"github.com/dcm-project/environment-agent/internal/openshift/container/dcm"
 	"github.com/dcm-project/environment-agent/internal/openshift/container/store"
@@ -20,6 +22,7 @@ type validationError struct {
 const (
 	ptrContainerID = "#/spec/id"
 	ptrCPUMin      = "#/spec/resources/cpu/min"
+	ptrCPUMax      = "#/spec/resources/cpu/max"
 	ptrMemMin      = "#/spec/resources/memory/min"
 	ptrMemMax      = "#/spec/resources/memory/max"
 )
@@ -47,9 +50,23 @@ func checkContainerID(id string) *validationError {
 func checkResources(res v1alpha1.ContainerResources) []validationError {
 	var errs []validationError
 
-	if res.Cpu.Min > res.Cpu.Max {
+	minCPU, minCPUErr := resource.ParseQuantity(res.Cpu.Min)
+	if minCPUErr != nil {
 		errs = append(errs, validationError{
-			Detail:  fmt.Sprintf("cpu.min (%d) must not exceed cpu.max (%d)", res.Cpu.Min, res.Cpu.Max),
+			Detail:  fmt.Sprintf("invalid cpu.min %q: %v", res.Cpu.Min, minCPUErr),
+			Pointer: ptrCPUMin,
+		})
+	}
+	maxCPU, maxCPUErr := resource.ParseQuantity(res.Cpu.Max)
+	if maxCPUErr != nil {
+		errs = append(errs, validationError{
+			Detail:  fmt.Sprintf("invalid cpu.max %q: %v", res.Cpu.Max, maxCPUErr),
+			Pointer: ptrCPUMax,
+		})
+	}
+	if minCPUErr == nil && maxCPUErr == nil && minCPU.Cmp(maxCPU) > 0 {
+		errs = append(errs, validationError{
+			Detail:  fmt.Sprintf("cpu.min (%s) must not exceed cpu.max (%s)", res.Cpu.Min, res.Cpu.Max),
 			Pointer: ptrCPUMin,
 		})
 	}
