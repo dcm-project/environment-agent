@@ -188,7 +188,7 @@ func (p *Processor) processTransitionItems(ctx context.Context, sp *store.Stored
 		if !ok || currentStatus == v1alpha1.Unavailable {
 			p.publishCE(ctx, cloudevent.TypeError, item.resourceID, item.eventID, routing.ErrorData{
 				ResponseContext: p.responseCtx(item.resourceID),
-				Error:           routing.ErrorSPUnavailable, Details: "provider unavailable for service type: " + item.serviceType,
+				Error:           routing.ErrorSPUnavailable, Details: routing.ErrorDetails{Message: "provider unavailable for service type: " + item.serviceType},
 			})
 			_ = item.msg.Ack()
 			continue
@@ -477,7 +477,7 @@ func (p *Processor) forwardRequest(ctx context.Context, sp *store.StoredProvider
 	if p.deps.Forwarder == nil {
 		p.publishCE(ctx, cloudevent.TypeError, res.resourceID, res.eventID, routing.ErrorData{
 			ResponseContext: p.responseCtx(res.resourceID),
-			Error:           routing.ErrorSPUnavailable, Details: "forwarder not configured",
+			Error:           routing.ErrorSPUnavailable, Details: routing.ErrorDetails{Message: "forwarder not configured"},
 		})
 		return true
 	}
@@ -566,7 +566,7 @@ func (p *Processor) routeMessage(ctx context.Context, msg jetstream.Msg, res ceR
 	case v1alpha1.Unavailable:
 		p.publishCE(ctx, cloudevent.TypeError, res.resourceID, res.eventID, routing.ErrorData{
 			ResponseContext: p.responseCtx(res.resourceID),
-			Error:           routing.ErrorSPUnavailable, Details: "provider unavailable for service type: " + res.serviceType,
+			Error:           routing.ErrorSPUnavailable, Details: routing.ErrorDetails{Message: "provider unavailable for service type: " + res.serviceType},
 		})
 		_ = msg.Ack()
 	default:

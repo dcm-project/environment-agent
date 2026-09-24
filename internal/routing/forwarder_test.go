@@ -3,9 +3,12 @@ package routing_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -45,6 +48,30 @@ func (h *captureLogHandler) all() []slog.Record {
 	out := make([]slog.Record, len(h.records))
 	copy(out, h.records)
 	return out
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func expectCapturedLogsOmit(ch *captureLogHandler, forbidden ...string) {
+	records := ch.all()
+	Expect(records).NotTo(BeEmpty())
+	for _, record := range records {
+		for _, sensitiveValue := range forbidden {
+			Expect(record.Message).NotTo(ContainSubstring(sensitiveValue))
+		}
+		record.Attrs(func(attr slog.Attr) bool {
+			value := attr.Value.String()
+			if attr.Value.Kind() == slog.KindAny {
+				value = fmt.Sprint(attr.Value.Any())
+			}
+			for _, sensitiveValue := range forbidden {
+				Expect(value).NotTo(ContainSubstring(sensitiveValue), "attribute %q must not contain sensitive URL data", attr.Key)
+			}
+			return true
+		})
+	}
 }
 
 func attrValue(rec slog.Record, key string) (slog.Value, bool) {
@@ -257,8 +284,10 @@ var _ = Describe("Forwarder", Label("unit"), func() {
 				ResourceID: "r", ServiceType: "unknown", Spec: json.RawMessage(`{}`), EventID: "e",
 			})
 			Expect(err).To(HaveOccurred())
-			var spErr *routing.SPResponseError
-			Expect(err).To(BeAssignableToTypeOf(spErr))
+			Expect(err).NotTo(BeAssignableToTypeOf(&routing.SPResponseError{}))
+			Expect(err.Error()).To(Equal("503 no embedded handler for service type: unknown"))
+			Expect(routing.IsRetryable(err)).To(BeTrue())
+			Expect(routing.SafeErrorAttrs(err)).To(Equal([]any{"http_status", 503}))
 		})
 
 		It("delegates to registered embedded handler on create", func() {
@@ -372,6 +401,25 @@ var _ = Describe("Forwarder", Label("unit"), func() {
 					return true
 				})
 			}
+		})
+
+		It("does not log sensitive URLs from transport errors", func() {
+			const sensitiveURL = "https://storage.example.internal/create?token=secret-value"
+			ch = &captureLogHandler{}
+			fwd = routing.NewForwarder(routing.ForwarderConfig{
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return nil, errors.New("connection refused")
+				})},
+				Logger: slog.New(ch),
+			})
+
+			err := fwd.CreateResource(context.Background(), sensitiveURL, false, routing.CreateResourceRequest{
+				ResourceID: "res-url-log", ServiceType: "db", Spec: json.RawMessage(`{}`), EventID: "e",
+			})
+			Expect(err).To(HaveOccurred())
+			var urlErr *url.Error
+			Expect(errors.As(err, &urlErr)).To(BeTrue())
+			expectCapturedLogsOmit(ch, sensitiveURL, "secret-value", "storage.example.internal/create")
 		})
 
 		It("logs embedded dispatch outcome with provider_kind=embedded and no http_status", func() {

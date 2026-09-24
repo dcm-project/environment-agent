@@ -162,7 +162,7 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 		r.logger.Warn("CE missing required fields", "resource_id", payload.ResourceID, "service_type", payload.ServiceType, "ce_id", payload.EventID)
 		r.publishCE(ctx, cloudevent.TypeError, "", payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(""),
-			Error:           ErrorInvalidPayload, Details: "resourceId and serviceType are required",
+			Error:           ErrorInvalidPayload, Details: ErrorDetails{Message: "resourceId and serviceType are required"},
 		})
 		return nil
 	}
@@ -181,7 +181,7 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 	if !ok {
 		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
-			Error:           ErrorUnsupportedServiceType, Details: "provider not found for service type: " + payload.ServiceType,
+			Error:           ErrorUnsupportedServiceType, Details: ErrorDetails{Message: "provider not found for service type: " + payload.ServiceType},
 		})
 		return nil
 	}
@@ -189,7 +189,7 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 	if status == v1alpha1.Unavailable {
 		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
-			Error:           ErrorSPUnavailable, Details: "provider unavailable for service type: " + payload.ServiceType,
+			Error:           ErrorSPUnavailable, Details: ErrorDetails{Message: "provider unavailable for service type: " + payload.ServiceType},
 		})
 		return nil
 	}
@@ -207,7 +207,7 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 	if r.forwarder == nil {
 		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
-			Error:           ErrorSPUnavailable, Details: "provider unavailable for service type: " + payload.ServiceType,
+			Error:           ErrorSPUnavailable, Details: ErrorDetails{Message: "provider unavailable for service type: " + payload.ServiceType},
 		})
 		return nil
 	}
@@ -306,15 +306,26 @@ func (r *Router) forwardWithRetry(ctx context.Context, sp *store.StoredProvider,
 		"resource_id", payload.ResourceID, "service_type", payload.ServiceType,
 		"ce_id", payload.EventID, "provider_id", sp.ID,
 	}, SafeErrorAttrs(fwdErr)...)...)
+	var providerError *ProviderErrorData
+	var spErr *SPResponseError
+	if errors.As(fwdErr, &spErr) {
+		providerError = &ProviderErrorData{StatusCode: spErr.StatusCode, Message: spErr.Message}
+	}
 	if !IsRetryable(fwdErr) {
 		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
-			Error:           ErrorNonRetryable, Details: "service provider returned non-retryable error for service type: " + payload.ServiceType,
+			Error:           ErrorNonRetryable, Details: ErrorDetails{
+				Message:       "service provider returned non-retryable error for service type: " + payload.ServiceType,
+				ProviderError: providerError,
+			},
 		})
 	} else {
 		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
-			Error:           ErrorRetryExhausted, Details: "service provider error after retry exhaustion for service type: " + payload.ServiceType,
+			Error:           ErrorRetryExhausted, Details: ErrorDetails{
+				Message:       "service provider error after retry exhaustion for service type: " + payload.ServiceType,
+				ProviderError: providerError,
+			},
 		})
 	}
 	return nil
@@ -394,7 +405,7 @@ func (r *Router) HandleCancel(ctx context.Context, msg []byte) error {
 		r.logger.Warn("cancel CE missing required fields", "resource_id", payload.ResourceID, "service_type", payload.ServiceType, "ce_id", payload.EventID)
 		r.publishCE(ctx, cloudevent.TypeError, "", payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(""),
-			Error:           ErrorInvalidPayload, Details: "resourceId and serviceType are required",
+			Error:           ErrorInvalidPayload, Details: ErrorDetails{Message: "resourceId and serviceType are required"},
 		})
 		return nil
 	}

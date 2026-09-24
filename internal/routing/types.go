@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -75,7 +76,7 @@ type DeleteResourceRequest struct {
 	EventID     string // CE id, forwarded as Idempotency-Key (REQ-RCM-210)
 }
 
-// SPResponseError represents an error response from a service provider.
+// SPResponseError carries the status and message returned by a provider.
 type SPResponseError struct {
 	StatusCode int
 	Message    string
@@ -85,24 +86,40 @@ func (e *SPResponseError) Error() string {
 	return fmt.Sprintf("%d %s", e.StatusCode, e.Message)
 }
 
+func errorStatusCode(err error) (int, bool) {
+	var spErr *SPResponseError
+	if errors.As(err, &spErr) {
+		return spErr.StatusCode, true
+	}
+	var fwdErr *forwarderError
+	if errors.As(err, &fwdErr) {
+		return fwdErr.statusCode, true
+	}
+	return 0, false
+}
+
 // IsRetryable returns true if the error should trigger a retry.
-// Plain errors (connection failures) are retryable. SPResponseError with 5xx/429 are retryable.
+// Plain errors (connection failures) are retryable. Status errors with 5xx/429 are retryable.
 // HTTP 408 is NOT retryable per REQ-RTE-111 (4xx except 429).
 func IsRetryable(err error) bool {
-	var spErr *SPResponseError
-	if !errors.As(err, &spErr) {
+	statusCode, hasStatus := errorStatusCode(err)
+	if !hasStatus {
 		return true
 	}
-	return spErr.StatusCode >= 500 || spErr.StatusCode == http.StatusTooManyRequests
+	return statusCode >= 500 || statusCode == http.StatusTooManyRequests
 }
 
 // SafeErrorAttrs returns slog key-value attributes describing err without
-// leaking a wrapped SP response body: an *SPResponseError contributes only
-// its HTTP status code, any other error is logged as-is.
+// leaking provider response bodies or request URLs. Status-bearing errors
+// contribute only their HTTP status code, URL errors use a generic message,
+// and other errors are logged as-is.
 func SafeErrorAttrs(err error) []any {
-	var spErr *SPResponseError
-	if errors.As(err, &spErr) {
-		return []any{"http_status", spErr.StatusCode}
+	if statusCode, hasStatus := errorStatusCode(err); hasStatus {
+		return []any{"http_status", statusCode}
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return []any{"error", "provider HTTP request failed"}
 	}
 	return []any{"error", err}
 }
@@ -136,11 +153,23 @@ type RequestQueuedData struct {
 	Status      string `json:"status"`
 }
 
+// ProviderErrorData contains structured details from an SP response.
+type ProviderErrorData struct {
+	StatusCode int    `json:"status_code"`
+	Message    string `json:"message"`
+}
+
+// ErrorDetails is the details object in an error CE.
+type ErrorDetails struct {
+	Message       string             `json:"message"`
+	ProviderError *ProviderErrorData `json:"provider_error,omitempty"`
+}
+
 // ErrorData is the CE payload for error events.
 type ErrorData struct {
 	ResponseContext
-	Error   string `json:"error"`
-	Details string `json:"details"`
+	Error   string       `json:"error"`
+	Details ErrorDetails `json:"details"`
 }
 
 // CancelAckData is the CE payload for cancel-acknowledged events.
