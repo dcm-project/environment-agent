@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"time"
 
+	"github.com/dcm-project/environment-agent/internal/backoff"
 	"github.com/dcm-project/environment-agent/internal/provider/store"
 )
 
@@ -201,4 +203,53 @@ func ForwardToSP(ctx context.Context, fwd SPForwarder, sp *store.StoredProvider,
 		ServiceType: params.ServiceType,
 		EventID:     params.EventID,
 	})
+}
+
+// ForwardRetryPolicy bounds provider call retries.
+type ForwardRetryPolicy struct {
+	MaxAttempts int
+	Backoff     time.Duration
+	MaxBackoff  time.Duration
+}
+
+// ForwardWithRetry dispatches to a provider using the shared bounded retry policy.
+// It returns nil on success, a context error on cancellation, or the final
+// provider error after a non-retryable response or exhausted retries.
+func ForwardWithRetry(ctx context.Context, forwarder SPForwarder, sp *store.StoredProvider, params ForwardParams, policy ForwardRetryPolicy, logger *slog.Logger) error {
+	maxAttempts := policy.MaxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+
+	var forwardErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		forwardErr = ForwardToSP(ctx, forwarder, sp, params)
+		if forwardErr == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !IsRetryable(forwardErr) {
+			return forwardErr
+		}
+		if attempt < maxAttempts-1 {
+			logger.Warn("SP call failed, retrying", append([]any{
+				"resource_id", params.ResourceID, "service_type", params.ServiceType,
+				"attempt", attempt + 1, "max_attempts", maxAttempts,
+				"ce_id", params.EventID, "provider_id", sp.ID,
+			}, SafeErrorAttrs(forwardErr)...)...)
+			timer := time.NewTimer(backoff.ApplyJitter(
+				backoff.CalculateBackoff(policy.Backoff, policy.MaxBackoff, attempt),
+				rand.Float64,
+			))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return forwardErr
 }

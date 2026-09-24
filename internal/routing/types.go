@@ -172,6 +172,35 @@ type ErrorData struct {
 	Details ErrorDetails `json:"details"`
 }
 
+// TerminalProviderErrorData builds the error payload used after forwarding
+// stops because the provider rejected the request or retries were exhausted.
+func TerminalProviderErrorData(err error, serviceType string, responseContext ResponseContext) ErrorData {
+	var providerError *ProviderErrorData
+	var spErr *SPResponseError
+	if errors.As(err, &spErr) {
+		providerError = &ProviderErrorData{StatusCode: spErr.StatusCode, Message: spErr.Message}
+	}
+
+	if IsRetryable(err) {
+		return ErrorData{
+			ResponseContext: responseContext,
+			Error:           ErrorRetryExhausted,
+			Details: ErrorDetails{
+				Message:       "service provider error after retry exhaustion for service type: " + serviceType,
+				ProviderError: providerError,
+			},
+		}
+	}
+	return ErrorData{
+		ResponseContext: responseContext,
+		Error:           ErrorNonRetryable,
+		Details: ErrorDetails{
+			Message:       "service provider returned non-retryable error for service type: " + serviceType,
+			ProviderError: providerError,
+		},
+	}
+}
+
 // CancelAckData is the CE payload for cancel-acknowledged events.
 type CancelAckData struct {
 	ResponseContext

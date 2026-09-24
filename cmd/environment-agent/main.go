@@ -205,6 +205,11 @@ func run(ctx context.Context) int {
 		InFlightSet:         router.InFlightSet(),
 		Config: retry.ProcessorConfig{
 			HandlerTimeout: cfg.Routing.HandlerTimeout,
+			RetryPolicy: routing.ForwardRetryPolicy{
+				MaxAttempts: cfg.Routing.RetryMaxAttempts,
+				Backoff:     cfg.Routing.RetryBackoff,
+				MaxBackoff:  cfg.Routing.RetryMaxBackoff,
+			},
 		},
 		Logger:    logger,
 		AgentName: cfg.Agent.Name,
