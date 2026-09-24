@@ -61,6 +61,9 @@ func (m *Mapper) VMSpecToVirtualMachine(vmSpec *types.VMSpec, vmID string) (*kub
 				constants.DCMLabelManagedBy:  constants.DCMManagedByValue,
 				constants.DCMLabelInstanceID: vmID,
 			},
+			Annotations: map[string]string{
+				constants.DCMAnnotationResourceName: vmSpec.Metadata.Name,
+			},
 		},
 		Spec: kubevirtv1.VirtualMachineSpec{
 			RunStrategy: &runStrategy,
@@ -274,9 +277,31 @@ func (m *Mapper) parseMemorySize(sizeStr string) (string, error) {
 	return "", fmt.Errorf("unable to parse memory size: %s", sizeStr)
 }
 
-// VirtualMachineToVMSpec converts a typed KubeVirt VirtualMachine back to DCM VMSpec format
+// VirtualMachineToVMSpec converts a typed KubeVirt VirtualMachine back to DCM VMSpec format.
+//
+// Identity and status are recovered from the object metadata and status, which
+// exist regardless of how the VM was configured, so they are filled in before
+// the template is inspected. A VirtualMachine without a template still round
+// trips as an identifiable "vm" resource rather than a zero-valued spec.
 func (m *Mapper) VirtualMachineToVMSpec(vm *kubevirtv1.VirtualMachine) (*types.VMSpec, error) {
-	vmSpec := &types.VMSpec{}
+	vmSpec := &types.VMSpec{
+		ServiceType: types.Vm,
+		Metadata:    types.ServiceMetadata{Name: resourceName(vm)},
+	}
+
+	if id, ok := vm.Labels[constants.DCMLabelInstanceID]; ok && id != "" {
+		vmSpec.Id = &id
+	}
+	if !vm.CreationTimestamp.IsZero() {
+		createTime := vm.CreationTimestamp.Time.UTC()
+		vmSpec.CreateTime = &createTime
+	}
+	if status := string(vm.Status.PrintableStatus); status != "" {
+		vmSpec.Status = &status
+	}
+	if message := notReadyMessage(vm); message != "" {
+		vmSpec.StatusMessage = &message
+	}
 
 	if vm.Spec.Template == nil {
 		return vmSpec, nil
@@ -316,6 +341,27 @@ func (m *Mapper) VirtualMachineToVMSpec(vm *kubevirtv1.VirtualMachine) (*types.V
 	vmSpec.Storage = types.Storage{Disks: disks}
 
 	return vmSpec, nil
+}
+
+// resourceName returns the name the caller asked for, falling back to the
+// generated cluster name for VMs created before the annotation was recorded.
+func resourceName(vm *kubevirtv1.VirtualMachine) string {
+	if name, ok := vm.Annotations[constants.DCMAnnotationResourceName]; ok && name != "" {
+		return name
+	}
+	return vm.Name
+}
+
+// notReadyMessage returns the Ready condition's message while the VM is not
+// ready, which is where KubeVirt explains why (unschedulable, image pull
+// failure, and so on). A ready VM has nothing worth reporting.
+func notReadyMessage(vm *kubevirtv1.VirtualMachine) string {
+	for _, cond := range vm.Status.Conditions {
+		if cond.Type == kubevirtv1.VirtualMachineReady && cond.Status != k8sv1.ConditionTrue {
+			return cond.Message
+		}
+	}
+	return ""
 }
 
 // inferGuestOSFromImage tries to determine guest OS from container disk image

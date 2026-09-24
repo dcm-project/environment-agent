@@ -3,6 +3,7 @@ package kubevirt_test
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -12,6 +13,7 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	"github.com/dcm-project/environment-agent/api/vm/v1alpha1"
+	"github.com/dcm-project/environment-agent/internal/openshift/kubevirtvm/constants"
 	"github.com/dcm-project/environment-agent/internal/openshift/kubevirtvm/kubevirt"
 )
 
@@ -63,6 +65,24 @@ var _ = Describe("Mapper", func() {
 			Expect(vm.Namespace).To(Equal("default"))
 			Expect(vm.TypeMeta.APIVersion).To(Equal("kubevirt.io/v1"))
 			Expect(vm.TypeMeta.Kind).To(Equal("VirtualMachine"))
+		})
+
+		It("should record the requested resource name in an annotation", func() {
+			vmSpec := &v1alpha1.VMSpec{
+				ServiceType: v1alpha1.Vm,
+				Metadata:    v1alpha1.ServiceMetadata{Name: "my-dev-vm"},
+				GuestOs:     v1alpha1.GuestOS{Type: "ubuntu"},
+				Vcpu:        v1alpha1.Vcpu{Count: 1},
+				Memory:      v1alpha1.Memory{Size: "1Gi"},
+			}
+
+			vm, err := mapper.VMSpecToVirtualMachine(vmSpec, "00000000-0000-0000-0000-00000000000a")
+
+			Expect(err).NotTo(HaveOccurred())
+			// GenerateName means the cluster name is never the requested one,
+			// so the annotation is the only way back to it.
+			Expect(vm.Name).To(BeEmpty())
+			Expect(vm.Annotations).To(HaveKeyWithValue(constants.DCMAnnotationResourceName, "my-dev-vm"))
 		})
 
 		It("should handle empty storage with default boot disk", func() {
@@ -126,12 +146,101 @@ var _ = Describe("Mapper", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(back).NotTo(BeNil())
 
+			Expect(back.ServiceType).To(Equal(v1alpha1.Vm))
+			Expect(back.Metadata.Name).To(Equal("roundtrip-vm"))
 			Expect(back.Vcpu.Count).To(Equal(4))
 			Expect(back.Memory.Size).To(Equal("4Gi"))
 			Expect(back.GuestOs.Type).To(Equal("ubuntu"))
 			Expect(back.Storage.Disks).To(HaveLen(2))
 			Expect(back.Storage.Disks[0].Name).To(Equal("boot"))
 			Expect(back.Storage.Disks[1].Name).To(Equal("data"))
+		})
+
+		It("should report the DCM instance ID, creation time and printable status", func() {
+			created := metav1.NewTime(time.Date(2026, 1, 13, 10, 30, 0, 0, time.UTC))
+			vm := kubevirtVMWithContainerDisk("quay.io/containerdisks/ubuntu:latest", 2, "2Gi")
+			vm.Labels = map[string]string{constants.DCMLabelInstanceID: "00000000-0000-0000-0000-000000000004"}
+			vm.CreationTimestamp = created
+			vm.Status.PrintableStatus = kubevirtv1.VirtualMachineStatusStarting
+
+			back, err := mapper.VirtualMachineToVMSpec(vm)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(back.Id).To(HaveValue(Equal("00000000-0000-0000-0000-000000000004")))
+			Expect(back.CreateTime).To(HaveValue(Equal(created.Time.UTC())))
+			Expect(back.Status).To(HaveValue(Equal("Starting")))
+		})
+
+		It("should leave status unset when KubeVirt has not reported one yet", func() {
+			vm := kubevirtVMWithContainerDisk("quay.io/containerdisks/ubuntu:latest", 1, "1Gi")
+
+			back, err := mapper.VirtualMachineToVMSpec(vm)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(back.Status).To(BeNil())
+			Expect(back.Id).To(BeNil())
+			Expect(back.StatusMessage).To(BeNil())
+		})
+
+		It("should surface the Ready condition message while the VM is not ready", func() {
+			vm := kubevirtVMWithContainerDisk("quay.io/containerdisks/ubuntu:latest", 1, "1Gi")
+			vm.Status.PrintableStatus = kubevirtv1.VirtualMachineStatusUnschedulable
+			vm.Status.Conditions = []kubevirtv1.VirtualMachineCondition{{
+				Type:    kubevirtv1.VirtualMachineReady,
+				Status:  k8sv1.ConditionFalse,
+				Reason:  "Unschedulable",
+				Message: "0/3 nodes are available: insufficient memory",
+			}}
+
+			back, err := mapper.VirtualMachineToVMSpec(vm)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(back.StatusMessage).To(HaveValue(Equal("0/3 nodes are available: insufficient memory")))
+		})
+
+		It("should not report a status message for a ready VM", func() {
+			vm := kubevirtVMWithContainerDisk("quay.io/containerdisks/ubuntu:latest", 1, "1Gi")
+			vm.Status.PrintableStatus = kubevirtv1.VirtualMachineStatusRunning
+			vm.Status.Conditions = []kubevirtv1.VirtualMachineCondition{{
+				Type:   kubevirtv1.VirtualMachineReady,
+				Status: k8sv1.ConditionTrue,
+			}}
+
+			back, err := mapper.VirtualMachineToVMSpec(vm)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(back.StatusMessage).To(BeNil())
+		})
+
+		It("should fall back to the cluster name when the annotation is absent", func() {
+			vm := kubevirtVMWithContainerDisk("quay.io/containerdisks/ubuntu:latest", 1, "1Gi")
+
+			back, err := mapper.VirtualMachineToVMSpec(vm)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(back.Metadata.Name).To(Equal("test-vm"))
+		})
+
+		It("should still identify a VM that has no template instead of returning a zeroed spec", func() {
+			vm := &kubevirtv1.VirtualMachine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "dcm-abc12",
+					Namespace:   "default",
+					Labels:      map[string]string{constants.DCMLabelInstanceID: "00000000-0000-0000-0000-000000000005"},
+					Annotations: map[string]string{constants.DCMAnnotationResourceName: "templateless-vm"},
+				},
+				Status: kubevirtv1.VirtualMachineStatus{
+					PrintableStatus: kubevirtv1.VirtualMachineStatusStopped,
+				},
+			}
+
+			back, err := mapper.VirtualMachineToVMSpec(vm)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(back.ServiceType).To(Equal(v1alpha1.Vm))
+			Expect(back.Metadata.Name).To(Equal("templateless-vm"))
+			Expect(back.Id).To(HaveValue(Equal("00000000-0000-0000-0000-000000000005")))
+			Expect(back.Status).To(HaveValue(Equal("Stopped")))
 		})
 
 		It("should infer guest OS from container disk image", func() {
