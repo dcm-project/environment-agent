@@ -38,7 +38,7 @@ mirroring control-plane's `test/subsystem` pattern.
 - **Test Infrastructure:** Full stack per above
 - **Given** the agent is running against the real Keycloak container with auth enabled
 - **When** `GET /api/v1alpha1/providers` is sent with no `Authorization` header
-- **Then** the response MUST be HTTP 401 with an RFC 7807 body (`type: UNAUTHORIZED`,
+- **Then** the response MUST be HTTP 401 with an RFC 9457 body (`type: https://dcm-project.github.io/problems/unauthenticated`,
   `detail: "invalid Bearer token"`) and a `WWW-Authenticate: Bearer` header
 
 ---

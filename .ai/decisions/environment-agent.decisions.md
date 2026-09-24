@@ -662,7 +662,7 @@ pre-fix state (`RegisterEmbedded` before `SetOnTransition`/`SetOnChange`), those
 would keep passing regardless, since they don't exercise the composition root's wiring.
 
 **Related requirements:** REQ-SPR-030, REQ-HMN-100, REQ-HMN-120
-### DD-380: `RequestErrorHandlerFunc` wired to RFC 7807 output
+### DD-380: `RequestErrorHandlerFunc` wired to RFC 9457 output
 
 **Decision:** `main.go`'s `StrictHTTPServerOptions` now sets `RequestErrorHandlerFunc` to
 `httperror.WriteInvalidArgument`, alongside the already-present `ResponseErrorHandlerFunc`. Both
@@ -672,14 +672,14 @@ were updated in the same change so they can't silently drift from production wir
 
 **Rationale:** `oapigen.NewStrictHandlerWithOptions` defaults `RequestErrorHandlerFunc` to a
 bare `http.Error(w, err.Error(), http.StatusBadRequest)` when unset — plain text,
-`Content-Type: text/plain`, not RFC 7807 — for any request whose body fails Go's own
+`Content-Type: text/plain`, not RFC 9457 — for any request whose body fails Go's own
 `json.Decode` (as opposed to failing the earlier, more lenient `openapi3filter` schema
 validation). This is concretely reachable, not just theoretical: the OpenAPI schema's
 `total_node` field is declared as JSON Schema `type: integer`, which accepts `100.0`/`1e2` (both
 are mathematically integers), but Go's `encoding/json` rejects either for the generated `*int`
 field. A client sending `"total_node": 100.0` would pass `openapi3filter` and then hit the
-strict-handler's raw JSON decode, falling into the SDK's non-RFC-7807 default — violating
-REQ-HTTP-091 (framework-layer errors MUST be RFC 7807) for a case entirely outside application
+strict-handler's raw JSON decode, falling into the SDK's non-RFC-9457 default — violating
+REQ-HTTP-091 (framework-layer errors MUST be RFC 9457) for a case entirely outside application
 code's control. `IT-HTTP-110b` uses `{"name":123}` as a simpler, equivalent proxy for the same
 decode-failure code path (`server.gen.go`'s strict-handler body decode), rather than replicating
 the exact `total_node` payload — the field triggering the decode failure doesn't change which

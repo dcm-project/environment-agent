@@ -309,8 +309,7 @@ func run(ctx context.Context) int {
 			httperror.WriteInvalidArgument(w, r, logger, err.Error())
 		},
 		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
-			httperror.WriteResponse(w, logger, http.StatusInternalServerError,
-				"INTERNAL", "Internal Server Error",
+			httperror.WriteType(w, logger, v1alpha1.ErrorTypeINTERNAL,
 				err.Error(), &r.RequestURI)
 		},
 	})

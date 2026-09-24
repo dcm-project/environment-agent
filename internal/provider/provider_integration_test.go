@@ -96,9 +96,7 @@ func startRealServer() (baseURL string, stop func()) {
 			httperror.WriteInvalidArgument(w, r, logger, err.Error())
 		},
 		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
-			httperror.WriteResponse(w, logger, http.StatusInternalServerError,
-				"INTERNAL", "Internal Server Error",
-				err.Error(), &r.RequestURI)
+			httperror.WriteType(w, logger, v1alpha1.ErrorTypeINTERNAL, err.Error(), &r.RequestURI)
 		},
 	})
 	srv := apiserver.New(cfg, logger, h, nil)
@@ -357,7 +355,7 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(resp.Body).Decode(&errBody)).To(Succeed())
-			Expect(errBody.Type).To(Equal("CONFLICT"))
+			Expect(errBody.Type).To(Equal(v1alpha1.ErrorTypeALREADYEXISTS))
 			Expect(errBody.Detail).To(HaveValue(ContainSubstring("container")))
 		})
 	})
@@ -547,7 +545,7 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 			// the conflicting provider's name is actually surfaced.
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(resp.Body).Decode(&errBody)).To(Succeed())
-			Expect(errBody.Type).To(Equal("CONFLICT"))
+			Expect(errBody.Type).To(Equal(v1alpha1.ErrorTypeALREADYEXISTS))
 			Expect(errBody.Detail).To(HaveValue(ContainSubstring("other-provider")),
 				"conflict detail must name the provider that already holds the service type")
 			Expect(errBody.Detail).To(HaveValue(ContainSubstring("analytics")))
@@ -618,7 +616,7 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 		// already reject, so this bypasses chi routing and that middleware
 		// to exercise the strict-handler's RequestErrorHandlerFunc wiring
 		// directly (REQ-HTTP-091 / AC-HTTP-091).
-		It("returns RFC 7807 problem+json when the strict handler's own JSON decode fails (IT-HTTP-110b)", func() {
+		It("returns RFC 9457 problem+json when the strict handler's own JSON decode fails (IT-HTTP-110b)", func() {
 			logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 			fileStore, err := store.NewFileStore(filepath.Join(GinkgoT().TempDir(), "registrations.json"), logger)
 			Expect(err).NotTo(HaveOccurred())
@@ -630,8 +628,7 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 					httperror.WriteInvalidArgument(w, r, logger, err.Error())
 				},
 				ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
-					httperror.WriteResponse(w, logger, http.StatusInternalServerError,
-						"INTERNAL", "Internal Server Error", err.Error(), &r.RequestURI)
+					httperror.WriteType(w, logger, v1alpha1.ErrorTypeINTERNAL, err.Error(), &r.RequestURI)
 				},
 			})
 
@@ -647,7 +644,7 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(rec.Body).Decode(&errBody)).To(Succeed())
-			Expect(errBody.Type).To(Equal("INVALID_ARGUMENT"))
+			Expect(errBody.Type).To(Equal(v1alpha1.ErrorTypeINVALIDARGUMENT))
 		})
 	})
 
@@ -714,7 +711,7 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(resp.Body).Decode(&errBody)).To(Succeed())
-			Expect(errBody.Type).To(Equal("UNPROCESSABLE_ENTITY"))
+			Expect(errBody.Type).To(Equal(v1alpha1.ErrorTypeUNPROCESSABLEENTITY))
 			Expect(errBody.Detail).To(HaveValue(ContainSubstring("id")))
 		})
 	})
@@ -748,7 +745,7 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(resp2.Body).Decode(&errBody)).To(Succeed())
-			Expect(errBody.Type).To(Equal("CONFLICT"))
+			Expect(errBody.Type).To(Equal(v1alpha1.ErrorTypeALREADYEXISTS))
 			Expect(errBody.Detail).To(HaveValue(ContainSubstring("original-id")))
 			Expect(errBody.Detail).To(HaveValue(ContainSubstring("different-id")))
 		})
@@ -795,7 +792,7 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(resp2.Body).Decode(&errBody)).To(Succeed())
-			Expect(errBody.Type).To(Equal("CONFLICT"))
+			Expect(errBody.Type).To(Equal(v1alpha1.ErrorTypeALREADYEXISTS))
 			Expect(errBody.Detail).To(HaveValue(ContainSubstring("shared-id")))
 			Expect(errBody.Detail).To(HaveValue(ContainSubstring("collision-holder")),
 				"the conflict detail must name the provider that already holds the requested ID")
@@ -848,7 +845,7 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(resp.Body).Decode(&errBody)).To(Succeed())
-			Expect(errBody.Type).To(Equal("UNPROCESSABLE_ENTITY"))
+			Expect(errBody.Type).To(Equal(v1alpha1.ErrorTypeUNPROCESSABLEENTITY))
 		})
 
 		It("returns 422 for invalid endpoint URI (IT-SPR-165)", func() {
@@ -866,7 +863,7 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(resp.Body).Decode(&errBody)).To(Succeed())
-			Expect(errBody.Type).To(Equal("UNPROCESSABLE_ENTITY"))
+			Expect(errBody.Type).To(Equal(v1alpha1.ErrorTypeUNPROCESSABLEENTITY))
 		})
 	})
 
@@ -898,7 +895,7 @@ var _ = Describe("SP Registration Integration", Serial, Label("integration"), fu
 
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(resp.Body).Decode(&errBody)).To(Succeed())
-			Expect(errBody.Type).To(Equal("CONFLICT"))
+			Expect(errBody.Type).To(Equal(v1alpha1.ErrorTypeALREADYEXISTS))
 			Expect(errBody.Detail).To(HaveValue(ContainSubstring("database")))
 			// name != service type here ("db-provider" vs "database"), so
 			// this disambiguates the conflict detail actually naming the

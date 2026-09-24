@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 	"github.com/dcm-project/environment-agent/internal/apiserver"
 	"github.com/dcm-project/environment-agent/internal/auth"
 	"github.com/dcm-project/environment-agent/internal/requestctx"
@@ -112,7 +113,7 @@ var _ = Describe("Auth Middleware", Label("unit"), func() {
 
 			var body map[string]any
 			Expect(json.Unmarshal(rr.Body.Bytes(), &body)).To(Succeed())
-			Expect(body["type"]).To(Equal("UNAUTHORIZED"))
+			Expect(body["type"]).To(Equal(string(v1alpha1.ErrorTypeUNAUTHENTICATED)))
 			Expect(body["detail"]).To(Equal("invalid Bearer token"))
 		})
 
@@ -154,7 +155,7 @@ var _ = Describe("Auth Middleware", Label("unit"), func() {
 
 			var body map[string]any
 			Expect(json.Unmarshal(rr.Body.Bytes(), &body)).To(Succeed())
-			Expect(body["type"]).To(Equal("UNAUTHORIZED"))
+			Expect(body["type"]).To(Equal(string(v1alpha1.ErrorTypeUNAUTHENTICATED)))
 		})
 
 		It("never leaks internal validator error details in the response body (UT-AUTH-041)", func() {
@@ -441,7 +442,7 @@ var _ = Describe("Auth Middleware", Label("unit"), func() {
 	})
 
 	Describe("writeAuthError", func() {
-		It("produces RFC 7807 JSON with required fields (UT-AUTH-070)", func() {
+		It("produces RFC 9457 JSON with required fields (UT-AUTH-070)", func() {
 			validator := &mockValidator{}
 			mw := auth.Middleware(auth.MiddlewareConfig{
 				JWTValidator: validator,
@@ -463,8 +464,8 @@ var _ = Describe("Auth Middleware", Label("unit"), func() {
 			Expect(body).To(HaveKey("title"))
 			Expect(body).To(HaveKey("status"))
 			Expect(body).To(HaveKey("detail"))
-			Expect(body["type"]).To(Equal("UNAUTHORIZED"))
-			Expect(body["title"]).To(Equal("Unauthorized"))
+			Expect(body["type"]).To(Equal(string(v1alpha1.ErrorTypeUNAUTHENTICATED)))
+			Expect(body["title"]).To(Equal("Unauthenticated"))
 			Expect(body["status"]).To(BeNumerically("==", 401))
 		})
 	})

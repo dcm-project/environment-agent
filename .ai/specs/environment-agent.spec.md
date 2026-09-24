@@ -143,11 +143,11 @@ rate limiting. Authentication middleware is specified in §4.11.
 | REQ-HTTP-040 | The agent MUST initiate graceful shutdown on SIGINT, behaving identically to REQ-HTTP-030 | MUST | |
 | REQ-HTTP-050 | The agent MUST load configuration values from environment variables (see REQ-XC-CFG-010 for file support and precedence rules) | MUST | |
 | REQ-HTTP-060 | The agent MUST log each HTTP request at INFO level including method, path, response status code, and duration | MUST | |
-| REQ-HTTP-070 | The agent MUST catch panics in HTTP handlers and return an RFC 7807 INTERNAL error response | MUST | |
+| REQ-HTTP-070 | The agent MUST catch panics in HTTP handlers and return an RFC 9457 INTERNAL error response | MUST | |
 | REQ-HTTP-071 | Panic recovery middleware SHOULD be applied as the outermost middleware layer | SHOULD | Implementation guidance — observable behavior covered by REQ-HTTP-070 |
 | REQ-HTTP-080 | The agent MUST log server lifecycle events: listen address on startup, shutdown initiation, and shutdown completion | MUST | |
-| REQ-HTTP-090 | The agent MUST return 400 Bad Request with RFC 7807 error body for malformed requests | MUST | |
-| REQ-HTTP-091 | The API framework layer MUST return RFC 7807 error responses for request parsing and response serialization failures | MUST | |
+| REQ-HTTP-090 | The agent MUST return 400 Bad Request with RFC 9457 error body for malformed requests | MUST | |
+| REQ-HTTP-091 | The API framework layer MUST return RFC 9457 error responses for request parsing and response serialization failures | MUST | |
 | REQ-HTTP-110 | The agent SHOULD enforce a configurable per-request timeout | SHOULD | |
 
 #### Configuration Introduced
@@ -210,7 +210,7 @@ rate limiting. Authentication middleware is specified in §4.11.
 - **Validates:** REQ-HTTP-070, REQ-HTTP-071
 - **Given** a handler panics during request processing
 - **When** the panic is caught
-- **Then** the response MUST be HTTP 500 with RFC 7807 body (type=INTERNAL)
+- **Then** the response MUST be HTTP 500 with RFC 9457 body (type=https://dcm-project.github.io/problems/internal)
 - **And** the panic and stack trace MUST be logged at ERROR level
 
 ##### AC-HTTP-080: Lifecycle logging
@@ -225,14 +225,14 @@ rate limiting. Authentication middleware is specified in §4.11.
 - **Validates:** REQ-HTTP-090
 - **Given** a request with invalid parameters
 - **When** the request reaches the router
-- **Then** the agent MUST return a 400 Bad Request with an RFC 7807 error body
+- **Then** the agent MUST return a 400 Bad Request with an RFC 9457 error body
 
 ##### AC-HTTP-091: Framework-layer error responses
 
 - **Validates:** REQ-HTTP-091
 - **Given** the API framework layer encounters a request parsing or response serialization failure
 - **When** an error response is generated
-- **Then** the error response MUST be RFC 7807 with `Content-Type: application/problem+json`
+- **Then** the error response MUST be RFC 9457 with `Content-Type: application/problem+json`
 
 ##### AC-HTTP-095: Per-request timeout enforcement
 
@@ -240,7 +240,7 @@ rate limiting. Authentication middleware is specified in §4.11.
 - **Given** a per-request timeout of 1s is configured
 - **When** a handler takes longer than 1s
 - **Then** the request context MUST be cancelled
-- **And** the response MUST be HTTP 503 with RFC 7807 body (type=UNAVAILABLE)
+- **And** the response MUST be HTTP 503 with RFC 9457 body (type=https://dcm-project.github.io/problems/unavailable)
 
 #### Dependencies
 
@@ -367,8 +367,8 @@ Authentication of external SP registration requests is handled by §4.11.
 | REQ-SPR-110 | Successful re-registration MUST return 200 OK with the updated Provider resource | MUST | |
 | REQ-SPR-120 | If the requested service type is already served by another SP (embedded or external, identified by a different name), the agent MUST reject the registration with 409 Conflict | MUST | |
 | REQ-SPR-121 | The 409 Conflict response MUST include an error message identifying the conflicting provider name and service type | MUST | |
-| REQ-SPR-130 | If the request body is malformed or fails validation, the agent MUST return 400 Bad Request with RFC 7807 error body | MUST | |
-| REQ-SPR-131 | If the request body passes structural parsing but fails semantic validation (`schema_version` pattern, `endpoint` not a valid URI, `?id=` pattern violation), the agent MUST return 422 Unprocessable Entity with RFC 7807 error body (type=UNPROCESSABLE_ENTITY) | MUST | |
+| REQ-SPR-130 | If the request body is malformed or fails validation, the agent MUST return 400 Bad Request with RFC 9457 error body | MUST | |
+| REQ-SPR-131 | If the request body passes structural parsing but fails semantic validation (`schema_version` pattern, `endpoint` not a valid URI, `?id=` pattern violation), the agent MUST return 422 Unprocessable Entity with RFC 9457 error body (type=https://dcm-project.github.io/problems/unprocessable-entity) | MUST | |
 | REQ-SPR-230 | Successful external SP registration (new registration, not update) MUST be logged at INFO with `service_type`, `provider_id`, `name` | MUST | Domain-level log distinct from the generic HTTP access-log status code |
 | REQ-SPR-240 | External SP registration rejected due to a service-type slot conflict MUST be logged at WARN with `service_type`, `name`, and the conflict error (which identifies the existing slot holder) | MUST | Today only visible as HTTP `status=409` in the generic access log |
 | REQ-SPR-241 | Successful external SP re-registration (an update to an existing record, not a new registration) MUST be logged at INFO with `service_type`, `provider_id`, `name` — distinct from REQ-SPR-230, which covers new registrations only. If persisting the update fails, the agent MUST NOT log this success message | MUST | Found via traceability audit: implemented, but had no governing requirement distinct from REQ-SPR-230 — see `IT-SPR-197`, `IT-SPR-198` |
@@ -596,7 +596,7 @@ Authentication of external SP registration requests is handled by §4.11.
 - **Validates:** REQ-SPR-130
 - **Given** a POST request with missing required fields (e.g., no `service_type`)
 - **When** `POST /api/v1alpha1/providers` is called
-- **Then** the response MUST be 400 Bad Request with RFC 7807 error body
+- **Then** the response MUST be 400 Bad Request with RFC 9457 error body
 
 ##### AC-SPR-105: Provider ID from query parameter
 
@@ -617,7 +617,7 @@ Authentication of external SP registration requests is handled by §4.11.
 - **Validates:** REQ-SPR-091
 - **Given** `POST /api/v1alpha1/providers?id=INVALID_ID!` (contains uppercase and special characters)
 - **When** the request is processed
-- **Then** the response MUST be 422 Unprocessable Entity with RFC 7807 error body (type=UNPROCESSABLE_ENTITY)
+- **Then** the response MUST be 422 Unprocessable Entity with RFC 9457 error body (type=https://dcm-project.github.io/problems/unprocessable-entity)
 - **And** the error MUST identify the `?id=` pattern violation
 
 ##### AC-SPR-107: Provider schema_version required
@@ -632,21 +632,21 @@ Authentication of external SP registration requests is handled by §4.11.
 - **Validates:** REQ-SPR-131
 - **Given** `POST /api/v1alpha1/providers` with a valid JSON body where `schema_version` does not match the pattern `^v[0-9]+(alpha|beta)?[0-9]*$`
 - **When** the request is processed
-- **Then** the response MUST be 422 Unprocessable Entity with RFC 7807 error body (type=UNPROCESSABLE_ENTITY)
+- **Then** the response MUST be 422 Unprocessable Entity with RFC 9457 error body (type=https://dcm-project.github.io/problems/unprocessable-entity)
 
 ##### AC-SPR-108b: Endpoint URI semantic validation returns 422
 
 - **Validates:** REQ-SPR-131
 - **Given** `POST /api/v1alpha1/providers` with a valid JSON body where `endpoint` is not a valid URI (e.g., `"not-a-url"`)
 - **When** the request is processed
-- **Then** the response MUST be 422 Unprocessable Entity with RFC 7807 error body (type=UNPROCESSABLE_ENTITY)
+- **Then** the response MUST be 422 Unprocessable Entity with RFC 9457 error body (type=https://dcm-project.github.io/problems/unprocessable-entity)
 
 ##### AC-SPR-106c: Cross-provider ID collision rejected with the colliding holder's name
 
 - **Validates:** REQ-SPR-091
 - **Given** provider "collision-holder" is already registered with `?id=shared-id`
 - **When** a DIFFERENT, new provider name registers with `?id=shared-id`
-- **Then** the response MUST be 409 Conflict with RFC 7807 error body (type=CONFLICT)
+- **Then** the response MUST be 409 Conflict with RFC 9457 error body (type=https://dcm-project.github.io/problems/already-exists)
 - **And** the error detail MUST name the requested ID and the existing holder ("collision-holder")
 
 ##### AC-SPR-109: Persistence load failure causes fail-fast
@@ -707,7 +707,7 @@ Out of scope: Historical status data, metrics.
 | REQ-STS-010 | The agent MUST expose `GET /api/v1alpha1/providers` returning all registered SPs with their current health state | MUST | |
 | REQ-STS-015 | The list response MUST return a JSON object with a `results` array containing Provider resources | MUST | |
 | REQ-STS-020 | The agent MUST expose `GET /api/v1alpha1/providers/{provider_id}` returning a single SP by ID | MUST | |
-| REQ-STS-025 | If the requested `provider_id` does not match any registered SP, the agent MUST return 404 Not Found with RFC 7807 error body | MUST | |
+| REQ-STS-025 | If the requested `provider_id` does not match any registered SP, the agent MUST return 404 Not Found with RFC 9457 error body | MUST | |
 | REQ-STS-030 | Each Provider resource MUST include read-only health fields: `type` (embedded/external), `status` (Ready/Unhealthy/Unavailable), `last_check_time` timestamp | MUST | |
 | REQ-STS-040 | The list endpoint MUST include all registered SPs regardless of their health state | MUST | |
 | REQ-STS-050 | The responses MUST set `Content-Type: application/json` | MUST | |
@@ -742,7 +742,7 @@ Out of scope: Historical status data, metrics.
 - **Validates:** REQ-STS-025
 - **Given** no SP is registered with ID "nonexistent"
 - **When** GET `/api/v1alpha1/providers/nonexistent` is called
-- **Then** the response MUST be 404 Not Found with RFC 7807 error body
+- **Then** the response MUST be 404 Not Found with RFC 9457 error body
 
 ##### AC-STS-030: Provider list reflects real-time health
 
@@ -2347,7 +2347,7 @@ against a real IdP.
 | REQ-AUTH-010 | The agent MUST validate JWT Bearer tokens on all REST API endpoints (except health, see REQ-AUTH-020) using OIDC discovery against the configured issuer URL to obtain JWKS keys | MUST | Validates signature, expiry, issuer, audience |
 | REQ-AUTH-020 | The agent MUST bypass authentication for the health endpoint (`GET /api/v1alpha1/health`) | MUST | Health probes must succeed without credentials |
 | REQ-AUTH-030 | The agent MUST support a disabled authentication mode (`AGENT_AUTH_DISABLED=true`) that passes all requests through without token validation | MUST | Default for v1alpha1 to avoid breaking existing deployments |
-| REQ-AUTH-040 | When authentication is enabled and a request lacks a valid Bearer token, the agent MUST return HTTP 401 with an RFC 7807 error body (`type: UNAUTHORIZED`) and a `WWW-Authenticate: Bearer` response header | MUST | Per REQ-XC-ERR-010 |
+| REQ-AUTH-040 | When authentication is enabled and a request lacks a valid Bearer token, the agent MUST return HTTP 401 with an RFC 9457 error body (`type: https://dcm-project.github.io/problems/unauthenticated`) and a `WWW-Authenticate: Bearer` response header | MUST | Per REQ-XC-ERR-010 |
 | REQ-AUTH-050 | After successful JWT validation, the agent MUST extract `sub` and `preferred_username` claims from the token and make them available in the request context for downstream middleware and handlers | MUST | |
 | REQ-AUTH-060 | After successful JWT validation, the auth middleware MUST log the authenticated identity at DEBUG level including `sub`, `preferred_username`, HTTP method, and request path | MUST | DEBUG keeps production logs clean; operators enable when needed |
 | REQ-AUTH-070 | The request logger middleware (REQ-HTTP-060) MUST include `sub` and `preferred_username` from context in per-request log entries when authentication has populated them | MUST | Every request log line gets an identity tag for audit |
@@ -2388,7 +2388,7 @@ against a real IdP.
 - **Given** authentication is enabled
 - **When** a request arrives without an `Authorization` header
 - **Then** the agent MUST respond with HTTP 401
-- **And** the response body MUST be RFC 7807 JSON with `type: UNAUTHORIZED`
+- **And** the response body MUST be RFC 9457 JSON with `type: https://dcm-project.github.io/problems/unauthenticated`
 - **And** the response MUST include a `WWW-Authenticate: Bearer` header
 
 ##### AC-AUTH-040: Invalid Bearer token rejected
@@ -2397,7 +2397,7 @@ against a real IdP.
 - **Given** authentication is enabled
 - **When** a request includes an expired, malformed, or incorrectly-signed Bearer token
 - **Then** the agent MUST respond with HTTP 401
-- **And** the response body MUST be RFC 7807 JSON with `type: UNAUTHORIZED`
+- **And** the response body MUST be RFC 9457 JSON with `type: https://dcm-project.github.io/problems/unauthenticated`
 
 ##### AC-AUTH-050: Disabled auth mode passes all requests
 
@@ -2483,7 +2483,7 @@ against a real IdP.
 #### Dependencies
 
 Depends on Topic 1 (HTTP Server) for middleware chain and server lifecycle.
-Uses cross-cutting error handling (§5.1) for RFC 7807 responses.
+Uses cross-cutting error handling (§5.1) for RFC 9457 responses.
 
 ---
 
@@ -2495,7 +2495,7 @@ Uses cross-cutting error handling (§5.1) for RFC 7807 responses.
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| REQ-XC-ERR-010 | All HTTP error responses MUST conform to RFC 7807 (Problem Details for HTTP APIs) using the Error schema defined in the OpenAPI spec | MUST | |
+| REQ-XC-ERR-010 | All HTTP error responses MUST conform to RFC 9457 (Problem Details for HTTP APIs) using the Error schema defined in the OpenAPI spec | MUST | |
 | REQ-XC-ERR-020 | Error responses MUST set `Content-Type: application/problem+json` | MUST | |
 | REQ-XC-ERR-030 | Error responses SHOULD include `detail` and `instance` fields. The `instance` field SHOULD be the request URI | SHOULD | |
 | REQ-XC-ERR-040 | Error responses for INTERNAL errors MUST NOT include stack traces, file paths, internal error messages, or hostnames | MUST | |
@@ -2516,12 +2516,12 @@ Uses cross-cutting error handling (§5.1) for RFC 7807 responses.
 
 #### Acceptance Criteria
 
-##### AC-XC-ERR-010: RFC 7807 compliance
+##### AC-XC-ERR-010: RFC 9457 compliance
 
 - **Validates:** REQ-XC-ERR-010, REQ-XC-ERR-030
 - **Given** any error condition in the API
 - **When** an error response is returned
-- **Then** the body MUST conform to the RFC 7807 Error schema with at minimum `type` and `title` fields
+- **Then** the body MUST conform to the RFC 9457 Error schema with at minimum `type` and `title` fields
 - **And** SHOULD include `detail` and `instance` (= request URI) fields
 
 ##### AC-XC-ERR-020: Error content type

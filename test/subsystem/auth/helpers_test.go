@@ -10,6 +10,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 )
 
 // --- Keycloak helpers ---
@@ -61,13 +63,13 @@ func doRequest(method, path string, opts ...requestOption) *http.Response {
 	return resp
 }
 
-// --- RFC 7807 response helpers ---
+// --- RFC 9457 response helpers ---
 
 type problemResponse struct {
-	Type   string `json:"type"`
-	Status int    `json:"status"`
-	Title  string `json:"title"`
-	Detail string `json:"detail"`
+	Type   v1alpha1.ErrorType `json:"type"`
+	Status int                `json:"status"`
+	Title  string             `json:"title"`
+	Detail string             `json:"detail"`
 }
 
 func readProblemResponse(resp *http.Response) problemResponse {

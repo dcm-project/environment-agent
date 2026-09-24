@@ -126,7 +126,7 @@ test-all: test test-e2e
 coverage:
 	go run github.com/onsi/ginkgo/v2/ginkgo -r --randomize-all --fail-on-pending --cover --coverprofile=coverage.out ./internal/... ./cmd/...
 
-ci: check-tidy check-generate-api vet lint test
+ci: check-tidy check-generate-api check-problem-uris vet lint test
 
 tidy:
 	go mod tidy
@@ -228,6 +228,18 @@ check-generate-api: generate-api
 check-aep:
 	npx --yes @stoplight/spectral-cli lint --fail-severity=warn ./api/v1alpha1/openapi.yaml
 
+# Problem type URIs must be under a project-controlled domain. dcm.example.com
+# is IANA-reserved for documentation (RFC 2606) and can never be dereferenced,
+# so an Error.type pointing at it is not a usable RFC 9457 type URI.
+check-problem-uris:
+	@output=$$(find api internal pkg cmd -type f \( -name '*.go' -o -name '*.yaml' \) \
+		-exec grep -n 'dcm\.example\.com' {} + 2>&1) || true; \
+	if [ -n "$$output" ]; then \
+		printf '%s\n' "$$output"; \
+		echo "ERROR: Old problem type URIs found. Update to dcm-project.github.io/problems/*"; \
+		exit 1; \
+	fi
+
 check-container-engine:
 	@if [ -z "$(CONTAINER_ENGINE)" ]; then \
 		echo "Error: No supported container engine found. Please install podman or docker, or set CONTAINER_ENGINE explicitly." >&2; \
@@ -261,5 +273,5 @@ auth-subsystem-test: subsystem-env
 	generate-database-types generate-database-api \
 	generate-network-types generate-network-api \
 	bundle-vm-openapi generate-vm-types generate-vm-api \
-	generate-sp-api generate-api check-generate-api check-aep check-container-engine image-build \
+	generate-sp-api generate-api check-generate-api check-aep check-problem-uris check-container-engine image-build \
 	subsystem-env auth-subsystem-test-up auth-subsystem-test-down auth-subsystem-test
