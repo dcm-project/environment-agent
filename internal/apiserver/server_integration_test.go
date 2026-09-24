@@ -428,7 +428,7 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(resp.Body).Decode(&errBody)).To(Succeed())
-			Expect(errBody.Type).To(Equal("UNAVAILABLE"))
+			Expect(errBody.Type).To(Equal(v1alpha1.ErrorTypeUNAVAILABLE))
 
 			Eventually(func() string {
 				return logBuf.String()
@@ -440,7 +440,7 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 	})
 
 	Describe("Panic Recovery", func() {
-		It("catches panics and returns RFC 7807 INTERNAL error (IT-HTTP-080)", func() {
+		It("catches panics and returns RFC 9457 INTERNAL error (IT-HTTP-080)", func() {
 			handler := &stubHandler{
 				getHealthFunc: func(_ http.ResponseWriter, _ *http.Request) {
 					panic("test panic for recovery")
@@ -458,7 +458,7 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(resp.Body).Decode(&errBody)).To(Succeed())
-			Expect(errBody.Type).To(Equal("INTERNAL"))
+			Expect(errBody.Type).To(Equal(v1alpha1.ErrorTypeINTERNAL))
 			Expect(errBody.Status).To(HaveValue(Equal(500)))
 			if errBody.Detail != nil {
 				Expect(*errBody.Detail).NotTo(ContainSubstring("test panic"))
@@ -498,7 +498,7 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 	})
 
 	Describe("Error Handling", func() {
-		It("returns 400 RFC 7807 for malformed requests (IT-HTTP-100)", func() {
+		It("returns 400 RFC 9457 for malformed requests (IT-HTTP-100)", func() {
 			handler := &stubHandler{}
 			startServer(handler)
 
@@ -516,10 +516,10 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(resp.Body).Decode(&errBody)).To(Succeed())
-			Expect(errBody.Type).To(Equal("INVALID_ARGUMENT"))
+			Expect(errBody.Type).To(Equal(v1alpha1.ErrorTypeINVALIDARGUMENT))
 		})
 
-		It("returns RFC 7807 for framework-layer parsing errors (IT-HTTP-110)", func() {
+		It("returns RFC 9457 for framework-layer parsing errors (IT-HTTP-110)", func() {
 			handler := &stubHandler{}
 			startServer(handler)
 
@@ -540,7 +540,7 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 	})
 
 	Describe("Request Timeout", func() {
-		It("enforces per-request timeout with RFC 7807 response (IT-HTTP-120)", func() {
+		It("enforces per-request timeout with RFC 9457 response (IT-HTTP-120)", func() {
 			cfg.Server.RequestTimeout = 1 * time.Second
 			handler := &stubHandler{
 				getHealthFunc: func(w http.ResponseWriter, r *http.Request) {
@@ -564,7 +564,7 @@ var _ = Describe("HTTP Server Integration", Label("integration"), func() {
 
 			var errBody v1alpha1.Error
 			Expect(json.NewDecoder(resp.Body).Decode(&errBody)).To(Succeed())
-			Expect(errBody.Type).To(Equal("UNAVAILABLE"))
+			Expect(errBody.Type).To(Equal(v1alpha1.ErrorTypeUNAVAILABLE))
 
 			Eventually(func() string {
 				return logBuf.String()

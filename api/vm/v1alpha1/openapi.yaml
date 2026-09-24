@@ -247,7 +247,7 @@ components:
           example: eyJpZCI6IjEyM2U0NTY3LWU4OWItMTJkMy1hNDU2LTQyNjYxNDE3NDAwMCJ9
     Error:
       type: object
-      description: RFC 7807 compliant error response
+      description: RFC 9457 compliant problem details response
       required:
         - type
         - title
@@ -256,11 +256,11 @@ components:
           type: string
           format: uri-reference
           description: URI reference identifying the error type
-          example: https://dcm.example.com/errors/invalid-input
+          example: https://dcm-project.github.io/problems/invalid-argument
         title:
           type: string
           description: Short human-readable summary of the problem
-          example: Invalid Input
+          example: Invalid argument
         status:
           type: integer
           description: HTTP status code

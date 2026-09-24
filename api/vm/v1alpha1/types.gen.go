@@ -131,7 +131,7 @@ type Disk struct {
 	AdditionalProperties map[string]interface{} `json:"-"`
 }
 
-// Error RFC 7807 compliant error response
+// Error RFC 9457 compliant problem details response
 type Error struct {
 	// Detail Human-readable explanation specific to this occurrence
 	//
@@ -150,12 +150,12 @@ type Error struct {
 
 	// Title Short human-readable summary of the problem
 	//
-	// Example: Invalid Input
+	// Example: Invalid argument
 	Title string `json:"title"`
 
 	// Type URI reference identifying the error type
 	//
-	// Example: https://dcm.example.com/errors/invalid-input
+	// Example: https://dcm-project.github.io/problems/invalid-argument
 	Type string `json:"type"`
 }
 
