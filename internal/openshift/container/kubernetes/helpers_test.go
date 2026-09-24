@@ -50,8 +50,8 @@ func minimalContainer(name string) v1alpha1.ContainerSpec {
 		},
 		Resources: v1alpha1.ContainerResources{
 			Cpu: v1alpha1.ContainerCpu{
-				Min: 1,
-				Max: 2,
+				Min: "1000m",
+				Max: "2000m",
 			},
 			Memory: v1alpha1.ContainerMemory{
 				Min: "1GB",

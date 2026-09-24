@@ -322,20 +322,22 @@ components:
 
     ContainerCpu:
       type: object
-      description: CPU resource constraints
+      description: CPU allocation in cores or millicores (e.g., "2", "500m")
       additionalProperties: true
       required:
         - min
         - max
       properties:
         min:
-          type: integer
-          description: Minimum guaranteed CPU cores
-          minimum: 1
+          type: string
+          description: Minimum guaranteed CPU in cores or millicores (e.g., "1", "500m")
+          pattern: '^[1-9][0-9]*m?$'
+          example: "500m"
         max:
-          type: integer
-          description: Maximum allowed CPU cores
-          minimum: 1
+          type: string
+          description: Maximum allowed CPU in cores or millicores (e.g., "2", "1000m")
+          pattern: '^[1-9][0-9]*m?$'
+          example: "1000m"
 
     ContainerMemory:
       type: object

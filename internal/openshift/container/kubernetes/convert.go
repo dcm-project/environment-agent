@@ -92,11 +92,21 @@ func resourcesFromContainer(k8sC corev1.Container) v1alpha1.ContainerResources {
 	res := v1alpha1.ContainerResources{}
 
 	if req, ok := k8sC.Resources.Requests[corev1.ResourceCPU]; ok {
-		res.Cpu.Min = int(req.Value())
+		res.Cpu.Min = units.CPUQuantityToAPI(req)
 	}
 	if lim, ok := k8sC.Resources.Limits[corev1.ResourceCPU]; ok {
-		res.Cpu.Max = int(lim.Value())
+		res.Cpu.Max = units.CPUQuantityToAPI(lim)
 	}
+
+	// Ensure ContainerCpu.Min and .Max are both non-empty when only one of
+	// requests/limits is set, so API consumers always see a consistent
+	// min/max pair.
+	if res.Cpu.Min == "" && res.Cpu.Max != "" {
+		res.Cpu.Min = res.Cpu.Max
+	} else if res.Cpu.Max == "" && res.Cpu.Min != "" {
+		res.Cpu.Max = res.Cpu.Min
+	}
+
 	if req, ok := k8sC.Resources.Requests[corev1.ResourceMemory]; ok {
 		res.Memory.Min = units.MemoryQuantityToAPI(req)
 	}
@@ -253,19 +263,26 @@ func latestDeploymentTransitionTime(deploy *appsv1.Deployment) *time.Time {
 }
 
 // buildDeployment creates a Kubernetes Deployment from a Container spec.
-func buildDeployment(spec v1alpha1.ContainerSpec, id string, cfg K8sConfig, labels map[string]string) *appsv1.Deployment {
+func buildDeployment(spec v1alpha1.ContainerSpec, id string, cfg K8sConfig, labels map[string]string) (*appsv1.Deployment, error) {
 	replicas := int32(1)
 
 	// Selector uses only DCM labels (immutable after creation)
 	selectorLabels := dcmLabels(id)
 
 	// CPU resources
-	cpuReq, cpuLim := units.ConvertCPU(spec.Resources.Cpu)
+	cpuReq, cpuLim, err := units.ConvertCPU(spec.Resources.Cpu)
+	if err != nil {
+		return nil, fmt.Errorf("converting CPU resources: %w", err)
+	}
 
-	// Memory resources — errors handled upstream; safe to ignore here since
-	// validation occurs before buildDeployment is called.
-	memReq, _ := units.ConvertMemory(spec.Resources.Memory.Min)
-	memLim, _ := units.ConvertMemory(spec.Resources.Memory.Max)
+	memReq, err := units.ConvertMemory(spec.Resources.Memory.Min)
+	if err != nil {
+		return nil, fmt.Errorf("converting memory.min: %w", err)
+	}
+	memLim, err := units.ConvertMemory(spec.Resources.Memory.Max)
+	if err != nil {
+		return nil, fmt.Errorf("converting memory.max: %w", err)
+	}
 
 	k8sContainer := corev1.Container{
 		Name:  spec.Metadata.Name,
@@ -328,7 +345,7 @@ func buildDeployment(spec v1alpha1.ContainerSpec, id string, cfg K8sConfig, labe
 				},
 			},
 		},
-	}
+	}, nil
 }
 
 // buildService creates a Kubernetes Service from a Container spec.

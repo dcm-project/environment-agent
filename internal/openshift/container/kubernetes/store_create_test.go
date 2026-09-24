@@ -76,7 +76,7 @@ var _ = Describe("K8s Store", func() {
 		It("maps CPU resources to requests and limits (TC-I012)", func() {
 			s, client := newTestStore(defaultConfig())
 			c := minimalContainer("my-app")
-			c.Resources.Cpu = v1alpha1.ContainerCpu{Min: 1, Max: 2}
+			c.Resources.Cpu = v1alpha1.ContainerCpu{Min: "1000m", Max: "4000m"}
 
 			_, err := s.Create(context.Background(), c, "test-id-012")
 			Expect(err).NotTo(HaveOccurred())
@@ -84,8 +84,19 @@ var _ = Describe("K8s Store", func() {
 			deploy, err := getCreatedDeployment(client, "default")
 			Expect(err).NotTo(HaveOccurred())
 			container := deploy.Spec.Template.Spec.Containers[0]
-			Expect(container.Resources.Requests.Cpu().String()).To(Equal("1"))
-			Expect(container.Resources.Limits.Cpu().String()).To(Equal("2"))
+			Expect(container.Resources.Requests.Cpu().MilliValue()).To(Equal(int64(1000)))
+			Expect(container.Resources.Limits.Cpu().MilliValue()).To(Equal(int64(4000)))
+		})
+
+		// Malformed CPU values that bypass OpenAPI validation are rejected.
+		It("rejects a container spec with malformed CPU values", func() {
+			s, _ := newTestStore(defaultConfig())
+			c := minimalContainer("my-app")
+			c.Resources.Cpu = v1alpha1.ContainerCpu{Min: "invalid", Max: "2000m"}
+
+			_, err := s.Create(context.Background(), c, "test-id-012-invalid")
+			Expect(err).To(BeAssignableToTypeOf(&store.InvalidArgumentError{}))
+			Expect(err.Error()).To(ContainSubstring("cpu.min"))
 		})
 
 		// TC-I013: Memory resources convert and map correctly

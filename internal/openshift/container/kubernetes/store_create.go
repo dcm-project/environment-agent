@@ -69,7 +69,10 @@ func (s *K8sContainerStore) Create(ctx context.Context, spec v1alpha1.ContainerS
 	servicePorts := portsWithVisibility(spec)
 
 	// Create Deployment.
-	deploy := buildDeployment(spec, id, s.cfg, labels)
+	deploy, err := buildDeployment(spec, id, s.cfg, labels)
+	if err != nil {
+		return nil, &store.InvalidArgumentError{Message: err.Error()}
+	}
 	deploy, err = s.client.AppsV1().Deployments(s.cfg.Namespace).Create(ctx, deploy, metav1.CreateOptions{})
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
