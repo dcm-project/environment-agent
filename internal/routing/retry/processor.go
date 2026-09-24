@@ -32,6 +32,7 @@ const (
 // ProcessorConfig holds retry processor tuning knobs.
 type ProcessorConfig struct {
 	HandlerTimeout time.Duration
+	RetryPolicy    routing.ForwardRetryPolicy
 }
 
 // JSProvider returns the current JetStream context. Resolved at call time so
@@ -188,7 +189,7 @@ func (p *Processor) processTransitionItems(ctx context.Context, sp *store.Stored
 		if !ok || currentStatus == v1alpha1.Unavailable {
 			p.publishCE(ctx, cloudevent.TypeError, item.resourceID, item.eventID, routing.ErrorData{
 				ResponseContext: p.responseCtx(item.resourceID),
-				Error:           routing.ErrorSPUnavailable, Details: "provider unavailable for service type: " + item.serviceType,
+				Error:           routing.ErrorSPUnavailable, Details: routing.ErrorDetails{Message: "provider unavailable for service type: " + item.serviceType},
 			})
 			_ = item.msg.Ack()
 			continue
@@ -477,7 +478,7 @@ func (p *Processor) forwardRequest(ctx context.Context, sp *store.StoredProvider
 	if p.deps.Forwarder == nil {
 		p.publishCE(ctx, cloudevent.TypeError, res.resourceID, res.eventID, routing.ErrorData{
 			ResponseContext: p.responseCtx(res.resourceID),
-			Error:           routing.ErrorSPUnavailable, Details: "forwarder not configured",
+			Error:           routing.ErrorSPUnavailable, Details: routing.ErrorDetails{Message: "forwarder not configured"},
 		})
 		return true
 	}
@@ -521,10 +522,10 @@ func (p *Processor) forwardRequest(ctx context.Context, sp *store.StoredProvider
 	}
 	defer fwdCancel()
 
-	err := routing.ForwardToSP(fwdCtx, p.deps.Forwarder, sp, routing.ForwardParams{
+	err := routing.ForwardWithRetry(fwdCtx, p.deps.Forwarder, sp, routing.ForwardParams{
 		ResourceID: res.resourceID, ServiceType: res.serviceType,
 		Spec: res.spec, EventID: res.eventID, IsCreate: res.ceType != cloudevent.TypeRequestDelete,
-	})
+	}, p.deps.Config.RetryPolicy, p.deps.Logger)
 	if err != nil {
 		p.deps.Logger.Warn("forward failed during transition processing", append([]any{
 			"resource_id", res.resourceID, "ce_id", res.eventID, "provider_id", sp.ID, "service_type", res.serviceType,
@@ -532,7 +533,12 @@ func (p *Processor) forwardRequest(ctx context.Context, sp *store.StoredProvider
 		if newlyAdded {
 			p.deps.ClaimedResourcesSet.Remove(res.resourceID)
 		}
-		return false
+		if fwdCtx.Err() != nil {
+			return false
+		}
+		p.publishCE(ctx, cloudevent.TypeError, res.resourceID, res.eventID,
+			routing.TerminalProviderErrorData(err, res.serviceType, p.responseCtx(res.resourceID)))
+		return true
 	}
 
 	p.publishAckCE(ctx, res)
@@ -566,7 +572,7 @@ func (p *Processor) routeMessage(ctx context.Context, msg jetstream.Msg, res ceR
 	case v1alpha1.Unavailable:
 		p.publishCE(ctx, cloudevent.TypeError, res.resourceID, res.eventID, routing.ErrorData{
 			ResponseContext: p.responseCtx(res.resourceID),
-			Error:           routing.ErrorSPUnavailable, Details: "provider unavailable for service type: " + res.serviceType,
+			Error:           routing.ErrorSPUnavailable, Details: routing.ErrorDetails{Message: "provider unavailable for service type: " + res.serviceType},
 		})
 		_ = msg.Ack()
 	default:

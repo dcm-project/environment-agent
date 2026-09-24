@@ -162,7 +162,7 @@ func (c *Client) publishMaxDeliverError(msg jetstream.Msg) {
 			TopicName:  c.topics.Main,
 		},
 		Error:   routing.ErrorMaxDeliveryExceeded,
-		Details: "max delivery attempts exceeded",
+		Details: routing.ErrorDetails{Message: "max delivery attempts exceeded"},
 	}
 	if err := cloudevent.PublishCE(context.Background(), c.PublishWithMsgID, cloudevent.SubjectResponses, c.cfg.AgentName, cloudevent.TypeError, errData); err != nil {
 		c.logger.Warn("failed to publish max-deliver error CE", "error", err, "resource_id", resourceID, "ce_id", ceID, "published_ce_type", cloudevent.TypeError)

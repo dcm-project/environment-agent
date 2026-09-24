@@ -3,10 +3,13 @@ package routing_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"time"
 
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -14,13 +17,19 @@ import (
 	. "github.com/onsi/gomega"
 
 	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
+	"github.com/dcm-project/environment-agent/internal/cloudevent"
 	"github.com/dcm-project/environment-agent/internal/config"
+	embeddedstorage "github.com/dcm-project/environment-agent/internal/embedded/storage"
 	"github.com/dcm-project/environment-agent/internal/messaging"
+	k8sstore "github.com/dcm-project/environment-agent/internal/openshift/storage/kubernetes"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/store"
 	"github.com/dcm-project/environment-agent/internal/routing"
 	"github.com/dcm-project/environment-agent/internal/routing/routingtest"
+	"k8s.io/client-go/kubernetes/fake"
 )
+
+type errorEventData = routing.ErrorData
 
 var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 	var (
@@ -95,21 +104,29 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		testConn.Close()
 	})
 
-	setupDefaultRouter := func() {
+	setupRouterWithForwarderAndLogger := func(forwarder routing.SPForwarder, logger *slog.Logger) {
 		router = routing.NewRouter(routing.RouterDeps{
 			Registry:      registry,
 			HealthTracker: healthTracker,
 			Store:         st,
-			Forwarder:     fakeForwarder,
+			Forwarder:     forwarder,
 			Publisher:     publisher,
 			RetryConsumer: fakeRetry,
 			DenyList:      denyList,
 			Config:        routingCfg,
-			Logger:        slog.Default(),
+			Logger:        logger,
 			AgentName:     "agent-prod-1",
 			TopicName:     topics.Main,
 			RetryTopic:    topics.Retry,
 		})
+	}
+
+	setupRouterWithForwarder := func(forwarder routing.SPForwarder) {
+		setupRouterWithForwarderAndLogger(forwarder, slog.Default())
+	}
+
+	setupDefaultRouter := func() {
+		setupRouterWithForwarder(fakeForwarder)
 	}
 
 	registerProvider := func(name, serviceType, endpoint, providerType string, status v1alpha1.ProviderStatus) {
@@ -377,10 +394,58 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 
 		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.error"))
-		var data routing.ErrorData
+		var data errorEventData
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-retry"))
 		Expect(data.Error).To(Equal("RETRY_EXHAUSTED"))
+		Expect(data.Details.Message).To(Equal("service provider error after retry exhaustion for service type: database"))
+		Expect(data.Details.ProviderError).To(Equal(&routing.ProviderErrorData{StatusCode: 503, Message: "Service Unavailable"}))
+	})
+
+	It("publishes structured provider errors for create and delete failures (IT-RTE-097)", func() {
+		registerProvider("failure-sp", "database", "http://mock:8080", "external", v1alpha1.Ready)
+		routingCfg.RetryMaxAttempts = 2
+		routingCfg.RetryBackoff = time.Millisecond
+		routingCfg.RetryMaxBackoff = time.Millisecond
+		setupDefaultRouter()
+
+		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 400, Message: "create rejected: invalid capacity"}
+		Expect(router.HandleRequest(ctx, routingtest.BuildCreateCE("res-create-400", "database"))).To(Succeed())
+		createBadRequest := routingtest.ExpectResponseCE(responseSub)
+		var createBadRequestData errorEventData
+		Expect(json.Unmarshal(createBadRequest.Data(), &createBadRequestData)).To(Succeed())
+		Expect(createBadRequestData.Error).To(Equal(routing.ErrorNonRetryable))
+		Expect(createBadRequestData.Details.ProviderError).To(Equal(&routing.ProviderErrorData{StatusCode: 400, Message: "create rejected: invalid capacity"}))
+		Expect(createBadRequestData.Details.Message).To(Equal("service provider returned non-retryable error for service type: database"))
+
+		fakeForwarder.DeleteErr = &routing.SPResponseError{StatusCode: 404, Message: "volume does not exist"}
+		Expect(router.HandleRequest(ctx, routingtest.BuildDeleteCE("res-delete-404", "database"))).To(Succeed())
+		deleteNotFound := routingtest.ExpectResponseCE(responseSub)
+		var deleteNotFoundData errorEventData
+		Expect(json.Unmarshal(deleteNotFound.Data(), &deleteNotFoundData)).To(Succeed())
+		Expect(deleteNotFoundData.Error).To(Equal(routing.ErrorNonRetryable))
+		Expect(deleteNotFoundData.Details.ProviderError).To(Equal(&routing.ProviderErrorData{StatusCode: 404, Message: "volume does not exist"}))
+		Expect(deleteNotFoundData.Details.Message).To(Equal("service provider returned non-retryable error for service type: database"))
+
+		fakeForwarder.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "create backend unavailable"}
+		Expect(router.HandleRequest(ctx, routingtest.BuildCreateCE("res-create-503", "database"))).To(Succeed())
+		createUnavailable := routingtest.ExpectResponseCE(responseSub)
+		var createUnavailableData errorEventData
+		Expect(json.Unmarshal(createUnavailable.Data(), &createUnavailableData)).To(Succeed())
+		Expect(createUnavailableData.Error).To(Equal(routing.ErrorRetryExhausted))
+		Expect(createUnavailableData.Details.ProviderError).To(Equal(&routing.ProviderErrorData{StatusCode: 503, Message: "create backend unavailable"}))
+		Expect(createUnavailableData.Details.Message).To(Equal("service provider error after retry exhaustion for service type: database"))
+
+		fakeForwarder.DeleteErr = &routing.SPResponseError{StatusCode: 503, Message: "delete backend unavailable"}
+		Expect(router.HandleRequest(ctx, routingtest.BuildDeleteCE("res-delete-503", "database"))).To(Succeed())
+		deleteUnavailable := routingtest.ExpectResponseCE(responseSub)
+		var deleteUnavailableData errorEventData
+		Expect(json.Unmarshal(deleteUnavailable.Data(), &deleteUnavailableData)).To(Succeed())
+		Expect(deleteUnavailableData.Error).To(Equal(routing.ErrorRetryExhausted))
+		Expect(deleteUnavailableData.Details.ProviderError).To(Equal(&routing.ProviderErrorData{StatusCode: 503, Message: "delete backend unavailable"}))
+		Expect(deleteUnavailableData.Details.Message).To(Equal("service provider error after retry exhaustion for service type: database"))
+		Expect(fakeForwarder.CreateCallCount()).To(Equal(3))
+		Expect(fakeForwarder.DeleteCallCount()).To(Equal(3))
 	})
 
 	It("does not leak the SP response body into SP-error logs (leak-check, mirrors forwarder_test.go AC-RCM-150)", func() {
@@ -446,6 +511,128 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
 		Expect(data.ResourceID).To(Equal("res-retry-min"))
 		Expect(data.Error).To(Equal("RETRY_EXHAUSTED"))
+	})
+
+	It("omits sensitive URLs from retry-exhausted transport error details", func() {
+		registerProvider("url-error-sp", "database", "http://mock:8080", "external", v1alpha1.Ready)
+		routingCfg.RetryMaxAttempts = 2
+		routingCfg.RetryBackoff = time.Millisecond
+		routingCfg.RetryMaxBackoff = time.Millisecond
+		ch := &captureLogHandler{}
+		setupRouterWithForwarderAndLogger(fakeForwarder, slog.New(ch))
+
+		const sensitiveURL = "https://storage.example.internal/create?token=secret-value"
+		fakeForwarder.CreateErr = &url.Error{
+			Op:  "Post",
+			URL: sensitiveURL,
+			Err: errors.New("connection refused"),
+		}
+		Expect(router.HandleRequest(ctx, routingtest.BuildCreateCE("res-url-error", "database"))).To(Succeed())
+
+		ce := routingtest.ExpectResponseCE(responseSub)
+		Expect(ce.Type()).To(Equal(cloudevent.TypeError))
+		var data errorEventData
+		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
+		Expect(data.ResourceID).To(Equal("res-url-error"))
+		Expect(data.Details.ProviderError).To(BeNil())
+		var wireData map[string]json.RawMessage
+		Expect(json.Unmarshal(ce.Data(), &wireData)).To(Succeed())
+		Expect(wireData).NotTo(HaveKey("provider_error"))
+		var detailsWire map[string]json.RawMessage
+		Expect(json.Unmarshal(wireData["details"], &detailsWire)).To(Succeed())
+		Expect(detailsWire).NotTo(HaveKey("provider_error"))
+		Expect(data.Error).To(Equal(routing.ErrorRetryExhausted))
+		Expect(data.Details.Message).To(Equal("service provider error after retry exhaustion for service type: database"))
+		Expect(data.Details.Message).NotTo(ContainSubstring(sensitiveURL))
+		expectCapturedLogsOmit(ch, sensitiveURL, "secret-value", "storage.example.internal/create")
+		Expect(fakeForwarder.CreateCallCount()).To(Equal(2))
+	})
+
+	It("keeps missing embedded-handler failures generic", func() {
+		registerProvider("missing-embedded-storage", "storage", "", "embedded", v1alpha1.Ready)
+		routingCfg.RetryMaxAttempts = 1
+		setupRouterWithForwarder(routing.NewForwarder(routing.ForwarderConfig{}))
+
+		Expect(router.HandleRequest(ctx, routingtest.BuildCreateCE("res-missing-embedded-handler", "storage"))).To(Succeed())
+
+		ce := routingtest.ExpectResponseCE(responseSub)
+		Expect(ce.Type()).To(Equal(cloudevent.TypeError))
+		var data routing.ErrorData
+		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
+		Expect(data.ResourceID).To(Equal("res-missing-embedded-handler"))
+		Expect(data.Error).To(Equal(routing.ErrorRetryExhausted))
+		Expect(data.Details.Message).To(Equal("service provider error after retry exhaustion for service type: storage"))
+		Expect(data.Details.ProviderError).To(BeNil())
+
+		var responsePayload map[string]json.RawMessage
+		Expect(json.Unmarshal(ce.Data(), &responsePayload)).To(Succeed())
+		var detailsPayload map[string]json.RawMessage
+		Expect(json.Unmarshal(responsePayload["details"], &detailsPayload)).To(Succeed())
+		Expect(detailsPayload).NotTo(HaveKey("provider_error"))
+	})
+
+	It("publishes detailed Agent errors for invalid storage capacity (IT-RTE-095, TC-08)", func() {
+		const resourceID = "res-invalid-storage-capacity"
+		registerProvider("embedded-storage", "storage", "", "embedded", v1alpha1.Ready)
+		kubeClient := fake.NewClientset()
+		volumeStore := k8sstore.NewK8sVolumeStore(kubeClient, k8sstore.K8sConfig{Namespace: "default"}, slog.Default())
+		forwarder := routing.NewForwarder(routing.ForwarderConfig{
+			Embedded: map[string]routing.EmbeddedHandler{
+				"storage": embeddedstorage.NewStorageHandler(volumeStore),
+			},
+		})
+		setupRouterWithForwarder(forwarder)
+
+		request := cloudevents.NewEvent()
+		request.SetID(uuid.NewString())
+		request.SetSource(cloudevent.SourceControlPlane)
+		request.SetType(cloudevent.TypeRequestCreate)
+		Expect(request.SetData(cloudevents.ApplicationJSON, map[string]any{
+			"resource_id":  resourceID,
+			"service_type": "storage",
+			"spec": map[string]any{
+				"service_type": "storage",
+				"capacity":     "not-a-size",
+				"metadata":     map[string]any{"name": resourceID},
+			},
+		})).To(Succeed())
+		requestBytes, err := json.Marshal(request)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(router.HandleRequest(ctx, requestBytes)).To(Succeed())
+
+		createCE := routingtest.ExpectResponseCE(responseSub)
+		Expect(createCE.Type()).To(Equal(cloudevent.TypeError))
+		Expect(createCE.Subject()).To(Equal(cloudevent.SubjectResponses))
+		Expect(createCE.ID()).NotTo(BeEmpty())
+		var createData errorEventData
+		Expect(json.Unmarshal(createCE.Data(), &createData)).To(Succeed())
+		Expect(createData.ResourceID).To(Equal(resourceID))
+		Expect(createData.AgentName).To(Equal("agent-prod-1"))
+		Expect(createData.TopicName).To(Equal(topics.Main))
+		Expect(createData.Error).To(Equal(routing.ErrorNonRetryable))
+		Expect(createData.Details.ProviderError).NotTo(BeNil())
+		Expect(createData.Details.ProviderError.StatusCode).To(Equal(400))
+		Expect(createData.Details.ProviderError.Message).To(ContainSubstring("not-a-size"))
+		Expect(createData.Details.Message).To(Equal("service provider returned non-retryable error for service type: storage"))
+		var createWire map[string]json.RawMessage
+		Expect(json.Unmarshal(createCE.Data(), &createWire)).To(Succeed())
+		Expect(createWire).NotTo(HaveKey("provider_error"))
+		var createDetailsWire map[string]json.RawMessage
+		Expect(json.Unmarshal(createWire["details"], &createDetailsWire)).To(Succeed())
+		Expect(createDetailsWire).To(HaveKey("provider_error"))
+
+		Expect(router.HandleRequest(ctx, routingtest.BuildDeleteCE(resourceID, "storage"))).To(Succeed())
+		deleteCE := routingtest.ExpectResponseCE(responseSub)
+		Expect(deleteCE.Type()).To(Equal(cloudevent.TypeError))
+		Expect(deleteCE.Subject()).To(Equal(cloudevent.SubjectResponses))
+		var deleteData errorEventData
+		Expect(json.Unmarshal(deleteCE.Data(), &deleteData)).To(Succeed())
+		Expect(deleteData.ResourceID).To(Equal(resourceID))
+		Expect(deleteData.Error).To(Equal(routing.ErrorNonRetryable))
+		Expect(deleteData.Details.ProviderError).NotTo(BeNil())
+		Expect(deleteData.Details.ProviderError.StatusCode).To(Equal(404))
+		Expect(deleteData.Details.ProviderError.Message).To(ContainSubstring("not found"))
+		Expect(deleteData.Details.Message).To(Equal("service provider returned non-retryable error for service type: storage"))
 	})
 
 	It("fails immediately on non-retryable 4xx (IT-RTE-090)", func() {

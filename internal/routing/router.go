@@ -7,13 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"sync"
-	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 
-	"github.com/dcm-project/environment-agent/internal/backoff"
 	"github.com/dcm-project/environment-agent/internal/cloudevent"
 	"github.com/dcm-project/environment-agent/internal/config"
 	"github.com/dcm-project/environment-agent/internal/provider"
@@ -162,7 +159,7 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 		r.logger.Warn("CE missing required fields", "resource_id", payload.ResourceID, "service_type", payload.ServiceType, "ce_id", payload.EventID)
 		r.publishCE(ctx, cloudevent.TypeError, "", payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(""),
-			Error:           ErrorInvalidPayload, Details: "resourceId and serviceType are required",
+			Error:           ErrorInvalidPayload, Details: ErrorDetails{Message: "resourceId and serviceType are required"},
 		})
 		return nil
 	}
@@ -181,7 +178,7 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 	if !ok {
 		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
-			Error:           ErrorUnsupportedServiceType, Details: "provider not found for service type: " + payload.ServiceType,
+			Error:           ErrorUnsupportedServiceType, Details: ErrorDetails{Message: "provider not found for service type: " + payload.ServiceType},
 		})
 		return nil
 	}
@@ -189,7 +186,7 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 	if status == v1alpha1.Unavailable {
 		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
-			Error:           ErrorSPUnavailable, Details: "provider unavailable for service type: " + payload.ServiceType,
+			Error:           ErrorSPUnavailable, Details: ErrorDetails{Message: "provider unavailable for service type: " + payload.ServiceType},
 		})
 		return nil
 	}
@@ -207,7 +204,7 @@ func (r *Router) HandleRequest(ctx context.Context, msg []byte) error {
 	if r.forwarder == nil {
 		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(payload.ResourceID),
-			Error:           ErrorSPUnavailable, Details: "provider unavailable for service type: " + payload.ServiceType,
+			Error:           ErrorSPUnavailable, Details: ErrorDetails{Message: "provider unavailable for service type: " + payload.ServiceType},
 		})
 		return nil
 	}
@@ -283,7 +280,14 @@ func (r *Router) forwardWithRetry(ctx context.Context, sp *store.StoredProvider,
 		}
 	}()
 
-	fwdErr := r.attemptForward(ctx, sp, isCreate, payload)
+	fwdErr := ForwardWithRetry(ctx, r.forwarder, sp, ForwardParams{
+		ResourceID: payload.ResourceID, ServiceType: payload.ServiceType,
+		Spec: payload.Spec, EventID: payload.EventID, IsCreate: isCreate,
+	}, ForwardRetryPolicy{
+		MaxAttempts: r.config.RetryMaxAttempts,
+		Backoff:     r.config.RetryBackoff,
+		MaxBackoff:  r.config.RetryMaxBackoff,
+	}, r.logger)
 	if fwdErr == nil {
 		success = true
 		if isCreate {
@@ -306,68 +310,9 @@ func (r *Router) forwardWithRetry(ctx context.Context, sp *store.StoredProvider,
 		"resource_id", payload.ResourceID, "service_type", payload.ServiceType,
 		"ce_id", payload.EventID, "provider_id", sp.ID,
 	}, SafeErrorAttrs(fwdErr)...)...)
-	if !IsRetryable(fwdErr) {
-		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
-			ResponseContext: r.responseCtx(payload.ResourceID),
-			Error:           ErrorNonRetryable, Details: "service provider returned non-retryable error for service type: " + payload.ServiceType,
-		})
-	} else {
-		r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID, ErrorData{
-			ResponseContext: r.responseCtx(payload.ResourceID),
-			Error:           ErrorRetryExhausted, Details: "service provider error after retry exhaustion for service type: " + payload.ServiceType,
-		})
-	}
+	r.publishCE(ctx, cloudevent.TypeError, payload.ResourceID, payload.EventID,
+		TerminalProviderErrorData(fwdErr, payload.ServiceType, r.responseCtx(payload.ResourceID)))
 	return nil
-}
-
-// attemptForward executes the SP call with retries. Returns nil on success or
-// the raw SP error (retryable after exhaustion, or non-retryable). Returns
-// ctx.Err() on context cancellation. No CEs are published — the caller owns
-// all response-event logic.
-func (r *Router) attemptForward(ctx context.Context, sp *store.StoredProvider, isCreate bool, payload inboundPayload) error {
-	params := ForwardParams{
-		ResourceID: payload.ResourceID, ServiceType: payload.ServiceType,
-		Spec: payload.Spec, EventID: payload.EventID, IsCreate: isCreate,
-	}
-	maxAttempts := r.config.RetryMaxAttempts
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
-
-	var fwdErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		fwdErr = ForwardToSP(ctx, r.forwarder, sp, params)
-		if fwdErr == nil {
-			return nil
-		}
-
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		if !IsRetryable(fwdErr) {
-			return fwdErr
-		}
-		if attempt < maxAttempts-1 {
-			r.logger.Warn("SP call failed, retrying", append([]any{
-				"resource_id", payload.ResourceID, "service_type", payload.ServiceType,
-				"attempt", attempt + 1, "max_attempts", maxAttempts,
-				"ce_id", payload.EventID, "provider_id", sp.ID,
-			}, SafeErrorAttrs(fwdErr)...)...)
-			delay := backoff.ApplyJitter(
-				backoff.CalculateBackoff(r.config.RetryBackoff, r.config.RetryMaxBackoff, attempt),
-				rand.Float64,
-			)
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return ctx.Err()
-			case <-timer.C:
-			}
-		}
-	}
-	return fwdErr
 }
 
 // HandleCancel processes a cancel CE for a given resourceId.
@@ -394,7 +339,7 @@ func (r *Router) HandleCancel(ctx context.Context, msg []byte) error {
 		r.logger.Warn("cancel CE missing required fields", "resource_id", payload.ResourceID, "service_type", payload.ServiceType, "ce_id", payload.EventID)
 		r.publishCE(ctx, cloudevent.TypeError, "", payload.EventID, ErrorData{
 			ResponseContext: r.responseCtx(""),
-			Error:           ErrorInvalidPayload, Details: "resourceId and serviceType are required",
+			Error:           ErrorInvalidPayload, Details: ErrorDetails{Message: "resourceId and serviceType are required"},
 		})
 		return nil
 	}
