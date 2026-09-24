@@ -17,6 +17,11 @@ import (
 // ServiceType is the embedded SP identifier for the network service provider.
 const ServiceType = "network"
 
+// Operations are the resource operations advertised at registration time.
+// They mirror the createNetwork/getNetwork/listNetworks/deleteNetwork
+// operations declared by the network capability contract in api/network/v1alpha1.
+var Operations = []string{"CREATE", "READ", "DELETE"}
+
 // networkLifecycle is the subset of store.NetworkRepository the embedded handler needs.
 type networkLifecycle interface {
 	Create(ctx context.Context, spec networkapi.NetworkSpec, id string) (*networkapi.Network, error)

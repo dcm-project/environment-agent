@@ -283,6 +283,7 @@ func run(ctx context.Context) int {
 	msgClient.WaitUntilReady(readyCtx)
 	readyCancel()
 	providerSvc.SetEmbeddedCheckers(embedded.Checkers(embeddedBundles))
+	providerSvc.SetEmbeddedOperations(embedded.Operations(embeddedBundles))
 	providerSvc.RegisterEmbedded(cfg.Provider.EmbeddedSPs)
 	if embeddedBundles != nil {
 		embeddedBundles.Start(ctx)
