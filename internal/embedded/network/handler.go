@@ -43,6 +43,9 @@ func (h *networkHandler) CreateResource(ctx context.Context, req routing.CreateR
 	if err != nil {
 		return &routing.SPResponseError{StatusCode: http.StatusBadRequest, Message: err.Error()}
 	}
+	if spec.RoutingLevel != nil && *spec.RoutingLevel == "" {
+		spec.RoutingLevel = nil
+	}
 
 	originalName := spec.Metadata.Name
 	id := req.ResourceID

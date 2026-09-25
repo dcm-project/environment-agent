@@ -21,13 +21,15 @@ func TestNetwork(t *testing.T) {
 }
 
 type fakeNetworkStore struct {
-	createErr error
-	deleteErr error
-	lastID    string
-	lastSpec  networkapi.NetworkSpec
+	createErr   error
+	deleteErr   error
+	createCalls int
+	lastID      string
+	lastSpec    networkapi.NetworkSpec
 }
 
 func (f *fakeNetworkStore) Create(_ context.Context, spec networkapi.NetworkSpec, id string) (*networkapi.Network, error) {
+	f.createCalls++
 	f.lastID = id
 	f.lastSpec = spec
 	if f.createErr != nil {
@@ -108,6 +110,77 @@ var _ = Describe("Handler", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(repo.lastID).To(Equal("test-network"))
 	})
+
+	DescribeTable("treats an empty routing level as omitted",
+		func(wrapped, withNodePorts bool) {
+			spec := validNetworkSpec()
+			emptyRoutingLevel := networkapi.NetworkSpecRoutingLevel("")
+			spec.RoutingLevel = &emptyRoutingLevel
+
+			clusterIP := "None"
+			selector := map[string]string{"app": "web"}
+			providerHints := &networkapi.ProviderHints{
+				Kubernetes: &networkapi.KubernetesProviderHints{
+					ClusterIp: &clusterIP,
+					Selector:  &selector,
+				},
+			}
+			if withNodePorts {
+				nodePorts := map[string]int32{"http": 31234}
+				providerHints.Kubernetes.NodePorts = &nodePorts
+			}
+			spec.ProviderHints = providerHints
+
+			var payload any = spec
+			if wrapped {
+				payload = networkapi.Network{Spec: spec}
+			}
+			rawSpec, err := json.Marshal(payload)
+			Expect(err).NotTo(HaveOccurred())
+
+			req := routing.CreateResourceRequest{
+				ResourceID: "my-network",
+				Spec:       json.RawMessage(rawSpec),
+			}
+			Expect(handler.CreateResource(context.Background(), req)).To(Succeed())
+
+			Expect(repo.createCalls).To(Equal(1))
+			Expect(repo.lastID).To(Equal("my-network"))
+			Expect(repo.lastSpec.RoutingLevel).To(BeNil())
+			Expect(repo.lastSpec.ProviderHints).To(Equal(providerHints))
+			Expect(repo.lastSpec.ProviderHints.Kubernetes.NodePorts).To(Equal(providerHints.Kubernetes.NodePorts))
+		},
+		Entry("plain spec without node ports", false, false),
+		Entry("plain spec with node ports", false, true),
+		Entry("wrapped spec without node ports", true, false),
+		Entry("wrapped spec with node ports", true, true),
+	)
+
+	DescribeTable("rejects an unknown non-empty routing level before lifecycle create",
+		func(wrapped bool) {
+			spec := validNetworkSpec()
+			unknownRoutingLevel := networkapi.NetworkSpecRoutingLevel("unknown")
+			spec.RoutingLevel = &unknownRoutingLevel
+
+			var payload any = spec
+			if wrapped {
+				payload = networkapi.Network{Spec: spec}
+			}
+			rawSpec, err := json.Marshal(payload)
+			Expect(err).NotTo(HaveOccurred())
+
+			req := routing.CreateResourceRequest{
+				ResourceID: "my-network",
+				Spec:       json.RawMessage(rawSpec),
+			}
+			err = handler.CreateResource(context.Background(), req)
+			Expect(err).To(BeAssignableToTypeOf(&routing.SPResponseError{}))
+			Expect(err.(*routing.SPResponseError).StatusCode).To(Equal(http.StatusBadRequest))
+			Expect(repo.createCalls).To(BeZero())
+		},
+		Entry("plain spec", false),
+		Entry("wrapped spec", true),
+	)
 
 	It("rejects reserved network id health", func() {
 		spec, err := json.Marshal(validNetworkSpec())
