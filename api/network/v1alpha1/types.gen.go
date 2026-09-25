@@ -194,7 +194,7 @@ type KubernetesProviderHints struct {
 	ClusterIp *string `json:"cluster_ip,omitempty"`
 
 	// NodePorts Map of port names to NodePort values (30000-32767).
-	// When present with no routing_level, creates NodePort Service.
+	// When non-empty with no routing_level, creates NodePort Service.
 	// With routing_level "network", specifies node_ports for LoadBalancer backend.
 	NodePorts *map[string]int32 `json:"node_ports,omitempty"`
 
