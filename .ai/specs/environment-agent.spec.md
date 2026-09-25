@@ -1730,6 +1730,12 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 | REQ-RTE-010 | The agent MUST validate that the requested service type in a creation/deletion CloudEvent is supported by a registered SP | MUST | |
 | REQ-RTE-020 | If the service type is not supported, the agent MUST publish an error CloudEvent (`dcm.agent.error`) to `dcm.agents.responses` | MUST | |
 
+#### Requirements — Embedded Network Create Compatibility
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-RTE-220 | For an embedded Network create request, the agent MUST treat an exact empty-string `routing_level` as omitted before validation for both plain and `{spec: ...}` payloads. Non-empty values MUST continue to be validated against the existing Network schema enum; this compatibility behavior MUST NOT change that enum contract | MUST | Applies only to embedded Network create requests |
+
 #### Requirements — Provider Resolution
 
 | ID | Requirement | Priority | Notes |
@@ -1980,6 +1986,16 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 - **Given** the first attempt then completes (successfully or not)
 - **When** a later, non-concurrent request for the same `resource_id` arrives (e.g. a legitimate redelivery or a delete-after-create)
 - **Then** it MUST NOT be blocked by the in-flight lock
+
+##### AC-RTE-220: Empty routing_level is omitted for embedded Network creation
+
+- **Validates:** REQ-RTE-220
+- **Given** a Ready embedded Network provider
+- **When** a create request contains a plain or `{spec: ...}` Network spec with `routing_level: ""`
+- **Then** the exact empty value MUST be treated as omitted before validation, and the Network lifecycle MUST receive `routing_level` as nil
+- **And** when `node_ports` is absent or empty, existing store inference MUST yield `ClusterIP`; when `node_ports` is non-empty, it MUST yield `NodePort`
+- **And** an unsupported non-empty `routing_level` MUST still be rejected by the existing schema enum validation before reaching the lifecycle
+- **And** the existing Network schema enum MUST remain unchanged
 
 #### Dependencies
 
@@ -2792,7 +2808,7 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
 | REQ-HMN-NNN | 4.5: SP Health Monitoring | 33 |
 | REQ-DCM-NNN | 4.6: DCM Registration & Heartbeat | 32 |
 | REQ-MSG-NNN | 4.7: Messaging System Integration | 28 |
-| REQ-RTE-NNN | 4.8: Resource Operation Routing | 28 |
+| REQ-RTE-NNN | 4.8: Resource Operation Routing | 29 |
 | REQ-RCM-NNN | 4.9: Retry & Cancel Mechanisms | 26 |
 | REQ-CNT-NNN | 4.10: Container Status Monitoring | 1 |
 | REQ-AUTH-NNN | 4.11: API Authentication | 12 |
