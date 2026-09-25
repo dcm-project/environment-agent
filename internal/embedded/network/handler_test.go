@@ -109,6 +109,20 @@ var _ = Describe("Handler", func() {
 		Expect(repo.lastID).To(Equal("test-network"))
 	})
 
+	It("preserves metadata.name when it differs from resource ID", func() {
+		spec, err := json.Marshal(validNetworkSpec())
+		Expect(err).NotTo(HaveOccurred())
+
+		req := routing.CreateResourceRequest{
+			ResourceID: "dcm-resource-id",
+			Spec:       json.RawMessage(spec),
+		}
+		err = handler.CreateResource(context.Background(), req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(repo.lastID).To(Equal("dcm-resource-id"))
+		Expect(repo.lastSpec.Metadata.Name).To(Equal("my-network"))
+	})
+
 	It("rejects reserved network id health", func() {
 		spec, err := json.Marshal(validNetworkSpec())
 		Expect(err).NotTo(HaveOccurred())
