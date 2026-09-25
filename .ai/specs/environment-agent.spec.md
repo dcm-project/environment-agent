@@ -1746,7 +1746,7 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 | REQ-RTE-050 | When the SP for the requested service type is Ready and external, the agent MUST forward deletion requests via `DELETE {endpoint}/{resource_id}` | MUST | |
 | REQ-RTE-060 | On successful SP response (creation accepted), the agent MUST publish a `dcm.agent.creation-acknowledged` CloudEvent to `dcm.agents.responses` with `{resource_id, agent_name, topic_name, status: "PROVISIONING"}` | MUST | |
 | REQ-RTE-070 | On successful SP response (deletion accepted), the agent MUST publish a `dcm.agent.deletion-acknowledged` CloudEvent to `dcm.agents.responses` with `{resource_id, agent_name, topic_name, status: "DELETING"}` | MUST | |
-| REQ-RTE-080 | On SP error response, the agent MUST publish a `dcm.agent.error` CloudEvent to `dcm.agents.responses` with `{resource_id, agent_name, topic_name, error, details}` | MUST | |
+| REQ-RTE-080 | On SP error response, the agent MUST publish a `dcm.agent.error` CloudEvent to `dcm.agents.responses` with `{resource_id, agent_name, topic_name, error, details}`. `details` MUST be an object with `message` containing the concise service-type summary and optional nested `provider_error: {status_code, message}` containing the SP response status and diagnostic message when an SP response is available. Transport failures MUST NOT expose endpoint URLs in `details.message` or `details.provider_error` | MUST | |
 
 #### Requirements — Request Routing (SP Unhealthy)
 
@@ -1831,7 +1831,7 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 - **Validates:** REQ-RTE-020
 - **Given** no SP is registered for service type "storage"
 - **When** the agent consumes a creation request with `service_type="storage"`
-- **Then** the agent MUST publish a `dcm.agent.error` CloudEvent with `{resource_id, agent_name, topic_name, error: "UNSUPPORTED_SERVICE_TYPE", details}` to `dcm.agents.responses`
+- **Then** the agent MUST publish a `dcm.agent.error` CloudEvent with `{resource_id, agent_name, topic_name, error: "UNSUPPORTED_SERVICE_TYPE", details: {message}}` to `dcm.agents.responses`
 
 ##### AC-RTE-045: SP is Unavailable — request rejected immediately
 
@@ -1855,6 +1855,8 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 - **Given** the SP for "container" is Ready but returns a 503 Service Unavailable on the creation call
 - **When** retries are exhausted (e.g., 3 attempts)
 - **Then** the agent MUST publish a `dcm.agent.error` CloudEvent with the resource ID
+- **And** `details.message` MUST remain a concise service-type summary
+- **And** `details.provider_error` MUST contain the final SP response's `status_code` and `message`
 
 ##### AC-RTE-065: SP returns non-retryable error — immediate failure
 
@@ -1862,6 +1864,8 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 - **Given** the SP for "container" is Ready but returns a 400 Bad Request on the creation call
 - **When** the error response is received
 - **Then** the agent MUST immediately publish a `dcm.agent.error` CloudEvent with the resource ID
+- **And** `details.message` MUST remain a concise service-type summary
+- **And** `details.provider_error` MUST contain the SP response's `status_code` and `message`
 - **And** the agent MUST NOT retry the request
 
 ##### AC-RTE-070: Deny list filters cancelled request
@@ -2563,7 +2567,7 @@ Uses cross-cutting error handling (§5.1) for RFC 7807 responses.
 | Cancel Acknowledged | `dcm.agent.cancel-acknowledged` | `dcm/agents/{agentName}` | `dcm.agents.responses` | `{resource_id, agent_name, topic_name, service_type}` |
 | Cancel Rejected | `dcm.agent.cancel-rejected` | `dcm/agents/{agentName}` | `dcm.agents.responses` | `{resource_id, agent_name, topic_name, reason}` |
 | Request Queued | `dcm.agent.request-queued` | `dcm/agents/{agentName}` | `dcm.agents.responses` | `{resource_id, agent_name, topic_name, service_type, status: "QUEUED"}` |
-| Error | `dcm.agent.error` | `dcm/agents/{agentName}` | `dcm.agents.responses` | `{resource_id, agent_name, topic_name, error, details}` |
+| Error | `dcm.agent.error` | `dcm/agents/{agentName}` | `dcm.agents.responses` | `{resource_id, agent_name, topic_name, error, details: {message, provider_error?}}` |
 | Health Degraded | `dcm.agent.health.service-type-degraded` | `dcm/agents/{agentName}` | `dcm.agents.health` | `{agent_id, agent_name, topic_name, service_type, reason, affected_provider}` — `agent_id` uses `agent_name` until DCM registration completes (DD-200) |
 | Health Unavailable | `dcm.agent.health.service-type-unavailable` | `dcm/agents/{agentName}` | `dcm.agents.health` | `{agent_id, agent_name, topic_name, service_type, reason, affected_provider}` — same `agent_id` convention as Health Degraded |
 

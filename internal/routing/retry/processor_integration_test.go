@@ -322,7 +322,7 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 		Expect(logged).NotTo(ContainSubstring("sensitive backend detail"))
 	})
 
-	It("Naks the retry-topic message in place on forward failure, instead of acking and republishing", func() {
+	It("publishes a terminal error and acks retry-topic messages after retry exhaustion", func() {
 		providerID := routingtest.RegisterSP(ctx, registry, healthTracker, st, "db-provider", "database", v1alpha1.Unhealthy)
 		fwdr.CreateErr = &routing.SPResponseError{StatusCode: 503, Message: "still failing"}
 
@@ -339,30 +339,34 @@ var _ = Describe("Retry Topic Processing", Label("integration"), func() {
 
 		Eventually(func() int { return fwdr.CreateCallCount() }, 5*time.Second).Should(Equal(1))
 
-		// A failed forward must Nak the EXISTING retry-topic message, not ack
-		// it and publish a fresh replacement — the message already lives on
-		// this stream and doesn't need to move. Stream message count/LastSeq
-		// must be unchanged.
+		// A terminal failure must ack the EXISTING retry-topic message, not
+		// publish a fresh replacement. Stream message count/LastSeq must stay
+		// unchanged.
 		streamAfter, err := testJS.Stream(ctx, topicName+"-retry")
 		Expect(err).NotTo(HaveOccurred())
 		infoAfter, err := streamAfter.Info(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(infoAfter.State.Msgs).To(Equal(infoBefore.State.Msgs),
-			"a failed forward must Nak the existing retry-topic message, not publish a fresh replacement")
+			"terminal failure must not publish a replacement retry-topic message")
 		Expect(infoAfter.State.LastSeq).To(Equal(infoBefore.State.LastSeq),
 			"no new message should have been appended to the retry stream")
 
-		// The original message must remain pending/redeliverable (Nak'd),
-		// not acked away.
+		ce := routingtest.ExpectResponseCE(responseSub)
+		Expect(ce.Type()).To(Equal("dcm.agent.error"))
+		var data routing.ErrorData
+		Expect(json.Unmarshal(ce.Data(), &data)).To(Succeed())
+		Expect(data.Error).To(Equal(routing.ErrorRetryExhausted))
+		Expect(data.Details.ProviderError).To(Equal(&routing.ProviderErrorData{StatusCode: 503, Message: "still failing"}))
+
 		cons, err := testJS.Consumer(ctx, topicName+"-retry", topics.RetryConsumer())
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(func() uint64 {
 			info, infoErr := cons.Info(ctx)
 			if infoErr != nil {
-				return 0
+				return 1
 			}
 			return info.NumPending + uint64(info.NumAckPending)
-		}, 5*time.Second).Should(BeNumerically(">", 0), "message must remain pending for redelivery, not be acked away")
+		}, 5*time.Second).Should(Equal(uint64(0)), "terminal provider failures must be acked after publishing the error event")
 	})
 
 	// IT-RCM-085/IT-RCM-086 (retry-topic MaxDeliver-exceeded termination and its

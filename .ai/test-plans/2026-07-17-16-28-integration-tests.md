@@ -1975,6 +1975,55 @@ Unless overridden, tests use:
 
 ---
 
+### IT-RTE-095: Invalid storage capacity yields detailed Agent error (TC-08)
+
+- **Validates:** AC-RTE-065; REQ-RTE-080, REQ-RTE-111
+- **Test Infrastructure:** Ready embedded storage SP using the real storage handler and Kubernetes-backed store with a fake Kubernetes client; in-process NATS/JetStream; subscriber to `dcm.agents.responses`
+- **Given** the embedded storage SP is Ready
+- **When** a create request with `spec.capacity="not-a-size"` is routed through the agent
+- **Then** the response subject MUST receive a `dcm.agent.error` CloudEvent for the request's resource ID
+- **And** the decoded event data MUST contain `error="NON_RETRYABLE_SP_ERROR"`, a concise storage service-type summary in `details.message`, and `details.provider_error.status_code=400` with the capacity validation cause in `details.provider_error.message`
+- **And** the storage create call MUST NOT be retried
+
+---
+
+### IT-RTE-097: Create and delete errors include structured provider details
+
+- **Validates:** REQ-RTE-080, REQ-RTE-111, REQ-RTE-120
+- **Test Infrastructure:** Ready SP returning configured non-retryable and retryable errors; in-process NATS/JetStream; subscriber to `dcm.agents.responses`
+- **Given** create and delete requests each receive a non-retryable 4xx response and a retryable response through retry exhaustion
+- **When** the agent publishes the corresponding error CloudEvents
+- **Then** each event's `details.message` MUST remain a concise service-type summary
+- **And** each event with an SP response MUST include `details.provider_error` with the final `status_code` and `message`
+- **And** the existing error classification and retry behavior MUST remain unchanged
+
+---
+
+### IT-RTE-098: Transport failures omit provider response details and URLs from logs
+
+- **Validates:** REQ-RTE-080, REQ-RTE-120
+- **Test Infrastructure:** Ready external SP; real router and forwarder; in-process NATS/JetStream subscriber to `dcm.agents.responses`; captured log handlers for both router and forwarder
+- **Given** an external provider call fails before receiving an HTTP response and the transport error contains a sensitive provider URL
+- **When** retries are exhausted
+- **Then** the `dcm.agent.error` event MUST retain the existing `RETRY_EXHAUSTED` classification
+- **And** `details.provider_error` MUST be omitted and `details.message` MUST NOT contain the provider URL
+- **And** captured router and forwarder logs MUST NOT contain the provider URL or its query credentials
+- **And** the configured retry count MUST remain unchanged
+
+---
+
+### IT-RTE-099: Synthetic missing embedded handler omits provider response details
+
+- **Validates:** REQ-RTE-080, REQ-RTE-120
+- **Test Infrastructure:** Ready embedded provider with no handler registered for its service type; real router/forwarder; in-process NATS/JetStream; subscriber to `dcm.agents.responses`
+- **Given** embedded dispatch fails because no handler is configured, producing a synthetic `forwarderError` distinct from `SPResponseError`
+- **When** the configured retry attempts are exhausted
+- **Then** the `dcm.agent.error` event MUST retain the existing `RETRY_EXHAUSTED` classification and concise `details.message`
+- **And** `details.provider_error` MUST be omitted because no provider response was received
+- **And** the configured retry count MUST remain unchanged
+
+---
+
 ### IT-RTE-100: Deny list filters cancelled create
 
 - **Validates AC:** AC-RTE-070
