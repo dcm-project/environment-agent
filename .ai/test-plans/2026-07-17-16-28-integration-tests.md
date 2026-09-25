@@ -159,7 +159,7 @@ Unless overridden, tests use:
   3s to return (an error, in this case)
 - **Then** the client MUST receive a response at approximately the 1s timeout, not the validator's
   3s delay
-- **And** the response MUST be HTTP 503 with RFC 7807 body (`type=UNAVAILABLE`) — deterministically,
+- **And** the response MUST be HTTP 503 with RFC 9457 body (`type=https://dcm-project.github.io/problems/unavailable`) — deterministically,
   never the 401 the validator's error would otherwise have produced, and never a 200 — because
   `RequestTimeout` only checks `ctx.Err()` after `next.ServeHTTP` returns and unconditionally
   discards the buffered response once the deadline has already passed (DD-170)
@@ -169,14 +169,14 @@ Unless overridden, tests use:
 
 ---
 
-### IT-HTTP-080: Panic recovery returns RFC 7807 INTERNAL error
+### IT-HTTP-080: Panic recovery returns RFC 9457 INTERNAL error
 
 - **Validates AC:** AC-HTTP-070
 - **Test Infrastructure:** Real HTTP server with a test handler that panics
 - **Given** a handler is registered that triggers a panic
 - **When** a request is made to that handler
 - **Then** the response MUST be HTTP 500
-- **And** the body MUST be RFC 7807 with `type=INTERNAL`
+- **And** the body MUST be RFC 9457 with `type=https://dcm-project.github.io/problems/internal`
 - **And** the body MUST NOT contain stack traces or file paths
 - **And** the process MUST NOT crash
 - **And** logs MUST contain an ERROR-level entry with the panic and stack trace
@@ -210,29 +210,29 @@ Unless overridden, tests use:
 
 ---
 
-### IT-HTTP-100: Malformed request returns 400 with RFC 7807
+### IT-HTTP-100: Malformed request returns 400 with RFC 9457
 
 - **Validates AC:** AC-HTTP-090
 - **Test Infrastructure:** Real HTTP server
 - **Given** the agent is running
 - **When** `POST /api/v1alpha1/providers` is called with an invalid JSON body (`{"bad":`)
 - **Then** the response MUST be HTTP 400
-- **And** the body MUST be RFC 7807 with `type=INVALID_ARGUMENT`
+- **And** the body MUST be RFC 9457 with `type=https://dcm-project.github.io/problems/invalid-argument`
 
 ---
 
-### IT-HTTP-110: Framework-layer error responses are RFC 7807
+### IT-HTTP-110: Framework-layer error responses are RFC 9457
 
 - **Validates AC:** AC-HTTP-091
 - **Test Infrastructure:** Real HTTP server
 - **Given** the agent is running
 - **When** a request triggers a framework-level parsing failure
 - **Then** the error response MUST have `Content-Type: application/problem+json`
-- **And** the body MUST conform to RFC 7807
+- **And** the body MUST conform to RFC 9457
 
 ---
 
-### IT-HTTP-110b: Strict handler JSON-decode failure is RFC 7807, not the SDK default
+### IT-HTTP-110b: Strict handler JSON-decode failure is RFC 9457, not the SDK default
 
 - **Validates AC:** AC-HTTP-091
 - **Test Infrastructure:** Strict handler constructed exactly as the composition root
@@ -244,7 +244,7 @@ Unless overridden, tests use:
 - **When** `CreateProvider` receives a body that is syntactically valid JSON but fails
   Go's struct decode (`{"name":123}` — wrong type for a string field)
 - **Then** the response MUST be HTTP 400 with `Content-Type: application/problem+json`
-- **And** the body MUST be RFC 7807 with `type=INVALID_ARGUMENT`
+- **And** the body MUST be RFC 9457 with `type=https://dcm-project.github.io/problems/invalid-argument`
 - **Note:** the oapi-codegen SDK default (unset `RequestErrorHandlerFunc`) instead
   returns `http.Error` — plain text, `text/plain` — for this exact failure. This test
   guards the composition-root wiring choice directly; today's `Provider` request
@@ -261,7 +261,7 @@ Unless overridden, tests use:
 - **Test Infrastructure:** Real HTTP server, `AGENT_SERVER_REQUEST_TIMEOUT=1s`, slow handler (sleeps 3s)
 - **Given** the agent is configured with a per-request timeout of 1s
 - **When** a request reaches a handler that takes longer than 1s
-- **Then** the response MUST be HTTP 503 with RFC 7807 body (`type=UNAVAILABLE`)
+- **Then** the response MUST be HTTP 503 with RFC 9457 body (`type=https://dcm-project.github.io/problems/unavailable`)
 - **And** the request context MUST be cancelled (handler observes context done)
 
 ---
@@ -475,7 +475,7 @@ Unless overridden, tests use:
 - **Test Infrastructure:** Real HTTP server
 - **Given** the agent is running
 - **When** `POST /api/v1alpha1/providers` is called with body missing required `service_type`
-- **Then** the response MUST be HTTP 400 Bad Request with RFC 7807 error body
+- **Then** the response MUST be HTTP 400 Bad Request with RFC 9457 error body
 
 ---
 
@@ -506,7 +506,7 @@ Unless overridden, tests use:
 - **Given** the agent is running
 - **When** `POST /api/v1alpha1/providers?id=INVALID_ID!` is called
 - **Then** the response MUST be HTTP 422 Unprocessable Entity
-- **And** the body MUST be RFC 7807 with `type=UNPROCESSABLE_ENTITY`
+- **And** the body MUST be RFC 9457 with `type=https://dcm-project.github.io/problems/unprocessable-entity`
 - **And** the error MUST identify the `?id=` pattern violation
 
 ---
@@ -550,7 +550,7 @@ Unless overridden, tests use:
 - **Test Infrastructure:** Real HTTP server
 - **Given** provider "collision-holder" is already registered with `?id=shared-id`
 - **When** a DIFFERENT, new provider name ("collision-challenger") registers with `?id=shared-id`
-- **Then** the response MUST be HTTP 409 Conflict with RFC 7807 body (`type=CONFLICT`)
+- **Then** the response MUST be HTTP 409 Conflict with RFC 9457 body (`type=https://dcm-project.github.io/problems/already-exists`)
 - **And** the error detail MUST name both the requested ID and "collision-holder"
 - **Regression for:** this branch of `assignProviderID` (distinct from IT-SPR-145's
   same-name re-registration path) was reachable via a real HTTP request but had zero test coverage;
@@ -593,7 +593,7 @@ Unless overridden, tests use:
 - **Given** `POST /api/v1alpha1/providers` is called with `schema_version="invalid-version"`
 - **When** the request is processed
 - **Then** the response MUST be HTTP 422 Unprocessable Entity
-- **And** the body MUST be RFC 7807 with `type=UNPROCESSABLE_ENTITY`
+- **And** the body MUST be RFC 9457 with `type=https://dcm-project.github.io/problems/unprocessable-entity`
 
 ---
 
@@ -604,7 +604,7 @@ Unless overridden, tests use:
 - **Given** the agent is running
 - **When** `POST /api/v1alpha1/providers` is called with body `{"name": "bad-sp", "endpoint": "not-a-url", "service_type": "database", "schema_version": "v1alpha1"}`
 - **Then** the response MUST be HTTP 422 Unprocessable Entity
-- **And** the body MUST be RFC 7807 with `type=UNPROCESSABLE_ENTITY`
+- **And** the body MUST be RFC 9457 with `type=https://dcm-project.github.io/problems/unprocessable-entity`
 
 ---
 
@@ -812,7 +812,7 @@ Unless overridden, tests use:
 - **Test Infrastructure:** Real HTTP server
 - **Given** no SP is registered with ID "nonexistent"
 - **When** `GET /api/v1alpha1/providers/nonexistent` is called
-- **Then** the response MUST be HTTP 404 Not Found with RFC 7807 error body
+- **Then** the response MUST be HTTP 404 Not Found with RFC 9457 error body
 
 ---
 
@@ -2407,7 +2407,7 @@ Unless overridden, tests use:
 
 ## Cross-Cutting: Error Handling
 
-### IT-XC-ERR-010: RFC 7807 compliance across error conditions
+### IT-XC-ERR-010: RFC 9457 compliance across error conditions
 
 - **Validates AC:** AC-XC-ERR-010
 - **Test Infrastructure:** Real HTTP server

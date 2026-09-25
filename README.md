@@ -181,6 +181,32 @@ static token. The resolution order is:
 | POST   | /api/v1alpha1/providers               | External SP registration            |
 | GET    | /api/v1alpha1/providers/{provider_id} | Get a single SP by ID               |
 
+### Error format
+
+Errors follow [RFC 9457](https://datatracker.ietf.org/doc/html/rfc9457)
+(`application/problem+json`). The `type` member is a project-controlled URI that
+identifies the problem, and each type always carries the same `title` and HTTP
+status:
+
+| `type`                                                    | Status | `title`               |
+|-----------------------------------------------------------|--------|-----------------------|
+| `https://dcm-project.github.io/problems/invalid-argument`      | 400 | Invalid argument      |
+| `https://dcm-project.github.io/problems/unauthenticated`       | 401 | Unauthenticated       |
+| `https://dcm-project.github.io/problems/permission-denied`     | 403 | Permission denied     |
+| `https://dcm-project.github.io/problems/not-found`             | 404 | Not found             |
+| `https://dcm-project.github.io/problems/already-exists`        | 409 | Already exists        |
+| `https://dcm-project.github.io/problems/unprocessable-entity`  | 422 | Unprocessable entity  |
+| `https://dcm-project.github.io/problems/internal`              | 500 | Internal Server Error |
+| `https://dcm-project.github.io/problems/unavailable`           | 503 | Service unavailable   |
+
+> **BREAKING:** error `type` values were previously bare enum names
+> (`INVALID_ARGUMENT`, `CONFLICT`, …). Clients that matched on those strings must
+> switch to the URIs above. `CONFLICT` is now `.../already-exists` and
+> `UNAUTHORIZED` is now `.../unauthenticated`.
+
+`make check-problem-uris` guards against reintroducing the IANA-reserved
+`dcm.example.com` documentation domain (RFC 2606) as a problem type URI.
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE) for details.

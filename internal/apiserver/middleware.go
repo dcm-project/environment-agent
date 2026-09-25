@@ -9,12 +9,17 @@ import (
 	"runtime/debug"
 	"time"
 
+	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 	"github.com/dcm-project/environment-agent/internal/auth"
 	"github.com/dcm-project/environment-agent/internal/httperror"
 	"github.com/dcm-project/environment-agent/internal/requestctx"
 )
 
-// PanicRecovery returns middleware that catches panics and returns RFC 7807 INTERNAL errors.
+// detailRequestTimeout is the detail written when a request exceeds the
+// server's per-request deadline.
+const detailRequestTimeout = "request timeout exceeded"
+
+// PanicRecovery returns middleware that catches panics and returns RFC 9457 INTERNAL problems.
 func PanicRecovery(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -28,8 +33,7 @@ func PanicRecovery(logger *slog.Logger) func(http.Handler) http.Handler {
 						"stack", string(debug.Stack()),
 					)
 					uri := r.RequestURI
-					httperror.WriteResponse(w, logger, http.StatusInternalServerError,
-						"INTERNAL", httperror.InternalTitle, fmt.Sprint(p), &uri)
+					httperror.WriteType(w, logger, v1alpha1.ErrorTypeINTERNAL, fmt.Sprint(p), &uri)
 				}
 			}()
 			next.ServeHTTP(w, r)
@@ -141,8 +145,8 @@ func RequestTimeout(timeout time.Duration, logger *slog.Logger) func(http.Handle
 
 			if ctx.Err() == context.DeadlineExceeded {
 				uri := r.RequestURI
-				httperror.WriteResponse(w, logger, http.StatusServiceUnavailable,
-					"UNAVAILABLE", "Service Unavailable", "request timeout exceeded", &uri)
+				httperror.WriteType(w, logger, v1alpha1.ErrorTypeUNAVAILABLE,
+					detailRequestTimeout, &uri)
 				logOutcome(http.StatusServiceUnavailable)
 				return
 			}

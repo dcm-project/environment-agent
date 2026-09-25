@@ -87,8 +87,7 @@ var _ = Describe("Health Service Integration", Label("integration"), func() {
 				httperror.WriteInvalidArgument(w, r, logger, err.Error())
 			},
 			ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
-				httperror.WriteResponse(w, logger, http.StatusInternalServerError,
-					"INTERNAL", "Internal Server Error", err.Error(), &r.RequestURI)
+				httperror.WriteType(w, logger, v1alpha1.ErrorTypeINTERNAL, err.Error(), &r.RequestURI)
 			},
 		})
 

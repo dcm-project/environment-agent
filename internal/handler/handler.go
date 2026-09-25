@@ -10,9 +10,9 @@ import (
 	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 	oapigen "github.com/dcm-project/environment-agent/internal/api/server"
 	"github.com/dcm-project/environment-agent/internal/health"
+	"github.com/dcm-project/environment-agent/internal/httperror"
 	"github.com/dcm-project/environment-agent/internal/provider"
 	"github.com/dcm-project/environment-agent/internal/provider/service"
-	"github.com/dcm-project/environment-agent/internal/ptr"
 	"github.com/dcm-project/environment-agent/internal/requestctx"
 )
 
@@ -85,13 +85,9 @@ func (h *Handler) CreateProvider(ctx context.Context, request oapigen.CreateProv
 	})
 	if err != nil {
 		if domErr, ok := err.(*service.DomainError); ok && domErr.Code == service.ErrCodeConflict {
-			return oapigen.CreateProvider409ApplicationProblemPlusJSONResponse(v1alpha1.Error{
-				Type:     "CONFLICT",
-				Title:    "Conflict",
-				Status:   ptr.To(409),
-				Detail:   ptr.To(domErr.Message),
-				Instance: instance,
-			}), nil
+			return oapigen.CreateProvider409ApplicationProblemPlusJSONResponse(
+				httperror.Problem(v1alpha1.ErrorTypeALREADYEXISTS, domErr.Message).Body(instance),
+			), nil
 		}
 		return nil, err
 	}
@@ -116,13 +112,10 @@ func (h *Handler) GetProvider(ctx context.Context, request oapigen.GetProviderRe
 	result, err := h.provider.Get(ctx, request.ProviderId)
 	if err != nil {
 		if domErr, ok := err.(*service.DomainError); ok && domErr.Code == service.ErrCodeNotFound {
-			return oapigen.GetProvider404ApplicationProblemPlusJSONResponse(v1alpha1.Error{
-				Type:     "NOT_FOUND",
-				Title:    "Provider Not Found",
-				Status:   ptr.To(404),
-				Detail:   ptr.To(domErr.Message),
-				Instance: requestctx.URIFromContext(ctx),
-			}), nil
+			return oapigen.GetProvider404ApplicationProblemPlusJSONResponse(
+				httperror.Problem(v1alpha1.ErrorTypeNOTFOUND, domErr.Message).
+					Body(requestctx.URIFromContext(ctx)),
+			), nil
 		}
 		return nil, err
 	}
@@ -130,11 +123,8 @@ func (h *Handler) GetProvider(ctx context.Context, request oapigen.GetProviderRe
 }
 
 func validationError(field string, err error, instance *string) oapigen.CreateProvider422ApplicationProblemPlusJSONResponse {
-	return oapigen.CreateProvider422ApplicationProblemPlusJSONResponse(v1alpha1.Error{
-		Type:     "UNPROCESSABLE_ENTITY",
-		Title:    "Validation Failed",
-		Status:   ptr.To(422),
-		Detail:   ptr.To(fmt.Sprintf("invalid %s: %s", field, err.Error())),
-		Instance: instance,
-	})
+	detail := fmt.Sprintf("invalid %s: %s", field, err.Error())
+	return oapigen.CreateProvider422ApplicationProblemPlusJSONResponse(
+		httperror.Problem(v1alpha1.ErrorTypeUNPROCESSABLEENTITY, detail).Body(instance),
+	)
 }

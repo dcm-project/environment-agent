@@ -9,6 +9,42 @@ import (
 	"time"
 )
 
+// Defines values for ErrorType.
+const (
+	ErrorTypeALREADYEXISTS       ErrorType = "https://dcm-project.github.io/problems/already-exists"
+	ErrorTypeINTERNAL            ErrorType = "https://dcm-project.github.io/problems/internal"
+	ErrorTypeINVALIDARGUMENT     ErrorType = "https://dcm-project.github.io/problems/invalid-argument"
+	ErrorTypeNOTFOUND            ErrorType = "https://dcm-project.github.io/problems/not-found"
+	ErrorTypePERMISSIONDENIED    ErrorType = "https://dcm-project.github.io/problems/permission-denied"
+	ErrorTypeUNAUTHENTICATED     ErrorType = "https://dcm-project.github.io/problems/unauthenticated"
+	ErrorTypeUNAVAILABLE         ErrorType = "https://dcm-project.github.io/problems/unavailable"
+	ErrorTypeUNPROCESSABLEENTITY ErrorType = "https://dcm-project.github.io/problems/unprocessable-entity"
+)
+
+// Valid indicates whether the value is a known member of the ErrorType enum.
+func (e ErrorType) Valid() bool {
+	switch e {
+	case ErrorTypeALREADYEXISTS:
+		return true
+	case ErrorTypeINTERNAL:
+		return true
+	case ErrorTypeINVALIDARGUMENT:
+		return true
+	case ErrorTypeNOTFOUND:
+		return true
+	case ErrorTypePERMISSIONDENIED:
+		return true
+	case ErrorTypeUNAUTHENTICATED:
+		return true
+	case ErrorTypeUNAVAILABLE:
+		return true
+	case ErrorTypeUNPROCESSABLEENTITY:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ProviderStatus.
 const (
 	Ready       ProviderStatus = "Ready"
@@ -48,7 +84,24 @@ func (e ProviderType) Valid() bool {
 	}
 }
 
-// Error RFC 7807 compliant error response
+// Error RFC 9457 compliant error response (Problem Details for HTTP APIs).
+//
+// Defined problem types:
+//
+//	| Type URI | Title | HTTP Status |
+//	|----------|-------|-------------|
+//	| .../problems/invalid-argument | Invalid argument | 400 |
+//	| .../problems/unauthenticated | Unauthenticated | 401 |
+//	| .../problems/permission-denied | Permission denied | 403 |
+//	| .../problems/not-found | Not found | 404 |
+//	| .../problems/already-exists | Already exists | 409 |
+//	| .../problems/unprocessable-entity | Unprocessable entity | 422 |
+//	| .../problems/internal | Internal Server Error | 500 |
+//	| .../problems/unavailable | Service unavailable | 503 |
+//
+// Note: permission-denied is defined in the enum but not yet emitted by
+// any handler. Titles follow the humanized-slug convention shared with
+// the ACM Cluster SP and K8s Container SP.
 type Error struct {
 	// Detail Human-readable explanation specific to this occurrence
 	//
@@ -65,14 +118,19 @@ type Error struct {
 
 	// Title Short human-readable summary of the problem
 	//
-	// Example: Service Type Conflict
+	// Example: Already exists
 	Title string `json:"title"`
 
 	// Type URI reference identifying the error type
 	//
-	// Example: CONFLICT
-	Type string `json:"type"`
+	// Example: https://dcm-project.github.io/problems/already-exists
+	Type ErrorType `json:"type"`
 }
+
+// ErrorType URI reference identifying the error type
+//
+// Example: https://dcm-project.github.io/problems/already-exists
+type ErrorType string
 
 // Health Health status singleton resource
 type Health struct {
