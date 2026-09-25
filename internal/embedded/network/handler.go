@@ -44,19 +44,11 @@ func (h *networkHandler) CreateResource(ctx context.Context, req routing.CreateR
 		return &routing.SPResponseError{StatusCode: http.StatusBadRequest, Message: err.Error()}
 	}
 
-	originalName := spec.Metadata.Name
-	id := req.ResourceID
-	if originalName != id && originalName != "" {
-		spec.Metadata.Name = id
-	} else if spec.Metadata.Name == "" {
-		spec.Metadata.Name = id
-	}
-
-	if err := validate.ValidateCreate(id, spec); err != nil {
+	if err := validate.ValidateCreate(req.ResourceID, spec); err != nil {
 		return mapStoreError(err)
 	}
 
-	_, err = h.lifecycle.Create(ctx, spec, id)
+	_, err = h.lifecycle.Create(ctx, spec, req.ResourceID)
 	if err != nil {
 		return mapStoreError(err)
 	}
