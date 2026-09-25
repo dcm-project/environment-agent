@@ -1993,7 +1993,7 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 - **Given** a Ready embedded Network provider
 - **When** a create request contains a plain or `{spec: ...}` Network spec with `routing_level: ""`
 - **Then** the exact empty value MUST be treated as omitted before validation, and the Network lifecycle MUST receive `routing_level` as nil
-- **And** when `node_ports` is absent, existing store inference MUST yield `ClusterIP`; when `node_ports` is present, it MUST yield `NodePort`
+- **And** when `node_ports` is absent or empty, existing store inference MUST yield `ClusterIP`; when `node_ports` is non-empty, it MUST yield `NodePort`
 - **And** an unsupported non-empty `routing_level` MUST still be rejected by the existing schema enum validation before reaching the lifecycle
 - **And** the existing Network schema enum MUST remain unchanged
 
