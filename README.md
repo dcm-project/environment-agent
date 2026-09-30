@@ -199,11 +199,6 @@ status:
 | `https://dcm-project.github.io/problems/internal`              | 500 | Internal Server Error |
 | `https://dcm-project.github.io/problems/unavailable`           | 503 | Service unavailable   |
 
-> **BREAKING:** error `type` values were previously bare enum names
-> (`INVALID_ARGUMENT`, `CONFLICT`, …). Clients that matched on those strings must
-> switch to the URIs above. `CONFLICT` is now `.../already-exists` and
-> `UNAUTHORIZED` is now `.../unauthenticated`.
-
 `make check-problem-uris` guards against reintroducing the IANA-reserved
 `dcm.example.com` documentation domain (RFC 2606) as a problem type URI.
 

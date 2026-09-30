@@ -230,13 +230,17 @@ check-aep:
 
 # Problem type URIs must be under a project-controlled domain. dcm.example.com
 # is IANA-reserved for documentation (RFC 2606) and can never be dereferenced,
-# so an Error.type pointing at it is not a usable RFC 9457 type URI.
+# so an Error.type pointing at it is not a usable RFC 9457 type URI. The tree is
+# clean today; this target is a regression guard that keeps it that way.
 check-problem-uris:
 	@output=$$(find api internal pkg cmd -type f \( -name '*.go' -o -name '*.yaml' \) \
 		-exec grep -n 'dcm\.example\.com' {} + 2>&1) || true; \
 	if [ -n "$$output" ]; then \
 		printf '%s\n' "$$output"; \
-		echo "ERROR: Old problem type URIs found. Update to dcm-project.github.io/problems/*"; \
+		echo "ERROR: problem type URIs must stay under a project-controlled domain."; \
+		echo "The files above reintroduce dcm.example.com, which is IANA-reserved for"; \
+		echo "documentation (RFC 2606) and can never be dereferenced. Use"; \
+		echo "https://dcm-project.github.io/problems/* instead."; \
 		exit 1; \
 	fi
 
