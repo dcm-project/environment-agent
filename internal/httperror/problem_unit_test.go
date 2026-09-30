@@ -97,9 +97,11 @@ var _ = Describe("RFC 9457 Error Construction", Label("unit"), func() {
 		)
 
 		It("falls back to INTERNAL semantics for an unknown type", func() {
-			p := httperror.Problem(v1alpha1.ErrorType("https://example.test/problems/mystery"), "detail")
+			p := httperror.Problem(v1alpha1.ErrorType("https://example.test/problems/mystery"), "connection to 10.0.0.1 refused")
+			Expect(p.Type).To(Equal(v1alpha1.ErrorTypeINTERNAL))
 			Expect(p.Status).To(Equal(500))
 			Expect(p.Title).To(Equal(httperror.InternalTitle))
+			Expect(p.Detail).To(Equal(httperror.InternalDetail))
 		})
 	})
 })

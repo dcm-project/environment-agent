@@ -53,10 +53,15 @@ func mapErrorType(t v1alpha1.ErrorType) problemMapping {
 	}
 }
 
-// Problem builds the canonical problem fields for an error type. The detail of
-// an INTERNAL problem is replaced with a generic message so internal failure
-// text never reaches the client.
+// Problem builds the canonical problem fields for an error type. A type
+// outside the contract enum is normalized to INTERNAL, so a response never
+// advertises a type the OpenAPI schema does not define. The detail of an
+// INTERNAL problem is replaced with a generic message so internal failure text
+// never reaches the client.
 func Problem(errType v1alpha1.ErrorType, detail string) ProblemFields {
+	if !errType.Valid() {
+		errType = v1alpha1.ErrorTypeINTERNAL
+	}
 	m := mapErrorType(errType)
 	if errType == v1alpha1.ErrorTypeINTERNAL {
 		detail = InternalDetail
