@@ -346,6 +346,7 @@ Authentication of external SP registration requests is handled by §4.11.
 | REQ-SPR-050 | If an embedded SP's service type is already occupied by a persisted external SP registration (from a prior session), the embedded SP registration for that service type MUST be skipped | MUST | |
 | REQ-SPR-051 | When an embedded SP registration is skipped due to slot conflict, the agent MUST log a warning and continue startup without failing; the skipped SP MUST NOT prevent other SPs from registering or the agent from becoming operational (HTTP server listening, messaging system connection initiated, health checks running) | MUST | |
 | REQ-SPR-052 | When registering an embedded SP for a service type that has a prior persisted *embedded* record, the agent MUST preserve that record's provider ID and `create_time` rather than generating new ones, so the provider's identity is stable across restarts. If no such prior embedded record exists — first registration, or the existing record is a different type (e.g. external), or the existing record has empty/zero fields — the agent MUST generate a new provider ID (REQ-SPR-091) and use the current time as `create_time` | MUST | Found via traceability audit: `resolveEmbeddedIdentity` implements this, but it had no governing requirement/AC — its 4 unit tests were mis-cited as UT-SPR-100–103, colliding with tests rightfully owned by AC-SPR-015 (REQ-SPR-030) and AC-SPR-111 (REQ-SPR-200) |
+| REQ-SPR-053 | When registering an embedded SP, the agent MUST advertise the resource operations that SP's capability contract implements in the provider record's `operations` field, matching how external SPs declare `operations` at registration. A service type with no declaration MUST register with `operations` absent (unspecified), not empty | MUST | Embedded SPs previously registered without `operations`, so consumers could not tell that e.g. the KubeVirt VM SP supports CREATE/READ/DELETE |
 | REQ-SPR-220 | Successful embedded SP registration MUST be logged at INFO with `service_type`, `provider_id` | MUST | Today only the skip-due-to-conflict case logs; the success path was silent |
 | REQ-SPR-221 | If an embedded SP registration succeeds in-memory but persisting it to disk fails while an existing persisted record for that service type remains intact, the agent MUST log a WARN (instead of the REQ-SPR-220 INFO) with `service_type`, `provider_id`, noting the persisted state is now stale, and MUST continue running rather than treating the write failure as fatal | MUST | Found via traceability audit: implemented (the stale-state WARN branch), but had no governing requirement — see `IT-SPR-194` |
 | REQ-SPR-222 | When an embedded SP is removed because it is no longer enabled in configuration, successful removal MUST be logged at INFO with `service_type`, `provider_id`, `name`. If the underlying store delete fails, the agent MUST NOT log the success message and MUST instead log the failure at ERROR | MUST | Found via traceability audit: implemented in `removeStaleEmbedded`/`cleanupEmbeddedRecord`, but had no governing requirement — see `IT-SPR-195`, `IT-SPR-196` |
@@ -418,6 +419,16 @@ Authentication of external SP registration requests is handled by §4.11.
 - **When** the agent starts
 - **Then** the embedded SPs for "container" and "cluster" service types MUST be registered internally
 - **And** embedded registration MUST NOT make outbound REST calls
+
+##### AC-SPR-013: Embedded SPs advertise their supported operations
+
+- **Validates:** REQ-SPR-053
+- **Given** the agent is configured with `AGENT_EMBEDDED_SPS=vm` and the KubeVirt VM SP
+  implements create, read and delete in `api/vm/v1alpha1`
+- **When** the agent registers that embedded SP at startup
+- **Then** the resulting provider record MUST carry `operations: ["CREATE", "READ", "DELETE"]`
+- **And** the same operations MUST be visible on the provider returned by the agent's provider API
+- **And** an embedded service type with no declared operations MUST register with `operations` absent
 
 ##### AC-SPR-015: Embedded SP initial health transition is not lost
 

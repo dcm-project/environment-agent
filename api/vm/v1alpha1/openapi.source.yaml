@@ -1,7 +1,13 @@
 openapi: 3.0.4
 info:
   contact: {}
-  description: KubeVirt Service Provider API
+  description: |
+    Service provider API for managing virtual machines via KubeVirt.
+
+    ## DCM Registration Metadata
+    - **Name:** kubevirt-sp
+    - **ServiceType:** vm
+    - **Operations:** CREATE, DELETE, READ
   title: KubeVirt Service Provider API
   version: v1alpha1
   license:
