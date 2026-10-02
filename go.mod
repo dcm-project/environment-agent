@@ -20,7 +20,7 @@ require (
 	github.com/openshift/hypershift/api v0.0.0-20260318145522-655c0d2abeaa
 	golang.org/x/oauth2 v0.37.0
 	k8s.io/api v0.37.0
-	k8s.io/apimachinery v0.37.0
+	k8s.io/apimachinery v0.37.1
 	k8s.io/client-go v0.37.0
 	kubevirt.io/api v1.9.0
 	sigs.k8s.io/controller-runtime v0.25.1
