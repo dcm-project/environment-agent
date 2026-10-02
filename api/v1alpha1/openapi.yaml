@@ -400,7 +400,25 @@ components:
 
     Error:
       type: object
-      description: RFC 7807 compliant error response
+      description: |
+        RFC 9457 compliant error response (Problem Details for HTTP APIs).
+
+        Defined problem types:
+
+          | Type URI | Title | HTTP Status |
+          |----------|-------|-------------|
+          | .../problems/invalid-argument | Invalid argument | 400 |
+          | .../problems/unauthenticated | Unauthenticated | 401 |
+          | .../problems/permission-denied | Permission denied | 403 |
+          | .../problems/not-found | Not found | 404 |
+          | .../problems/already-exists | Already exists | 409 |
+          | .../problems/unprocessable-entity | Unprocessable entity | 422 |
+          | .../problems/internal | Internal Server Error | 500 |
+          | .../problems/unavailable | Service unavailable | 503 |
+
+        Note: permission-denied is defined in the enum but not yet emitted by
+        any handler. Titles follow the humanized-slug convention shared with
+        the ACM Cluster SP and K8s Container SP.
       required:
         - type
         - title
@@ -409,13 +427,33 @@ components:
           type: string
           format: uri-reference
           description: URI reference identifying the error type
-          example: "CONFLICT"
+          enum:
+            - https://dcm-project.github.io/problems/invalid-argument
+            - https://dcm-project.github.io/problems/unauthenticated
+            - https://dcm-project.github.io/problems/permission-denied
+            - https://dcm-project.github.io/problems/not-found
+            - https://dcm-project.github.io/problems/already-exists
+            - https://dcm-project.github.io/problems/unprocessable-entity
+            - https://dcm-project.github.io/problems/internal
+            - https://dcm-project.github.io/problems/unavailable
+          x-enum-varnames:
+            - ErrorTypeINVALIDARGUMENT
+            - ErrorTypeUNAUTHENTICATED
+            - ErrorTypePERMISSIONDENIED
+            - ErrorTypeNOTFOUND
+            - ErrorTypeALREADYEXISTS
+            - ErrorTypeUNPROCESSABLEENTITY
+            - ErrorTypeINTERNAL
+            - ErrorTypeUNAVAILABLE
+          example: "https://dcm-project.github.io/problems/already-exists"
         title:
           type: string
           description: Short human-readable summary of the problem
-          example: "Service Type Conflict"
+          example: "Already exists"
         status:
           type: integer
+          minimum: 100
+          maximum: 599
           description: HTTP status code
           example: 409
         detail:

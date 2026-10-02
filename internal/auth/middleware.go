@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 	"github.com/dcm-project/environment-agent/internal/httperror"
 	"github.com/dcm-project/environment-agent/internal/requestctx"
 )
@@ -89,9 +90,9 @@ func logAuthFailure(logger *slog.Logger, r *http.Request, msg string, err error)
 	)
 }
 
-// writeAuthError writes a 401 RFC 7807 response with a WWW-Authenticate: Bearer
+// writeAuthError writes a 401 RFC 9457 problem with a WWW-Authenticate: Bearer
 // header (DD-510). detail must be a fixed, generic message, never a raw
-// validator error. The body is delegated to httperror.WriteResponse.
+// validator error. The body is delegated to httperror.WriteType.
 //
 // It records the rejection status into the shared requestctx.Outcome rather
 // than emitting the audit log entry itself, since rejections short-circuit
@@ -100,8 +101,7 @@ func logAuthFailure(logger *slog.Logger, r *http.Request, msg string, err error)
 func writeAuthError(w http.ResponseWriter, r *http.Request, logger *slog.Logger, detail string) {
 	w.Header().Set("WWW-Authenticate", "Bearer")
 	instance := requestctx.URIFromContext(r.Context())
-	httperror.WriteResponse(w, logger, http.StatusUnauthorized,
-		"UNAUTHORIZED", "Unauthorized", detail, instance)
+	httperror.WriteType(w, logger, v1alpha1.ErrorTypeUNAUTHENTICATED, detail, instance)
 	if outcome := requestctx.OutcomeFromContext(r.Context()); outcome != nil {
 		outcome.Status = http.StatusUnauthorized
 	}
