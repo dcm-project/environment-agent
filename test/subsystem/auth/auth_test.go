@@ -7,6 +7,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	v1alpha1 "github.com/dcm-project/environment-agent/api/v1alpha1"
 )
 
 var _ = Describe("Real Keycloak JWT authentication (AC-AUTH-130)", func() {
@@ -24,7 +26,7 @@ var _ = Describe("Real Keycloak JWT authentication (AC-AUTH-130)", func() {
 		Expect(resp.Header.Get("WWW-Authenticate")).To(Equal("Bearer"))
 
 		problem := readProblemResponse(resp)
-		Expect(problem.Type).To(Equal("UNAUTHORIZED"))
+		Expect(problem.Type).To(Equal(v1alpha1.ErrorTypeUNAUTHENTICATED))
 		Expect(problem.Detail).To(Equal("invalid Bearer token"))
 	})
 
