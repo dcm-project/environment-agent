@@ -2507,6 +2507,37 @@ Uses cross-cutting error handling (§5.1) for RFC 7807 responses.
 
 ---
 
+### 4.12 Network Output Publishing (FLPATH-4932)
+
+#### Overview
+
+The network SP's status CloudEvent carried only `{id, status, message}`; the LoadBalancer's
+assigned external IP/hostname was computed (`kubernetes.BuildOutputSpec`) but never left the
+SP's REST `GET`/`LIST` responses, so composite catalog items referencing
+`${network.endpoints[0].address}` had nothing to resolve against. Minimal stub covering only
+this gap — not container/VM/storage output publishing, and not internal (`scope: "internal"`)
+ClusterIP endpoints. The control-plane side (the `endpoints` schema, `output_spec` capture, CEL
+resolution) already exists and needed no change.
+
+#### Requirements
+
+| ID | Requirement | Priority | Notes |
+|----|-------------|----------|-------|
+| REQ-NET-600 | The status CloudEvent MUST include `output_spec.endpoints[]` (`address`, `port`, `scope`, optional `name`/`protocol`) whenever the Service is a `LoadBalancer` with at least one ingress assigned | MUST | Shape fixed by `control-plane`'s `NetworkEndpoint` schema; `endpoints` = (external IPs) × (ports) |
+| REQ-NET-610 | The status CloudEvent MUST omit `output_spec` entirely (not an empty object) when nothing is dialable yet | MUST | An emitted empty object would overwrite previously-captured outputs; omission leaves them untouched |
+
+##### AC-NET-600: `endpoints[]` populated from LoadBalancer ingress and ports
+
+- **Validates:** REQ-NET-600
+- **Given/When/Then:** a `LoadBalancer` Service with ingress + ports → `output_spec.endpoints` has one entry per (ingress × port) pair, `scope: "external"`, `address` = ingress IP (or hostname), `port`/`name`/`protocol` from the source port
+
+##### AC-NET-610: `output_spec` omitted when not yet dialable
+
+- **Validates:** REQ-NET-610
+- **Given/When/Then:** a non-`LoadBalancer` Service, or a `LoadBalancer` with empty ingress → the event's `output_spec` is nil/omitted, not an empty map
+
+---
+
 ## 5. Cross-Cutting Concerns
 
 ### 5.1 Error Handling
@@ -2816,6 +2847,7 @@ See [Design Decisions](../decisions/environment-agent.decisions.md).
 | REQ-RCM-NNN | 4.9: Retry & Cancel Mechanisms | 26 |
 | REQ-CNT-NNN | 4.10: Container Status Monitoring | 1 |
 | REQ-AUTH-NNN | 4.11: API Authentication | 12 |
+| REQ-NET-NNN | 4.12: Network Output Publishing | 2 |
 | REQ-XC-ERR-NNN | 5.1: Error Handling | 4 |
 | REQ-XC-CE-NNN | 5.2: CloudEvent Definitions | 5 |
 | REQ-XC-LOG-NNN | 5.3: Logging | 3 |

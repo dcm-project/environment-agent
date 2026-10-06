@@ -145,6 +145,7 @@ func (m *StatusMonitor) handleServiceEvent(obj any, debouncer *Debouncer) {
 		InstanceID: instanceID,
 		Status:     status,
 		Message:    msg,
+		OutputSpec: k8sstore.BuildOutputSpec(service),
 	})
 }
 

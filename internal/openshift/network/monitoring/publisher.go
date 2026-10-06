@@ -15,6 +15,7 @@ type StatusEvent struct {
 	InstanceID string
 	Status     v1alpha1.NetworkStatus
 	Message    string
+	OutputSpec map[string]any
 }
 
 // StatusPublisher abstracts event publishing so that the transport layer
@@ -64,7 +65,7 @@ func (p *NATSPublisher) Publish(ctx context.Context, event StatusEvent) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	data, err := NewStatusCloudEvent(p.subject, p.providerName, event.InstanceID, event.Status, event.Message)
+	data, err := NewStatusCloudEvent(p.subject, p.providerName, event.InstanceID, event.Status, event.Message, event.OutputSpec)
 	if err != nil {
 		return fmt.Errorf("constructing cloud event: %w", err)
 	}
