@@ -18,6 +18,11 @@ import (
 // ServiceType is the embedded SP identifier for the KubeVirt VM service provider.
 const ServiceType = "vm"
 
+// Operations are the resource operations advertised at registration time.
+// They mirror the createVM/getVM/listVMs/deleteVM operations declared by the
+// VM capability contract in api/vm/v1alpha1.
+var Operations = []string{"CREATE", "READ", "DELETE"}
+
 // vmLifecycle is the subset of kubevirt.Client the embedded handler needs.
 type vmLifecycle interface {
 	GetVirtualMachine(ctx context.Context, vmID string) (*kubevirtv1.VirtualMachine, error)
