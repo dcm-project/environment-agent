@@ -2507,17 +2507,15 @@ Uses cross-cutting error handling (§5.1) for RFC 7807 responses.
 
 ---
 
-### 4.12 Network Output Publishing (FLPATH-4932)
+### 4.12 Network Output Publishing
 
 #### Overview
 
-The network SP's status CloudEvent carried only `{id, status, message}`; the LoadBalancer's
-assigned external IP/hostname was computed (`kubernetes.BuildOutputSpec`) but never left the
-SP's REST `GET`/`LIST` responses, so composite catalog items referencing
-`${network.endpoints[0].address}` had nothing to resolve against. Minimal stub covering only
-this gap — not container/VM/storage output publishing, and not internal (`scope: "internal"`)
-ClusterIP endpoints. The control-plane side (the `endpoints` schema, `output_spec` capture, CEL
-resolution) already exists and needed no change.
+The network SP publishes the LoadBalancer's assigned external IP/hostname and ports as
+`output_spec.endpoints[]` on its status CloudEvent, so composite catalog items referencing
+`${network.endpoints[0].address}` can resolve against it. This covers externally-reachable
+LoadBalancer endpoints only (`scope: "external"`); internal ClusterIP endpoints
+(`scope: "internal"`) are not published.
 
 #### Requirements
 

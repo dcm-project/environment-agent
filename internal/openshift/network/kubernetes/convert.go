@@ -244,7 +244,10 @@ func convertServiceType(k8sType corev1.ServiceType) v1alpha1.KubernetesStateType
 // than emitted empty.
 func BuildOutputSpec(service *corev1.Service) map[string]any {
 	if service.Spec.Type != corev1.ServiceTypeLoadBalancer {
-		return nil // only LoadBalancer exposes external endpoints today
+		// Only LoadBalancer is published: its ingress address is available on the
+		// Service. NodePort's address (<node-ip>:<nodePort>) needs Node objects we
+		// don't have. ClusterIP is internal-only, therefore not in scope.
+		return nil
 	}
 	externalIPs := extractExternalIPs(service.Status.LoadBalancer.Ingress)
 	if len(externalIPs) == 0 {

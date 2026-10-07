@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sync"
 	"time"
 
@@ -173,12 +174,13 @@ func extractInstanceIDFromDelete(obj any) string {
 	return ExtractInstanceID(meta)
 }
 
-// submitIfChanged queues a publish only when status or message differs from the
-// last successfully published event for this instance (resync-safe).
+// submitIfChanged queues a publish only when status, message, or output_spec
+// differs from the last successfully published event for this instance (resync-safe).
 func (m *StatusMonitor) submitIfChanged(debouncer *Debouncer, event StatusEvent) {
 	m.mu.Lock()
 	if prev, ok := m.lastPublished[event.InstanceID]; ok &&
-		prev.Status == event.Status && prev.Message == event.Message {
+		prev.Status == event.Status && prev.Message == event.Message &&
+		reflect.DeepEqual(prev.OutputSpec, event.OutputSpec) {
 		m.mu.Unlock()
 		return
 	}
