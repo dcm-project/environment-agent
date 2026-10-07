@@ -238,6 +238,44 @@ func convertServiceType(k8sType corev1.ServiceType) v1alpha1.KubernetesStateType
 	}
 }
 
+// BuildOutputSpec composes the output_spec map for a ready network service,
+// matching the control-plane network service-type readOnly `endpoints` schema.
+// Returns nil when there is nothing dialable yet, so output_spec is OMITTED rather
+// than emitted empty.
+func BuildOutputSpec(service *corev1.Service) map[string]any {
+	if service.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		// Only LoadBalancer is published: its ingress address is available on the
+		// Service. NodePort's address (<node-ip>:<nodePort>) needs Node objects we
+		// don't have. ClusterIP is internal-only, therefore not in scope.
+		return nil
+	}
+	externalIPs := extractExternalIPs(service.Status.LoadBalancer.Ingress)
+	if len(externalIPs) == 0 {
+		return nil // not ready: no ingress assigned
+	}
+	endpoints := make([]map[string]any, 0, len(externalIPs)*len(service.Spec.Ports))
+	for _, addr := range externalIPs {
+		for _, p := range service.Spec.Ports {
+			ep := map[string]any{
+				"address": addr,
+				"port":    int(p.Port),
+				"scope":   "external",
+			}
+			if p.Name != "" {
+				ep["name"] = p.Name
+			}
+			if p.Protocol != "" {
+				ep["protocol"] = string(p.Protocol)
+			}
+			endpoints = append(endpoints, ep)
+		}
+	}
+	if len(endpoints) == 0 {
+		return nil
+	}
+	return map[string]any{"endpoints": endpoints}
+}
+
 func extractExternalIPs(ingress []corev1.LoadBalancerIngress) []string {
 	ips := make([]string, 0, len(ingress))
 	for _, ing := range ingress {
