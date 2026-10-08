@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"time"
 
@@ -197,6 +200,49 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(data.AgentName).To(Equal("agent-prod-1"))
 		Expect(data.TopicName).To(Equal(topics.Main))
 		Expect(data.Status).To(Equal("PROVISIONING"))
+	})
+
+	It("wraps CloudEvent spec for external SP create requests", func() {
+		const resourceID = "res-osac-create"
+		spec := map[string]any{
+			"service_type": "cluster",
+			"metadata":     map[string]any{"name": "test-cluster"},
+			"version":      "1.32",
+		}
+		var receivedBody []byte
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			receivedBody, _ = io.ReadAll(r.Body)
+			var body struct {
+				Spec json.RawMessage `json:"spec"`
+			}
+			if json.Unmarshal(receivedBody, &body) != nil || len(body.Spec) == 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"message":"Error at \"/spec\": property \"spec\" is missing"}`)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+		}))
+		defer server.Close()
+
+		registerProvider("osac-sp", "cluster", server.URL, "external", v1alpha1.Ready)
+		setupRouterWithForwarder(routing.NewForwarder(routing.ForwarderConfig{HTTPClient: server.Client()}))
+
+		request := cloudevents.NewEvent()
+		request.SetID(uuid.NewString())
+		request.SetSource(cloudevent.SourceControlPlane)
+		request.SetType(cloudevent.TypeRequestCreate)
+		Expect(request.SetData(cloudevents.ApplicationJSON, map[string]any{
+			"resource_id":  resourceID,
+			"service_type": "cluster",
+			"spec":         spec,
+		})).To(Succeed())
+		requestBytes, err := json.Marshal(request)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(router.HandleRequest(ctx, requestBytes)).To(Succeed())
+		Expect(receivedBody).To(MatchJSON(`{"spec":{"service_type":"cluster","metadata":{"name":"test-cluster"},"version":"1.32"}}`))
+		response := routingtest.ExpectResponseCE(responseSub)
+		Expect(response.Type()).To(Equal(cloudevent.TypeCreationAcked))
 	})
 
 	It("routes deletion to Ready external SP (IT-RTE-030)", func() {

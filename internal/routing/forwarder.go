@@ -130,7 +130,9 @@ func (f *Forwarder) deleteEmbedded(ctx context.Context, req DeleteResourceReques
 }
 
 func (f *Forwarder) createExternal(ctx context.Context, endpoint string, req CreateResourceRequest) error {
-	body, err := json.Marshal(req.Spec)
+	body, err := json.Marshal(struct {
+		Spec json.RawMessage `json:"spec"`
+	}{Spec: req.Spec})
 	if err != nil {
 		return &forwarderError{statusCode: http.StatusBadRequest, message: "failed to marshal spec: " + err.Error()}
 	}
