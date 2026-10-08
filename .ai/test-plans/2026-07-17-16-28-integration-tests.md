@@ -1876,8 +1876,8 @@ Unless overridden, tests use:
 - **Test Infrastructure:** External SP mock; NATS; responses subscriber
 - **Given** an external SP at `http://mock:8080` is Ready for "database"
 - **When** a `dcm.request.create` with `serviceType="database"` is consumed
-- **Then** SP mock MUST receive `POST http://mock:8080` with the spec
-- **And** `dcm.agents.responses` MUST receive `dcm.agent.creation-acknowledged` with `status="PROVISIONING"`
+- **Then** SP mock MUST receive `POST http://mock:8080` with a JSON body whose top-level `spec` value equals the original JSON value from the input CloudEvent's `data.spec` (preserved as opaque JSON, without provider-specific decoding or transformation)
+- **And** on a successful SP response, `dcm.agents.responses` MUST receive `dcm.agent.creation-acknowledged` with `status="PROVISIONING"`
 - **And** the CE data MUST include `resourceId`, `agentName`, and `topicName`
 
 ---
