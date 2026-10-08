@@ -252,8 +252,8 @@ type DatabaseSpec struct {
 	// Network Network configuration
 	Network *DatabaseNetwork `json:"network,omitempty"`
 
-	// ProviderHints Optional provider-specific hints from the catalog (accepted, not acted upon)
-	ProviderHints *map[string]interface{} `json:"provider_hints,omitempty"`
+	// ProviderHints Provider specific hints from the catalog
+	ProviderHints *ProviderHints `json:"provider_hints,omitempty"`
 
 	// Replicas Database replica count
 	Replicas *DatabaseReplicas `json:"replicas,omitempty"`
@@ -264,7 +264,7 @@ type DatabaseSpec struct {
 	// ServiceType Service type identifier (must be "database")
 	ServiceType DatabaseSpecServiceType `json:"service_type"`
 
-	// Version Database version (e.g. "18", "latest")
+	// Version Database version (e.g. 18, 17)
 	Version *DatabaseVersion `json:"version,omitempty"`
 }
 
@@ -277,8 +277,8 @@ type DatabaseStatus string
 // DatabaseStorage Storage allocation for each replica with units (e.g., "100GB", "2TB")
 type DatabaseStorage = string
 
-// DatabaseVersion Database version (e.g. "18", "latest")
-type DatabaseVersion = string
+// DatabaseVersion Database version (e.g. 18, 17)
+type DatabaseVersion = int8
 
 // Error RFC 9457 compliant error response (Problem Details for HTTP APIs).
 //
@@ -368,6 +368,40 @@ type Health struct {
 //
 // Example: healthy
 type HealthStatus string
+
+// InitdbProviderHints Postgres Initdb configuration from provider hints
+type InitdbProviderHints struct {
+	// Database Initial database to create
+	Database *string `json:"database,omitempty"`
+
+	// Password Password of the initial user
+	Password *string `json:"password,omitempty"`
+
+	// User Initial user to create as owner of the initial database
+	User *string `json:"user,omitempty"`
+}
+
+// PostgresProviderHints Postgres specific provider hints
+type PostgresProviderHints struct {
+	// Initdb Postgres Initdb configuration from provider hints
+	Initdb *InitdbProviderHints `json:"initdb,omitempty"`
+
+	// Storage Storage specific provider hints under postgres
+	Storage *StorageProviderHints `json:"storage,omitempty"`
+}
+
+// ProviderHints Provider specific hints from the catalog
+type ProviderHints struct {
+	// Postgres Postgres specific provider hints
+	Postgres             *PostgresProviderHints `json:"postgres,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// StorageProviderHints Storage specific provider hints under postgres
+type StorageProviderHints struct {
+	// StorageClass Name of the storage class the db would use
+	StorageClass *string `json:"storage_class,omitempty"`
+}
 
 // DatabaseIdPath defines model for DatabaseIdPath.
 type DatabaseIdPath = string
@@ -716,6 +750,74 @@ func (a DatabaseResources) MarshalJSON() ([]byte, error) {
 		object["storage"], err = json.Marshal(a.Storage)
 		if err != nil {
 			return nil, fmt.Errorf("error marshaling 'storage': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for ProviderHints. Returns the specified
+// element and whether it was found
+func (a ProviderHints) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for ProviderHints
+func (a *ProviderHints) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for ProviderHints to handle AdditionalProperties
+func (a *ProviderHints) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["postgres"]; found {
+		err = json.Unmarshal(raw, &a.Postgres)
+		if err != nil {
+			return fmt.Errorf("error reading 'postgres': %w", err)
+		}
+		delete(object, "postgres")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for ProviderHints to handle AdditionalProperties
+func (a ProviderHints) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.Postgres != nil {
+		object["postgres"], err = json.Marshal(a.Postgres)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'postgres': %w", err)
 		}
 	}
 

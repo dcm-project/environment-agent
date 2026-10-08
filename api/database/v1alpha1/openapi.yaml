@@ -319,8 +319,9 @@ components:
         - postgresql
 
     DatabaseVersion:
-      type: string
-      description: Database version (e.g. "18", "latest")
+      type: integer
+      format: int8
+      description: Database version (e.g. 18, 17)
 
     DatabaseCpu:
       type: object
@@ -457,9 +458,49 @@ components:
           readOnly: true
           example: "postgresql://app:s3cret@pg-db-rw.databases.svc:5432/app"
         provider_hints:
-          type: object
-          description: Optional provider-specific hints from the catalog (accepted, not acted upon)
-          additionalProperties: true
+          $ref: '#/components/schemas/ProviderHints' 
+
+    StorageProviderHints:
+      type: object
+      description: Storage specific provider hints under postgres
+      additionalProperties: false
+      properties:
+        storage_class:
+          type: string
+          description: Name of the storage class the db would use
+
+    InitdbProviderHints:
+      type: object
+      description: Postgres Initdb configuration from provider hints
+      additionalProperties: false
+      properties:
+        database:
+          type: string
+          description: Initial database to create
+        user:
+          type: string
+          description: Initial user to create as owner of the initial database
+        password:
+          type: string
+          description: Password of the initial user
+
+    PostgresProviderHints:
+      type: object
+      description: Postgres specific provider hints
+      additionalProperties: false
+      properties:
+        storage:
+          $ref: '#/components/schemas/StorageProviderHints'
+        initdb:
+          $ref: '#/components/schemas/InitdbProviderHints'
+
+    ProviderHints:
+      type: object
+      description: Provider specific hints from the catalog
+      additionalProperties: true
+      properties:
+        postgres:
+          $ref: '#/components/schemas/PostgresProviderHints'
 
     Database:
       type: object

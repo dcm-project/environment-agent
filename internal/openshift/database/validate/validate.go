@@ -6,12 +6,11 @@ import (
 	"sort"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/api/resource"
-
 	"github.com/dcm-project/environment-agent/api/database/v1alpha1"
 	"github.com/dcm-project/environment-agent/internal/openshift/database/dcm"
 	"github.com/dcm-project/environment-agent/internal/openshift/database/store"
 	"github.com/dcm-project/environment-agent/internal/openshift/database/units"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 type validationError struct {
