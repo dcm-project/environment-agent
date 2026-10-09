@@ -18,6 +18,7 @@ import (
 
 const (
 	idempotencyKeyHeader = "Idempotency-Key"
+	resourceIDQueryParam = "id"
 	maxResponseBodyBytes = 4096
 )
 
@@ -142,7 +143,7 @@ func (f *Forwarder) createExternal(ctx context.Context, endpoint string, req Cre
 		return fmt.Errorf("parsing endpoint URL: %w", err)
 	}
 	q := u.Query()
-	q.Set("id", req.ResourceID)
+	q.Set(resourceIDQueryParam, req.ResourceID)
 	u.RawQuery = q.Encode()
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
