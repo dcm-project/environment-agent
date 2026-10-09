@@ -136,7 +136,16 @@ func (f *Forwarder) createExternal(ctx context.Context, endpoint string, req Cre
 	if err != nil {
 		return &forwarderError{statusCode: http.StatusBadRequest, message: "failed to marshal spec: " + err.Error()}
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("parsing endpoint URL: %w", err)
+	}
+	q := u.Query()
+	q.Set("id", req.ResourceID)
+	u.RawQuery = q.Encode()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("creating POST request: %w", err)
 	}

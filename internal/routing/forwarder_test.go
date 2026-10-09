@@ -149,6 +149,34 @@ var _ = Describe("Forwarder", Label("unit"), func() {
 		})
 	})
 
+	Describe("Create URL construction", func() {
+		var (
+			receivedURI string
+			server      *httptest.Server
+			fwd         *routing.Forwarder
+		)
+
+		BeforeEach(func() {
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				receivedURI = r.RequestURI
+				w.WriteHeader(http.StatusOK)
+			}))
+			fwd = routing.NewForwarder(routing.ForwarderConfig{HTTPClient: server.Client()})
+		})
+
+		AfterEach(func() { server.Close() })
+
+		It("includes resource ID as id query parameter", func() {
+			err := fwd.CreateResource(context.Background(), server.URL+"/api/v1/resources", false, routing.CreateResourceRequest{
+				ResourceID: "res-42", ServiceType: "db", Spec: json.RawMessage(`{}`), EventID: "e",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			parsed, err := url.Parse(receivedURI)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(parsed.Query().Get("id")).To(Equal("res-42"))
+		})
+	})
+
 	Describe("Idempotency-Key header (REQ-RCM-210)", func() {
 		var (
 			receivedHeaders http.Header
