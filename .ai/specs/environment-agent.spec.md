@@ -1748,7 +1748,7 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
 | REQ-RTE-030 | When the SP for the requested service type is Ready and embedded, the agent MUST forward the request via an in-process call | MUST | |
-| REQ-RTE-040 | When the SP for the requested service type is Ready and external, the agent MUST forward creation requests via `POST {endpoint}` where `{endpoint}` is the URL provided during SP registration, with a JSON body `{"spec": S}` where `S` is the original JSON value from the inbound CloudEvent's `data.spec` | MUST | Apply the same envelope generically to every external SP; preserve `S` as opaque JSON without provider-specific decoding or transformation |
+| REQ-RTE-040 | When the SP for the requested service type is Ready and external, the agent MUST forward creation requests via `POST {endpoint}?id={resource_id}` where `{endpoint}` is the URL provided during SP registration and `{resource_id}` is the inbound CloudEvent's `data.resource_id`, with a JSON body `{"spec": S}` where `S` is the original JSON value from the inbound CloudEvent's `data.spec` | MUST | Apply the same envelope generically to every external SP; preserve `S` as opaque JSON without provider-specific decoding or transformation. The `id` query parameter is the AEP-133 client-assigned resource identifier and MUST match the value later used in `DELETE {endpoint}/{resource_id}` (REQ-RTE-050) |
 | REQ-RTE-050 | When the SP for the requested service type is Ready and external, the agent MUST forward deletion requests via `DELETE {endpoint}/{resource_id}` | MUST | |
 | REQ-RTE-060 | On successful SP response (creation accepted), the agent MUST publish a `dcm.agent.creation-acknowledged` CloudEvent to `dcm.agents.responses` with `{resource_id, agent_name, topic_name, status: "PROVISIONING"}` | MUST | |
 | REQ-RTE-070 | On successful SP response (deletion accepted), the agent MUST publish a `dcm.agent.deletion-acknowledged` CloudEvent to `dcm.agents.responses` with `{resource_id, agent_name, topic_name, status: "DELETING"}` | MUST | |
@@ -1820,8 +1820,8 @@ Out of scope: Update/day-2 operations, multi-SP selection strategies.
 
 - **Validates:** REQ-RTE-010, REQ-RTE-040, REQ-RTE-060
 - **Given** an external SP at "https://sp.example.com:8080" is registered and Ready for service type "database"
-- **When** the agent consumes a `dcm.request.create` CloudEvent with `service_type="database"`
-- **Then** the agent MUST send `POST https://sp.example.com:8080` with a JSON body whose top-level `spec` value equals the original JSON value in the inbound CloudEvent's `data.spec`
+- **When** the agent consumes a `dcm.request.create` CloudEvent with `resource_id="res-ext-001"` and `service_type="database"`
+- **Then** the agent MUST send `POST https://sp.example.com:8080?id=res-ext-001` with a JSON body whose top-level `spec` value equals the original JSON value in the inbound CloudEvent's `data.spec`
 - **And** on a successful SP response, publish the existing `dcm.agent.creation-acknowledged` CloudEvent with `{resource_id, agent_name, topic_name, status: "PROVISIONING"}`
 
 ##### AC-RTE-030: Route deletion request to external SP
@@ -2220,7 +2220,7 @@ message, not elapsed time.
 
 - **Validates:** REQ-RCM-210
 - **Given** an inbound `dcm.request.create` CloudEvent with `id="evt-abc-123"` and `resource_id="res-1"`
-- **When** the agent forwards the request via `POST {endpoint}`
+- **When** the agent forwards the request via `POST {endpoint}?id={resource_id}` (REQ-RTE-040)
 - **Then** the HTTP request MUST include the header `Idempotency-Key: evt-abc-123`
 
 ##### AC-RCM-120: Idempotency-Key stable across redelivery and retries
