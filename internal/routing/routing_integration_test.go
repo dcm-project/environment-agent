@@ -191,6 +191,7 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		err := router.HandleRequest(ctx, routingtest.BuildCreateCE("res-ext-001", "database"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fakeForwarder.CreateCallCount()).To(Equal(1))
+		Expect(fakeForwarder.GetCreateCalls()[0].Req.ResourceID).To(Equal("res-ext-001"))
 
 		ce := routingtest.ExpectResponseCE(responseSub)
 		Expect(ce.Type()).To(Equal("dcm.agent.creation-acknowledged"))
@@ -202,7 +203,7 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(data.Status).To(Equal("PROVISIONING"))
 	})
 
-	It("wraps CloudEvent spec for external SP create requests", func() {
+	It("forwards resource id query param and wraps spec for external SP create (IT-RTE-020)", func() {
 		const resourceID = "res-osac-create"
 		spec := map[string]any{
 			"service_type": "cluster",
@@ -210,7 +211,9 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 			"version":      "1.32",
 		}
 		var receivedBody []byte
+		var receivedURI string
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			receivedURI = r.RequestURI
 			receivedBody, _ = io.ReadAll(r.Body)
 			var body struct {
 				Spec json.RawMessage `json:"spec"`
@@ -240,6 +243,9 @@ var _ = Describe("Resource Operation Routing", Label("integration"), func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(router.HandleRequest(ctx, requestBytes)).To(Succeed())
+		parsed, err := url.Parse(receivedURI)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(parsed.Query().Get("id")).To(Equal(resourceID))
 		Expect(receivedBody).To(MatchJSON(`{"spec":{"service_type":"cluster","metadata":{"name":"test-cluster"},"version":"1.32"}}`))
 		response := routingtest.ExpectResponseCE(responseSub)
 		Expect(response.Type()).To(Equal(cloudevent.TypeCreationAcked))
