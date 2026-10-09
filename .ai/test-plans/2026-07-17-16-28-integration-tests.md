@@ -1875,10 +1875,10 @@ Unless overridden, tests use:
 - **Validates AC:** AC-RTE-020
 - **Test Infrastructure:** External SP mock; NATS; responses subscriber
 - **Given** an external SP at `http://mock:8080` is Ready for "database"
-- **When** a `dcm.request.create` with `resource_id="res-ext-001"` and `service_type="database"` is consumed
+- **When** a `dcm.request.create` with `resource_id="res-ext-001"` and `serviceType="database"` is consumed
 - **Then** SP mock MUST receive `POST http://mock:8080?id=res-ext-001` with a JSON body whose top-level `spec` value equals the original JSON value from the input CloudEvent's `data.spec` (preserved as opaque JSON, without provider-specific decoding or transformation)
 - **And** on a successful SP response, `dcm.agents.responses` MUST receive `dcm.agent.creation-acknowledged` with `status="PROVISIONING"`
-- **And** the CE data MUST include `resource_id`, `agent_name`, and `topic_name`
+- **And** the CE data MUST include `resourceId`, `agentName`, and `topicName`
 
 ---
 
