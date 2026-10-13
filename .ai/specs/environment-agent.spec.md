@@ -2522,17 +2522,21 @@ Uses cross-cutting error handling (§5.1) for RFC 9457 responses.
 
 **Error type mapping:**
 
-> Error `type` values are short token enum strings (e.g., `INVALID_ARGUMENT`, `CONFLICT`), not URIs.
+> Error `type` values are project-controlled URIs under
+> `https://dcm-project.github.io/problems/`, as RFC 9457 section 3.1.1 requires. Each type
+> carries exactly one status and one title; they are derived from the type, never passed per
+> call site.
 
-| Error Condition | HTTP Status | Error Type |
-|-----------------|-------------|------------|
-| Invalid request body | 400 | INVALID_ARGUMENT |
-| Unauthorized request | 401 | UNAUTHORIZED |
-| Resource not found | 404 | NOT_FOUND |
-| Service type conflict | 409 | CONFLICT |
-| Validation failure | 422 | UNPROCESSABLE_ENTITY |
-| Unexpected error | 500 | INTERNAL |
-| Service unavailable | 503 | UNAVAILABLE |
+| Error Condition | HTTP Status | Error Type | Title |
+|-----------------|-------------|------------|-------|
+| Invalid request body | 400 | `https://dcm-project.github.io/problems/invalid-argument` | Invalid argument |
+| Unauthenticated request | 401 | `https://dcm-project.github.io/problems/unauthenticated` | Unauthenticated |
+| Forbidden request | 403 | `https://dcm-project.github.io/problems/permission-denied` | Permission denied |
+| Resource not found | 404 | `https://dcm-project.github.io/problems/not-found` | Not found |
+| Service type conflict | 409 | `https://dcm-project.github.io/problems/already-exists` | Already exists |
+| Validation failure | 422 | `https://dcm-project.github.io/problems/unprocessable-entity` | Unprocessable entity |
+| Unexpected error | 500 | `https://dcm-project.github.io/problems/internal` | Internal Server Error |
+| Service unavailable | 503 | `https://dcm-project.github.io/problems/unavailable` | Service unavailable |
 
 #### Acceptance Criteria
 
