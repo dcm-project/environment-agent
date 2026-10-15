@@ -19,6 +19,12 @@ type Bundle struct {
 	App     *containerapp.App
 	Handler routing.EmbeddedHandler
 	Checker monitor.Checker
+
+	// Operations are the resource operations this SP advertises at
+	// registration time. Declared by the package (see Operations); carried
+	// on the bundle so callers read everything an enabled SP provides from
+	// one place.
+	Operations []string
 }
 
 // Enabled reports whether container is listed in AGENT_EMBEDDED_SPS.
@@ -48,9 +54,10 @@ func Setup(ctx context.Context, agentCfg *config.Config, logger *slog.Logger) (*
 	}
 
 	return &Bundle{
-		App:     a,
-		Handler: NewContainerHandler(a.Store()),
-		Checker: newHealthChecker(a.Store()),
+		App:        a,
+		Handler:    NewContainerHandler(a.Store()),
+		Checker:    newHealthChecker(a.Store()),
+		Operations: Operations,
 	}, nil
 }
 

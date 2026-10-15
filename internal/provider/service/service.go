@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -25,9 +26,10 @@ type ProviderService struct {
 	mon      *monitor.Monitor // nil-safe: if nil, no monitoring
 	logger   *slog.Logger
 
-	onChangeMu       sync.RWMutex
-	onChange         func()
-	embeddedCheckers map[string]monitor.Checker
+	onChangeMu         sync.RWMutex
+	onChange           func()
+	embeddedCheckers   map[string]monitor.Checker
+	embeddedOperations map[string][]string
 }
 
 // New creates a ProviderService with the given dependencies.
@@ -277,6 +279,14 @@ func (s *ProviderService) SetEmbeddedCheckers(checkers map[string]monitor.Checke
 	s.embeddedCheckers = checkers
 }
 
+// SetEmbeddedOperations supplies the resource operations each embedded SP
+// advertises, keyed by service type. Must be called before RegisterEmbedded.
+// Unlisted service types register without an operations field, which means
+// "unspecified" rather than "none".
+func (s *ProviderService) SetEmbeddedOperations(operations map[string][]string) {
+	s.embeddedOperations = operations
+}
+
 // RegisterEmbedded registers embedded SPs for the given service types.
 // Removes stale embedded records not in the current enabled list.
 //
@@ -376,6 +386,7 @@ func (s *ProviderService) registerEmbeddedType(st string) {
 		Endpoint:      "embedded://" + st,
 		ServiceType:   st,
 		SchemaVersion: "v1alpha1",
+		Operations:    s.embeddedOperationsFor(st),
 		Type:          string(v1alpha1.Embedded),
 		CreateTime:    createTime,
 		UpdateTime:    now,
@@ -405,6 +416,18 @@ func (s *ProviderService) registerEmbeddedType(st string) {
 // resolveEmbeddedIdentity returns the provider ID and creation time for an
 // embedded registration. Reuses values from an existing embedded record when
 // available to preserve identity across restarts.
+// embeddedOperationsFor returns the operations advertised for an embedded
+// service type, or nil when none were supplied. The slice is copied so a
+// stored record can never alias the caller's declaration.
+func (s *ProviderService) embeddedOperationsFor(serviceType string) *[]string {
+	ops, ok := s.embeddedOperations[serviceType]
+	if !ok || len(ops) == 0 {
+		return nil
+	}
+	cloned := slices.Clone(ops)
+	return &cloned
+}
+
 func (s *ProviderService) embeddedChecker(serviceType string) monitor.Checker {
 	if s.embeddedCheckers != nil {
 		if checker, ok := s.embeddedCheckers[serviceType]; ok && checker != nil {

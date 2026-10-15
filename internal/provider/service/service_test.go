@@ -826,3 +826,63 @@ func (f *fakeDeleteStore) Delete(ctx context.Context, name string) error {
 	}
 	return f.Store.Delete(ctx, name)
 }
+
+var _ = Describe("embedded SP advertised operations", Label("unit"), func() {
+	var (
+		svc       *ProviderService
+		fileStore store.Store
+	)
+
+	BeforeEach(func() {
+		var err error
+		fileStore, err = store.NewFileStore(filepath.Join(GinkgoT().TempDir(), "providers.json"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		Expect(err).NotTo(HaveOccurred())
+		svc = New(fileStore, provider.NewRegistry(), provider.NewInMemoryHealthTracker(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	})
+
+	It("records the supplied operations on the embedded provider", func() {
+		svc.SetEmbeddedOperations(map[string][]string{"vm": {"CREATE", "READ", "DELETE"}})
+
+		svc.RegisterEmbedded([]string{"vm"})
+
+		stored, err := fileStore.GetByName(context.Background(), "vm")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stored).NotTo(BeNil())
+		Expect(stored.Operations).NotTo(BeNil())
+		Expect(*stored.Operations).To(Equal([]string{"CREATE", "READ", "DELETE"}))
+	})
+
+	It("exposes the operations through the provider API representation", func() {
+		svc.SetEmbeddedOperations(map[string][]string{"vm": {"CREATE", "READ", "DELETE"}})
+		svc.RegisterEmbedded([]string{"vm"})
+
+		providers, err := svc.List(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(providers).To(HaveLen(1))
+		Expect(providers[0].Operations).NotTo(BeNil())
+		Expect(*providers[0].Operations).To(ConsistOf("CREATE", "READ", "DELETE"))
+	})
+
+	It("leaves operations unset for a service type with no declaration", func() {
+		svc.SetEmbeddedOperations(map[string][]string{"vm": {"CREATE", "READ", "DELETE"}})
+
+		svc.RegisterEmbedded([]string{"widget"})
+
+		stored, err := fileStore.GetByName(context.Background(), "widget")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stored).NotTo(BeNil())
+		Expect(stored.Operations).To(BeNil())
+	})
+
+	It("does not alias the caller's slice, so a stored record cannot be mutated through it", func() {
+		declared := []string{"CREATE", "READ", "DELETE"}
+		svc.SetEmbeddedOperations(map[string][]string{"vm": declared})
+		svc.RegisterEmbedded([]string{"vm"})
+
+		declared[0] = "MUTATED"
+
+		stored, err := fileStore.GetByName(context.Background(), "vm")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(*stored.Operations).To(Equal([]string{"CREATE", "READ", "DELETE"}))
+	})
+})
