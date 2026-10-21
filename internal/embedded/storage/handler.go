@@ -17,6 +17,11 @@ import (
 // ServiceType is the embedded SP identifier for the storage service provider.
 const ServiceType = "storage"
 
+// Operations are the resource operations advertised at registration time.
+// They mirror the createVolume/getVolume/listVolumes/deleteVolume operations
+// declared by the storage capability contract in api/storage/v1alpha1.
+var Operations = []string{"CREATE", "READ", "DELETE"}
+
 // volumeLifecycle is the subset of store.VolumeRepository the embedded handler needs.
 type volumeLifecycle interface {
 	Create(ctx context.Context, spec storageapi.StorageSpec, id string) (*storageapi.Volume, error)
