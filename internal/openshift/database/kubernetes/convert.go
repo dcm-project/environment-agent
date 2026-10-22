@@ -71,7 +71,6 @@ func phaseFromReplica(replica databaseReplica) databaseReplicaPhase {
 		PodPhase: replica.Pod.Status.Phase,
 		PvcPhase: replica.Pvc.Status.Phase,
 	}
-
 }
 
 // databaseFromCluster reconstructs an API database from a Kubernetes Cluster.
@@ -129,7 +128,7 @@ func resourcesFromCluster(cluster cnpgv1.Cluster) (res v1alpha1.DatabaseResource
 	if cluster.Spec.StorageConfiguration.Size != "" {
 		if q, err := resource.ParseQuantity(cluster.Spec.StorageConfiguration.Size); err == nil {
 			storageStr := units.BytesQuantityToAPI(q)
-			res.Storage = &storageStr
+			res.Storage = storageStr
 		}
 	}
 	return res
@@ -379,7 +378,11 @@ func buildCluster(spec v1alpha1.DatabaseSpec, id string, cfg CnpgK8sConfig, labe
 	}
 
 	// CPU resources
-	cpuReq, cpuLim := units.ConvertCPU(spec.Resources.Cpu)
+	cpuReq, cpuLim, reqErr, limErr := units.ConvertCPU(spec.Resources.Cpu)
+	if reqErr != nil || limErr != nil {
+		// errors handled upstream, shouldn't be reachable
+		return nil, &store.InvalidArgumentError{Message: fmt.Sprintf("invalid cpu values: %v, %v", reqErr, limErr)}
+	}
 
 	// Memory resources — errors handled upstream; safe to ignore here since
 	// validation occurs before buildCluster is called.
@@ -393,7 +396,7 @@ func buildCluster(spec v1alpha1.DatabaseSpec, id string, cfg CnpgK8sConfig, labe
 	}
 
 	// Storage resource - errors handled upstream
-	storageSize, err := units.ConvertBytes(*spec.Resources.Storage)
+	storageSize, err := units.ConvertBytes(spec.Resources.Storage)
 	if err != nil {
 		return nil, &store.InvalidArgumentError{Message: fmt.Sprintf("invalid storage value: %v", err)}
 	}

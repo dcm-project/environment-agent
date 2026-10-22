@@ -191,6 +191,14 @@ func extractPodFailureReason(pod *corev1.Pod) string {
 		// Pod is scheduled but still pending — inspect container waiting states
 		// for actionable reasons such as ErrImagePull or ImagePullBackOff.
 	}
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" && !transientWaitingReasons[cs.State.Waiting.Reason] {
+			return cs.State.Waiting.Reason
+		}
+		if cs.State.Terminated != nil && cs.State.Terminated.Reason != "" && cs.State.Terminated.ExitCode != 0 {
+			return cs.State.Terminated.Reason
+		}
+	}
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" && !transientWaitingReasons[cs.State.Waiting.Reason] {
 			return cs.State.Waiting.Reason

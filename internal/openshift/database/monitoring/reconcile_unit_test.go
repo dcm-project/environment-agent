@@ -439,6 +439,26 @@ var _ = Describe("Status Reconciliation", func() {
 		Expect(status).NotTo(Equal(v1alpha1.FAILED))
 	})
 
+	It("should return FAILED when a pending instance pod has an init container in ImagePullBackOff", func() {
+		cluster := buildCluster(string(cnpgv1.PhaseWaitingForInstancesToBeActive), 1, notReadyCluster)
+		cluster.Status.PhaseReason = "Waiting for instances to be active"
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Labels: instancePodLabels},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+				InitContainerStatuses: []corev1.ContainerStatus{
+					{Name: "init", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}},
+				},
+			},
+		}
+
+		status, message, publish := monitoring.ReconcileStatus(cluster, []*corev1.Pod{pod}, nil)
+
+		Expect(publish).To(BeTrue())
+		Expect(status).To(Equal(v1alpha1.FAILED))
+		Expect(message).To(ContainSubstring("ImagePullBackOff"))
+	})
+
 	It("should surface container waiting failures on a scheduled Pending pod", func() {
 		// Pod is Pending but scheduled (PodScheduled=True). Before the fix,
 		// extractPodFailureReason returned "" after the scheduling condition loop,

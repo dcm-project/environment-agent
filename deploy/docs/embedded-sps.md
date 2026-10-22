@@ -43,11 +43,7 @@ Rules the code enforces (`internal/embedded/*/setup.go`, `internal/provider/serv
   | `cluster` | `internal/openshift/acmcluster` | HyperShift `HostedCluster`/`NodePool` provisioning via ACM/MCE (KubeVirt or bare-metal/Agent-based) | [§2.3](#23-cluster-sp-cluster) |
   | `storage` | `internal/openshift/storage` | Kubernetes `PersistentVolumeClaim`s | [§2.4](#24-storage-sp-storage) |
   | `network` | `internal/openshift/network` | Kubernetes `Service`/network resources | [§2.5](#25-network-sp-network) |
-
-  > **Not embeddable today:** the database (Postgres) SP is not available as an embedded SP.
-  > There is no `internal/embedded/database` package and no `database` entry in
-  > `embedded.Bundles`. Putting `database` in `AGENT_EMBEDDED_SPS` will register an inert
-  > provider record per the bullet above, not a working SP.
+  | `database` | `internal/openshift/database` | CNPG `Cluster` (Postgres) managed via `postgresql.cnpg.io` | [§2.6](#26-database-sp-database) |
 
 - **One SP per service type, agent-wide.** Whether embedded or external, only one SP may hold
   the slot for a given `service_type` (REQ-SPR-200). Embedded SPs register at startup, before
@@ -68,9 +64,9 @@ SPs you enable:
 | Env var | Applies to | Default | Required? | Notes |
 |---|---|---|---|---|
 | `AGENT_MESSAGING_URL` | agent (`MessagingConfig.URL`) | _empty_ | **Yes**, whenever any SP is embedded | Each embedded SP's `shared.Apply` fails config loading with `"messaging URL is required"` if this is unset, regardless of which SP you enable. This is the NATS URL the SP's status-monitor workers publish updates on. |
-| `SP_DEFAULT_KUBECONFIG` | agent (`SPConfig.DefaultKubeconfig`) | _empty_ | No | Agent-wide default kubeconfig path used by **all** embedded SPs that talk to Kubernetes (all five). When empty, each SP falls back to in-cluster `ServiceAccount` auth (`rest.InClusterConfig()` in `internal/openshift/kubeconfig/rest.go`) — the model used when the agent itself runs as a Pod on the target cluster. |
+| `SP_DEFAULT_KUBECONFIG` | agent (`SPConfig.DefaultKubeconfig`) | _empty_ | No | Agent-wide default kubeconfig path used by **all** embedded SPs that talk to Kubernetes (all six). When empty, each SP falls back to in-cluster `ServiceAccount` auth (`rest.InClusterConfig()` in `internal/openshift/kubeconfig/rest.go`) — the model used when the agent itself runs as a Pod on the target cluster. |
 | `SP_KUBECONFIG` | per-SP (`shared.Config.Kubeconfig`) | falls back to `SP_DEFAULT_KUBECONFIG` | No | Per-SP override if one embedded SP needs a *different* cluster/kubeconfig than the others. Only set this when SPs must target different clusters; otherwise use `SP_DEFAULT_KUBECONFIG`. Because all embedded SPs currently read the *same* `SP_KUBECONFIG` variable name, you cannot set distinct overrides for two different SPs in a single process today — this is a real limitation, not a documentation gap. |
-| `SP_NAME` | per-SP (`shared.Config.Name`) | SP-specific (`acm-cluster-sp`, `container-sp`, `network`, `storage`, `kubevirt-vm-sp`) | No | SP-internal runtime name used by provider-specific components (e.g. NATS publisher identity, logging). This does **not** override the provider's registered name or API identity — embedded registration always uses the service type as the provider name. All embedded SPs currently read the same `SP_NAME` variable name, so this has the same one-value-shared-by-all-enabled-SPs limitation as `SP_KUBECONFIG`. |
+| `SP_NAME` | per-SP (`shared.Config.Name`) | SP-specific (`acm-cluster-sp`, `container-sp`, `database`, `network`, `storage`, `kubevirt-vm-sp`) | No | SP-internal runtime name used by provider-specific components (e.g. NATS publisher identity, logging). This does **not** override the provider's registered name or API identity — embedded registration always uses the service type as the provider name. All embedded SPs currently read the same `SP_NAME` variable name, so this has the same one-value-shared-by-all-enabled-SPs limitation as `SP_KUBECONFIG`. |
 | `AGENT_SP_PERSISTENCE_PATH` | agent (`ProviderConfig.PersistencePath`) | `/var/lib/environment-agent/registrations` | No | File path where SP registrations (embedded and external) persist across restarts, so slot ownership survives an agent restart. |
 | `AGENT_HEALTH_CHECK_INTERVAL` | agent (`HealthConfig.CheckInterval`) | `10s` | No | How often the agent polls each embedded SP's health checker. Range enforced: `1s`–`5m`. |
 | `AGENT_HEALTH_CHECK_TIMEOUT` | agent (`HealthConfig.CheckTimeout`) | `5s` | No | Per-check timeout. Range enforced: `500ms`–`AGENT_HEALTH_CHECK_INTERVAL`. |
@@ -188,6 +184,30 @@ resources (Services).
 > there — that manifest is a minimal Kind quick-start, not full coverage). `deploy/.env.example`
 > and `deploy/compose.yaml` now wire `network` like the other Kubernetes-namespace-scoped SPs;
 > add it to `AGENT_EMBEDDED_SPS` and set `SP_NETWORK_NAMESPACE` if you need it there too.
+
+### 2.6 Database SP (`database`)
+
+Package: `internal/openshift/database/config/config.go`. Manages CNPG `Cluster` resources
+(Postgres databases) via the `postgresql.cnpg.io` API group. **Requires CNPG installed on the
+target cluster before the agent starts.**
+
+| Env var | Default | Required? | Valid values | Notes |
+|---|---|---|---|---|
+| `SP_DATABASE_NAMESPACE` | `default` | No | any existing namespace | Namespace where CNPG `Cluster` resources are created. If changed from `default`, the namespace must already exist. |
+| `SP_DATABASE_EXTERNAL_SVC_TYPE` | _empty_ | **Yes** | `LoadBalancer` or `NodePort` | Config loading fails for any other value, including unset/empty (`invalid SP_DATABASE_EXTERNAL_SVC_TYPE`). Use `NodePort` on Kind/local clusters, `LoadBalancer` on OpenShift/cloud. |
+| `SP_DATABASE_DEFAULT_VERSION` | `18` | No | PostgreSQL major version string | Default PostgreSQL major version used when a create request does not specify one. |
+| `SP_DATABASE_DEFAULT_STORAGE_CLASS` | _empty_ | No | any `StorageClass` name | Default `StorageClass` for CNPG cluster storage. When empty the cluster's own default applies. |
+| `SP_DATABASE_IMAGE_CATALOG` | _empty_ | No | any string | Name of a CNPG `ClusterImageCatalog` to use for image resolution. When empty, CNPG's own default image lookup applies. |
+| `SP_MONITOR_DEBOUNCE_MS` | `500` | No | integer milliseconds | Debounce window before publishing a status update. |
+| `SP_MONITOR_RESYNC_PERIOD` | `10m` | No | Go duration | Informer resync period for the status watch. |
+| `SP_MONITOR_PUBLISH_MAX_ATTEMPTS` | `5` | No | integer | Max attempts publishing a status event to NATS before giving up on that update. |
+| `SP_MONITOR_PUBLISH_TIMEOUT_SECONDS` | `30` | No | integer seconds | Per-attempt timeout for NATS publish calls. |
+
+> ℹ️ **RBAC requirement:** the agent's `ServiceAccount` must have `get`, `list`, `watch`,
+> `create`, `update`, `patch`, and `delete` on `clusters` in `postgresql.cnpg.io` within
+> `SP_DATABASE_NAMESPACE`. The reference Role in `deploy/k8s/rbac.yaml` already includes this
+> rule — apply it (or merge it into your own Role) before enabling the `database` SP, otherwise
+> all create operations will fail with `Forbidden`.
 
 ## Further reading
 

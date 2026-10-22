@@ -232,7 +232,7 @@ type DatabaseResources struct {
 	Memory DatabaseMemory `json:"memory"`
 
 	// Storage Storage allocation for each replica with units (e.g., "100GB", "2TB")
-	Storage              *DatabaseStorage       `json:"storage,omitempty"`
+	Storage              DatabaseStorage        `json:"storage"`
 	AdditionalProperties map[string]interface{} `json:"-"`
 }
 
@@ -749,11 +749,9 @@ func (a DatabaseResources) MarshalJSON() ([]byte, error) {
 		return nil, fmt.Errorf("error marshaling 'memory': %w", err)
 	}
 
-	if a.Storage != nil {
-		object["storage"], err = json.Marshal(a.Storage)
-		if err != nil {
-			return nil, fmt.Errorf("error marshaling 'storage': %w", err)
-		}
+	object["storage"], err = json.Marshal(a.Storage)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'storage': %w", err)
 	}
 
 	for fieldName, field := range a.AdditionalProperties {

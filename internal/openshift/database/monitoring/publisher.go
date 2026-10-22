@@ -62,14 +62,14 @@ func NewNATSPublisher(natsURL, providerName string, logger *slog.Logger) (*NATSP
 // Publish sends a status event as a CloudEvent to the configured NATS subject.
 func (p *NATSPublisher) Publish(ctx context.Context, event StatusEvent) error {
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("context cancelled before event construction: %w", err)
 	}
 	data, err := NewStatusCloudEvent(p.subject, p.providerName, event.InstanceID, event.Status, event.Message)
 	if err != nil {
 		return fmt.Errorf("constructing cloud event: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("context cancelled before NATS publication: %w", err)
 	}
 	if err := p.conn.Publish(p.subject, data); err != nil {
 		return fmt.Errorf("publishing status event: %w", err)

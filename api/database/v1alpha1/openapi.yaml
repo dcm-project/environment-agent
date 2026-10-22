@@ -372,6 +372,7 @@ components:
       required:
         - cpu
         - memory
+        - storage
       properties:
         cpu:
           $ref: '#/components/schemas/DatabaseCpu'
