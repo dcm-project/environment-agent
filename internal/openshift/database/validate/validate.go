@@ -11,6 +11,7 @@ import (
 	"github.com/dcm-project/environment-agent/internal/openshift/database/store"
 	"github.com/dcm-project/environment-agent/internal/openshift/database/units"
 	"k8s.io/apimachinery/pkg/api/resource"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
 type validationError struct {
@@ -19,11 +20,13 @@ type validationError struct {
 }
 
 const (
-	ptrDatabaseID = "#/spec/id"
-	ptrCPUMin     = "#/spec/resources/cpu/min"
-	ptrCPUMax     = "#/spec/resources/cpu/max"
-	ptrMemMin     = "#/spec/resources/memory/min"
-	ptrMemMax     = "#/spec/resources/memory/max"
+	ptrDatabaseID   = "#/spec/id"
+	ptrMetadataName = "#/spec/metadata/name"
+	ptrCPUMin       = "#/spec/resources/cpu/min"
+	ptrCPUMax       = "#/spec/resources/cpu/max"
+	ptrMemMin       = "#/spec/resources/memory/min"
+	ptrMemMax       = "#/spec/resources/memory/max"
+	ptrStorage      = "#/spec/resources/storage"
 )
 
 func jsonPointerEscape(s string) string {
@@ -43,6 +46,22 @@ func checkDatabaseID(id string) *validationError {
 			Pointer: ptrDatabaseID,
 		}
 	}
+	if msgs := k8svalidation.IsDNS1123Label(id); len(msgs) > 0 {
+		return &validationError{
+			Detail:  fmt.Sprintf("database ID %q is invalid: %s", id, strings.Join(msgs, "; ")),
+			Pointer: ptrDatabaseID,
+		}
+	}
+	return nil
+}
+
+func checkMetadataName(name string) *validationError {
+	if msgs := k8svalidation.IsDNS1123Label(name); len(msgs) > 0 {
+		return &validationError{
+			Detail:  fmt.Sprintf("metadata.name %q is invalid: %s", name, strings.Join(msgs, "; ")),
+			Pointer: ptrMetadataName,
+		}
+	}
 	return nil
 }
 
@@ -55,11 +74,22 @@ func checkResources(res v1alpha1.DatabaseResources) []validationError {
 			Detail:  fmt.Sprintf("invalid cpu.min %q: %v", res.Cpu.Min, minCPUErr),
 			Pointer: ptrCPUMin,
 		})
+	} else if minCPU.Sign() == -1 {
+		errs = append(errs, validationError{
+			Detail:  fmt.Sprintf("cpu.min %q must not be negative", res.Cpu.Min),
+			Pointer: ptrCPUMin,
+		})
 	}
+
 	maxCPU, maxCPUErr := resource.ParseQuantity(res.Cpu.Max)
 	if maxCPUErr != nil {
 		errs = append(errs, validationError{
 			Detail:  fmt.Sprintf("invalid cpu.max %q: %v", res.Cpu.Max, maxCPUErr),
+			Pointer: ptrCPUMax,
+		})
+	} else if maxCPU.Sign() == -1 {
+		errs = append(errs, validationError{
+			Detail:  fmt.Sprintf("cpu.max %q must not be negative", res.Cpu.Max),
 			Pointer: ptrCPUMax,
 		})
 	}
@@ -91,6 +121,14 @@ func checkResources(res v1alpha1.DatabaseResources) []validationError {
 		})
 	}
 
+	storage, storageErr := units.ConvertBytes(res.Storage)
+	if storageErr != nil || storage.String() == "0" {
+		errs = append(errs, validationError{
+			Detail:  fmt.Sprintf("invalid storage %q: %v", res.Storage, storageErr),
+			Pointer: ptrStorage,
+		})
+	}
+
 	return errs
 }
 
@@ -117,9 +155,12 @@ func checkUserLabels(labels *map[string]string) []validationError {
 	return errs
 }
 
-// ValidateCreate checks Database ID, resource ranges, memory format, and reserved labels.
+// ValidateCreate checks Database ID, metadata name, resource ranges, memory format, and reserved labels.
 func ValidateCreate(id string, spec v1alpha1.DatabaseSpec) error {
 	if err := checkDatabaseID(id); err != nil {
+		return &store.InvalidArgumentError{Message: err.Detail}
+	}
+	if err := checkMetadataName(spec.Metadata.Name); err != nil {
 		return &store.InvalidArgumentError{Message: err.Detail}
 	}
 

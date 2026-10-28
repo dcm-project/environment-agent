@@ -112,7 +112,7 @@ func minimalDatabase(name string, opts ...databaseOpt) v1alpha1.DatabaseSpec {
 				Min: "512MB",
 				Max: "2GB",
 			},
-			Storage: new("10GB"),
+			Storage: "10GB",
 		},
 		Network: &v1alpha1.DatabaseNetwork{},
 		ProviderHints: &v1alpha1.ProviderHints{
@@ -143,7 +143,7 @@ func databaseWithExternalService(name string) v1alpha1.DatabaseSpec {
 				Min: "512MB",
 				Max: "2GB",
 			},
-			Storage: new("10GB"),
+			Storage: "10GB",
 		},
 		Network: &v1alpha1.DatabaseNetwork{
 			Visibility: ptr.To(v1alpha1.External),

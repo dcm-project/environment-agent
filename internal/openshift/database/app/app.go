@@ -15,11 +15,18 @@ import (
 
 // App holds wired domain services and optional background workers.
 type App struct {
-	cfg       *config.Config
-	repo      store.DatabaseRepository
+	// required dependencies
+	cfg    *config.Config
+	logger *slog.Logger
+
+	// core services
+	repo store.DatabaseRepository
+
+	// optional services (nil when monitoring is disabled)
 	publisher *monitoring.NATSPublisher
 	monitor   *monitoring.StatusMonitor
-	logger    *slog.Logger
+
+	// infrastructure
 	lifecycle worker.AppLifecycle
 }
 

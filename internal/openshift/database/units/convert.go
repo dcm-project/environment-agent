@@ -36,13 +36,20 @@ var k8sToAPI = map[string]string{
 
 // ConvertBytes converts a bytes quantity string (e.g., "1GB") to a Kubernetes
 // resource quantity.
-func ConvertBytes(memoryStr string) (resource.Quantity, error) {
+func ConvertBytes(bytesStr string) (resource.Quantity, error) {
 	for suffix, k8sUnit := range apiToK8s {
-		if numStr, ok := strings.CutSuffix(memoryStr, suffix); ok {
-			return resource.ParseQuantity(numStr + k8sUnit)
+		if numStr, ok := strings.CutSuffix(bytesStr, suffix); ok {
+			q, err := resource.ParseQuantity(numStr + k8sUnit)
+			if err != nil {
+				return resource.Quantity{}, err
+			}
+			if q.Sign() == -1 {
+				return resource.Quantity{}, fmt.Errorf("unsupported negative resource %q", bytesStr)
+			}
+			return q, nil
 		}
 	}
-	return resource.Quantity{}, fmt.Errorf("unsupported memory unit in %q", memoryStr)
+	return resource.Quantity{}, fmt.Errorf("unsupported unit in %q", bytesStr)
 }
 
 // BytesQuantityToAPI converts a Kubernetes resource.Quantity to an API bytes

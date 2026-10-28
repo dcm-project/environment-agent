@@ -10,6 +10,7 @@ import (
 	"github.com/dcm-project/environment-agent/internal/config"
 	"github.com/dcm-project/environment-agent/internal/embedded/cluster"
 	"github.com/dcm-project/environment-agent/internal/embedded/container"
+	"github.com/dcm-project/environment-agent/internal/embedded/database"
 	"github.com/dcm-project/environment-agent/internal/embedded/network"
 	"github.com/dcm-project/environment-agent/internal/embedded/storage"
 	"github.com/dcm-project/environment-agent/internal/embedded/vm"
@@ -21,6 +22,7 @@ import (
 type Bundles struct {
 	Cluster   *cluster.Bundle
 	Container *container.Bundle
+	Database  *database.Bundle
 	Network   *network.Bundle
 	Storage   *storage.Bundle
 	VM        *vm.Bundle
@@ -39,6 +41,16 @@ func Setup(ctx context.Context, agentCfg *config.Config, logger *slog.Logger) (*
 		}
 		return nil, fmt.Errorf("container embedded setup: %w", err)
 	}
+	databaseBundle, err := database.Setup(ctx, agentCfg, logger)
+	if err != nil {
+		if clusterBundle != nil {
+			_ = clusterBundle.Close()
+		}
+		if containerBundle != nil {
+			_ = containerBundle.Close()
+		}
+		return nil, fmt.Errorf("database embedded setup: %w", err)
+	}
 	networkBundle, err := network.Setup(ctx, agentCfg, logger)
 	if err != nil {
 		if clusterBundle != nil {
@@ -46,6 +58,9 @@ func Setup(ctx context.Context, agentCfg *config.Config, logger *slog.Logger) (*
 		}
 		if containerBundle != nil {
 			_ = containerBundle.Close()
+		}
+		if databaseBundle != nil {
+			_ = databaseBundle.Close()
 		}
 		return nil, fmt.Errorf("network embedded setup: %w", err)
 	}
@@ -56,6 +71,9 @@ func Setup(ctx context.Context, agentCfg *config.Config, logger *slog.Logger) (*
 		}
 		if containerBundle != nil {
 			_ = containerBundle.Close()
+		}
+		if databaseBundle != nil {
+			_ = databaseBundle.Close()
 		}
 		if networkBundle != nil {
 			_ = networkBundle.Close()
@@ -70,6 +88,9 @@ func Setup(ctx context.Context, agentCfg *config.Config, logger *slog.Logger) (*
 		if containerBundle != nil {
 			_ = containerBundle.Close()
 		}
+		if databaseBundle != nil {
+			_ = databaseBundle.Close()
+		}
 		if networkBundle != nil {
 			_ = networkBundle.Close()
 		}
@@ -81,6 +102,7 @@ func Setup(ctx context.Context, agentCfg *config.Config, logger *slog.Logger) (*
 	return &Bundles{
 		Cluster:   clusterBundle,
 		Container: containerBundle,
+		Database:  databaseBundle,
 		Network:   networkBundle,
 		Storage:   storageBundle,
 		VM:        vmBundle,
@@ -98,6 +120,9 @@ func Handlers(b *Bundles) map[string]routing.EmbeddedHandler {
 	}
 	if b.Container != nil && b.Container.Handler != nil {
 		handlers[container.ServiceType] = b.Container.Handler
+	}
+	if b.Database != nil && b.Database.Handler != nil {
+		handlers[database.ServiceType] = b.Database.Handler
 	}
 	if b.Network != nil && b.Network.Handler != nil {
 		handlers[network.ServiceType] = b.Network.Handler
@@ -126,6 +151,9 @@ func Checkers(b *Bundles) map[string]monitor.Checker {
 	if b.Container != nil && b.Container.Checker != nil {
 		checkers[container.ServiceType] = b.Container.Checker
 	}
+	if b.Database != nil && b.Database.Checker != nil {
+		checkers[database.ServiceType] = b.Database.Checker
+	}
 	if b.Network != nil && b.Network.Checker != nil {
 		checkers[network.ServiceType] = b.Network.Checker
 	}
@@ -152,6 +180,9 @@ func (b *Bundles) Start(ctx context.Context) {
 	if b.Container != nil {
 		b.Container.Start(ctx)
 	}
+	if b.Database != nil {
+		b.Database.Start(ctx)
+	}
 	if b.Network != nil {
 		b.Network.Start(ctx)
 	}
@@ -174,6 +205,9 @@ func (b *Bundles) Close() error {
 	}
 	if b.Container != nil {
 		err = joinClose(err, b.Container.Close())
+	}
+	if b.Database != nil {
+		err = joinClose(err, b.Database.Close())
 	}
 	if b.Network != nil {
 		err = joinClose(err, b.Network.Close())

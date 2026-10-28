@@ -80,8 +80,7 @@ var _ = Describe("K8s Store", func() {
 
 			result, err := (*s).Get(context.Background(), testId)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Spec.Resources.Storage).NotTo(BeNil())
-			Expect(*result.Spec.Resources.Storage).To(Equal("10GB"))
+			Expect(result.Spec.Resources.Storage).To(Equal("10GB"))
 		})
 
 		// Get returns PENDING status when no Pod exists

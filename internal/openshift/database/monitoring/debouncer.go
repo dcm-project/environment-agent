@@ -4,6 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/dcm-project/environment-agent/api/database/v1alpha1"
 )
 
 // Debouncer coalesces rapid status change events within a time window,
@@ -24,6 +26,7 @@ type Debouncer struct {
 	wg            sync.WaitGroup
 	timers        map[string]*time.Timer
 	gens          map[string]uint64      // generation counter per instance, guards against superseded timer goroutines
+	publishGen    map[string]uint64      // gen of the most recently started in-flight publish per instance
 	pendingEvent  map[string]StatusEvent // event captured by the current pending timer, if any
 	lastPublished map[string]StatusEvent // event from the last timer that successfully fired
 	stopped       bool
@@ -42,6 +45,7 @@ func NewDebouncer(interval time.Duration, publishFn func(StatusEvent) bool) *Deb
 		publishFn:     publishFn,
 		timers:        make(map[string]*time.Timer),
 		gens:          make(map[string]uint64),
+		publishGen:    make(map[string]uint64),
 		pendingEvent:  make(map[string]StatusEvent),
 		lastPublished: make(map[string]StatusEvent),
 	}
@@ -105,14 +109,26 @@ func (d *Debouncer) Submit(instanceID string, event StatusEvent) {
 			return
 		}
 		delete(d.timers, instanceID)
-		delete(d.gens, instanceID)
 		delete(d.pendingEvent, instanceID)
+		d.publishGen[instanceID] = gen
 		d.wg.Add(1)
 		d.mu.Unlock()
 		defer d.wg.Done()
 		if d.publishFn(event) {
 			d.mu.Lock()
-			d.lastPublished[instanceID] = event
+			// Only record this as the last published event if no newer publish
+			// has started since we released the lock. This prevents a slow retry
+			// from overwriting lastPublished after a faster successor already set it.
+			if d.publishGen[instanceID] == gen {
+				if event.Status == v1alpha1.DELETED {
+					// Instance is gone; evict its tracking state so the maps don't
+					// grow without bound across the lifetime of the debouncer.
+					delete(d.lastPublished, instanceID)
+					delete(d.publishGen, instanceID)
+				} else {
+					d.lastPublished[instanceID] = event
+				}
+			}
 			d.mu.Unlock()
 		}
 	})

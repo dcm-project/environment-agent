@@ -339,6 +339,98 @@ var _ = Describe("Status Monitor", func() {
 			Expect(published[0].Status).To(Equal(v1alpha1.RUNNING))
 		})
 
+		It("should not let a slow retrying first publish overwrite lastPublished after a faster second publish", func() {
+			// Scenario: E1 fires, publishFn blocks (simulating retries). Before E1
+			// finishes, E2 is submitted and published successfully — lastPublished=E2.
+			// When E1 eventually succeeds it must NOT overwrite lastPublished with E1,
+			// otherwise the next resync with E2 would be incorrectly suppressed.
+			e1Started := make(chan struct{})
+			e1Unblock := make(chan struct{})
+
+			var mu sync.Mutex
+			var published []monitoring.StatusEvent
+
+			debounce := 20 * time.Millisecond
+			debouncer := monitoring.NewDebouncer(debounce, func(event monitoring.StatusEvent) bool {
+				if event.Status == v1alpha1.PENDING {
+					close(e1Started)
+					<-e1Unblock // block until the test unblocks it
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				published = append(published, event)
+				return true
+			})
+			defer debouncer.Stop()
+			debouncer.SetReady()
+
+			e1 := monitoring.StatusEvent{InstanceID: "inst-1", Status: v1alpha1.PENDING}
+			e2 := monitoring.StatusEvent{InstanceID: "inst-1", Status: v1alpha1.RUNNING}
+
+			// Submit E1; wait for the timer to fire and the publish goroutine to start.
+			debouncer.Submit("inst-1", e1)
+			Eventually(e1Started, 200*time.Millisecond).Should(BeClosed())
+
+			// E1's publish is now blocked. Submit E2; its timer fires and publishes.
+			debouncer.Submit("inst-1", e2)
+			time.Sleep(5 * debounce)
+
+			// Unblock E1. Its publish succeeds, but lastPublished must remain E2.
+			close(e1Unblock)
+			time.Sleep(5 * debounce)
+
+			// A resync with E2 must be suppressed (lastPublished == E2).
+			debouncer.Submit("inst-1", e2)
+			time.Sleep(5 * debounce)
+
+			mu.Lock()
+			defer mu.Unlock()
+			// E2 published first (while E1 was blocked), then E1 published after
+			// being unblocked. The resync E2 must be suppressed because lastPublished
+			// is still E2 — E1's completion must not overwrite it.
+			Expect(published).To(HaveLen(2), "resync with E2 must be suppressed because lastPublished is E2, not E1")
+			Expect(published[0].Status).To(Equal(v1alpha1.RUNNING))
+			Expect(published[1].Status).To(Equal(v1alpha1.PENDING))
+		})
+
+		It("should evict lastPublished after a successful DELETED publish so a later resync is re-queued", func() {
+			// After a database is deleted, its instance ID must be removed from
+			// lastPublished so that a subsequent resync (same DELETED event) is
+			// re-queued rather than silently dropped.
+			var mu sync.Mutex
+			var published []monitoring.StatusEvent
+
+			debounce := 30 * time.Millisecond
+			debouncer := monitoring.NewDebouncer(debounce, func(event monitoring.StatusEvent) bool {
+				mu.Lock()
+				defer mu.Unlock()
+				published = append(published, event)
+				return true
+			})
+			defer debouncer.Stop()
+			debouncer.SetReady()
+
+			deleted := monitoring.StatusEvent{InstanceID: "inst-del", Status: v1alpha1.DELETED}
+
+			// First publish: DELETED is delivered and must evict the tracking entry.
+			debouncer.Submit("inst-del", deleted)
+			time.Sleep(5 * debounce)
+
+			mu.Lock()
+			firstCount := len(published)
+			mu.Unlock()
+			Expect(firstCount).To(Equal(1), "DELETED event should be published once")
+
+			// Resync: same DELETED event must be re-queued (not suppressed).
+			debouncer.Submit("inst-del", deleted)
+			time.Sleep(5 * debounce)
+
+			mu.Lock()
+			defer mu.Unlock()
+			Expect(published).To(HaveLen(2), "resync after DELETED must be re-published, not suppressed")
+			Expect(published[1].Status).To(Equal(v1alpha1.DELETED))
+		})
+
 		It("should suppress submissions until SetReady is called", func() {
 			// Simulates informers where one cache is slower than the debounce interval:
 			// events submitted before SetReady must never be queued, so the
